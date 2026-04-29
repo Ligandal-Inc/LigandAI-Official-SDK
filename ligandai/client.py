@@ -1,0 +1,331 @@
+# Copyright © 2025 Ligandal, Inc. All rights reserved.
+"""Top-level :class:`LigandAI` and :class:`AsyncLigandAI` clients.
+
+Construction
+------------
+.. code-block:: python
+
+    # Reads LIGANDAI_API_KEY env var by default
+    client = LigandAI()
+
+    # Or pass explicitly
+    client = LigandAI(api_key="lgai_pro_AbC123...")
+
+    # Custom base URL (enterprise, on-prem, dev)
+    client = LigandAI(api_key="...", base_url="http://localhost:5050")
+
+Tier detection
+--------------
+The tier is inferred from the API-key prefix on construction — no network
+round-trip. Use ``client.feature_allowed("generate_peptides")`` to check
+client-side whether a feature is available before calling.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import httpx
+
+from ligandai._constants import (
+    API_KEY_PREFIXES,
+    DEFAULT_BASE_URL,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT_SECS,
+    FEATURE_MIN_TIER,
+    TIER_GENERATION_LIMITS,
+    TIER_GPU_SLOTS,
+    TIER_ORDER,
+    TIER_RATE_LIMITS,
+    Tier,
+)
+from ligandai._http import AsyncHTTPTransport, HTTPTransport
+from ligandai.errors import LigandAIAuthError, LigandAITierError
+from ligandai.resources.account import Account, AsyncAccount
+from ligandai.resources.bivalent import AsyncBivalent, Bivalent
+from ligandai.resources.charts import AsyncCharts, Charts
+from ligandai.resources.discovery import AsyncDiscovery, Discovery
+from ligandai.resources.diseases import AsyncDiseases, Diseases
+from ligandai.resources.jobs import AsyncJobs, Jobs
+from ligandai.resources.memory import AsyncMemory, Memory
+from ligandai.resources.peptides import AsyncPeptides, Peptides
+from ligandai.resources.programs import AsyncPrograms, Programs
+from ligandai.resources.proteins import AsyncProteins, Proteins
+from ligandai.resources.receptors import AsyncReceptors, Receptors
+from ligandai.resources.reports import AsyncReports, Reports
+from ligandai.resources.structures import AsyncStructures, Structures
+from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
+from ligandai.types import Credits, User
+
+
+def _resolve_api_key(api_key: str | None) -> str | None:
+    """Get API key from arg, then env vars."""
+    if api_key:
+        return api_key
+    return os.environ.get("LIGANDAI_API_KEY") or os.environ.get("LIGANDAI_TEST_API_KEY")
+
+
+def _detect_tier(api_key: str | None) -> Tier | None:
+    """Infer tier from key prefix without a network call.
+
+    Returns None when no key (anonymous mode) or unrecognized prefix.
+    """
+    if not api_key:
+        return None
+    for tier, prefix in API_KEY_PREFIXES.items():
+        if api_key.startswith(prefix):
+            return tier
+    return None
+
+
+def _tier_at_least(actual: Tier | None, required: Tier) -> bool:
+    """Return True if ``actual`` tier is >= ``required``.
+
+    None (anonymous) is below all tiers.
+    """
+    if actual is None:
+        return False
+    return TIER_ORDER.index(actual) >= TIER_ORDER.index(required)
+
+
+class _ClientCommon:
+    """Shared logic between sync and async clients (tier check, repr, etc.)."""
+
+    _api_key: str | None
+    _tier: Tier | None
+    _base_url: str
+
+    def __init__(self, api_key: str | None, base_url: str) -> None:
+        self._api_key = api_key
+        self._tier = _detect_tier(api_key)
+        self._base_url = base_url
+
+    @property
+    def api_key(self) -> str | None:
+        return self._api_key
+
+    @property
+    def tier(self) -> Tier | None:
+        """Tier inferred from the API key prefix.
+
+        Returns None for anonymous clients (no key).
+        """
+        return self._tier
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def rate_limit_per_minute(self) -> int | None:
+        return TIER_RATE_LIMITS.get(self._tier) if self._tier else None
+
+    @property
+    def max_concurrent_gpu_slots(self) -> int | None:
+        return TIER_GPU_SLOTS.get(self._tier) if self._tier else None
+
+    @property
+    def max_peptides_per_generation(self) -> int | None:
+        return TIER_GENERATION_LIMITS.get(self._tier) if self._tier else None
+
+    def feature_allowed(self, feature: str) -> bool:
+        """Check whether the current tier can call a named feature."""
+        if self._tier == "superadmin":
+            return True
+        required = FEATURE_MIN_TIER.get(feature)
+        if required is None:
+            # Unknown feature — assume allowed; server will gate.
+            return True
+        return _tier_at_least(self._tier, required)
+
+    def _require_feature(self, feature: str) -> None:
+        """Raise LigandAITierError client-side if the feature is unavailable."""
+        if self.feature_allowed(feature):
+            return
+        required = FEATURE_MIN_TIER.get(feature, "pro")
+        raise LigandAITierError(
+            f"Feature '{feature}' requires {required} tier or higher.",
+            current_tier=self._tier,
+            required_tier=required,
+        )
+
+    def __repr__(self) -> str:
+        tier = self._tier or "anonymous"
+        return f"{type(self).__name__}(tier={tier!r}, base_url={self._base_url!r})"
+
+
+class LigandAI(_ClientCommon):
+    """Synchronous LIGANDAI client.
+
+    Parameters
+    ----------
+    api_key
+        API key prefixed with ``lgai_<tier>_*``. Defaults to env var
+        ``LIGANDAI_API_KEY`` (or ``LIGANDAI_TEST_API_KEY`` for tests).
+    base_url
+        Override the default ``https://api.ligandai.com``. Useful for dev
+        (``http://localhost:5050``) or on-prem deployments.
+    timeout
+        Per-request timeout in seconds (default 60).
+    max_retries
+        Retries on 429/5xx/network errors (default 5).
+    impersonate_user
+        Superadmin-only. Sets ``X-Impersonate-User`` header. Server-gated to
+        localhost / VPN subnet 10.200.200.0/24.
+    http_client
+        Inject a pre-configured :class:`httpx.Client` (e.g. for custom proxies,
+        certificate auth). Optional.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT_SECS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        impersonate_user: str | None = None,
+        http_client: httpx.Client | None = None,
+    ) -> None:
+        resolved_key = _resolve_api_key(api_key)
+        super().__init__(resolved_key, base_url)
+
+        self._transport = HTTPTransport(
+            api_key=resolved_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            impersonate_user=impersonate_user,
+            client=http_client,
+        )
+
+        # Resource namespaces
+        self.account: Account = Account(self._transport)
+        self.bivalent: Bivalent = Bivalent(self._transport, client=self)
+        self.charts: Charts = Charts(self._transport)
+        self.diseases: Diseases = Diseases(self._transport)
+        self.discovery: Discovery = Discovery(self._transport, client=self)
+        self.jobs: Jobs = Jobs(self._transport)
+        self.memory: Memory = Memory(self._transport)
+        self.peptides: Peptides = Peptides(self._transport, client=self)
+        self.programs: Programs = Programs(self._transport)
+        self.proteins: Proteins = Proteins(self._transport)
+        self.receptors: Receptors = Receptors(self._transport)
+        self.reports: Reports = Reports(self._transport)
+        self.structures: Structures = Structures(self._transport)
+        self.synthesis: Synthesis = Synthesis(self._transport)
+
+        # Cached on-demand
+        self._user: User | None = None
+        self._credits: Credits | None = None
+
+    @property
+    def transport(self) -> HTTPTransport:
+        """Underlying HTTP transport — use this to call endpoints not yet
+        wrapped by a typed namespace."""
+        return self._transport
+
+    @property
+    def user(self) -> User:
+        """Currently authenticated user. Cached on first access."""
+        if self._user is None:
+            self._user = self.account.me()
+        return self._user
+
+    @property
+    def credits(self) -> int:
+        """Current credit balance. Lightweight refresh on each access."""
+        c = self.account.credits()
+        self._credits = c
+        return c.balance
+
+    def close(self) -> None:
+        self._transport.close()
+
+    def __enter__(self) -> LigandAI:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def health(self) -> dict[str, Any]:
+        """Hit ``GET /api/healthz`` — useful for connectivity checks."""
+        return self._transport.request("GET", "/api/healthz") or {}
+
+
+class AsyncLigandAI(_ClientCommon):
+    """Asynchronous LIGANDAI client.
+
+    Use as an async context manager:
+
+    .. code-block:: python
+
+        async with AsyncLigandAI() as client:
+            user = await client.account.me()
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT_SECS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        impersonate_user: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        resolved_key = _resolve_api_key(api_key)
+        super().__init__(resolved_key, base_url)
+
+        self._transport = AsyncHTTPTransport(
+            api_key=resolved_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            impersonate_user=impersonate_user,
+            client=http_client,
+        )
+
+        self.account: AsyncAccount = AsyncAccount(self._transport)
+        self.bivalent: AsyncBivalent = AsyncBivalent(self._transport, client=self)
+        self.charts: AsyncCharts = AsyncCharts(self._transport)
+        self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
+        self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
+        self.jobs: AsyncJobs = AsyncJobs(self._transport)
+        self.memory: AsyncMemory = AsyncMemory(self._transport)
+        self.peptides: AsyncPeptides = AsyncPeptides(self._transport, client=self)
+        self.programs: AsyncPrograms = AsyncPrograms(self._transport)
+        self.proteins: AsyncProteins = AsyncProteins(self._transport)
+        self.receptors: AsyncReceptors = AsyncReceptors(self._transport)
+        self.reports: AsyncReports = AsyncReports(self._transport)
+        self.structures: AsyncStructures = AsyncStructures(self._transport)
+        self.synthesis: AsyncSynthesis = AsyncSynthesis(self._transport)
+
+    @property
+    def transport(self) -> AsyncHTTPTransport:
+        return self._transport
+
+    async def close(self) -> None:
+        await self._transport.close()
+
+    async def __aenter__(self) -> AsyncLigandAI:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
+    async def health(self) -> dict[str, Any]:
+        return await self._transport.request("GET", "/api/healthz") or {}
+
+    async def me(self) -> User:
+        return await self.account.me()
+
+
+def _check_authenticated(client: _ClientCommon) -> None:
+    """Raise if the client has no API key."""
+    if not client.api_key:
+        raise LigandAIAuthError(
+            "This operation requires an API key. Pass api_key=... to the "
+            "constructor or set the LIGANDAI_API_KEY env var."
+        )

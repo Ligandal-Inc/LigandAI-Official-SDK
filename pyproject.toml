@@ -1,0 +1,172 @@
+# Copyright © 2025 Ligandal, Inc. All rights reserved.
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ligandai"
+version = "0.1.0"
+description = "Official Python SDK for the LIGANDAI® platform — peptide design, structure prediction, scoring, and discovery."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Andre Watson", email = "dre@ligandal.com" },
+]
+keywords = [
+    "ligandai",
+    "ligandforge",
+    "deltaforge",
+    "peptide-design",
+    "protein-folding",
+    "boltz2",
+    "drug-discovery",
+    "computational-biology",
+    "bioinformatics",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.0,<3.0",
+    "tenacity>=8.0,<10.0",
+    "typing-extensions>=4.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-httpx>=0.30",
+    "pytest-cov>=4.1",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "respx>=0.21",
+]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-autoapi>=3.0",
+    "sphinx-rtd-theme>=2.0",
+    "myst-parser>=2.0",
+]
+
+[project.urls]
+Homepage = "https://ligandai.com"
+Documentation = "https://docs.ligandai.com"
+Repository = "https://github.com/ligandal/ligandai-python-sdk"
+Issues = "https://github.com/ligandal/ligandai-python-sdk/issues"
+Changelog = "https://github.com/ligandal/ligandai-python-sdk/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ligandai"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/ligandai",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["docs/_build", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",  # pyflakes/pycodestyle
+    "I",            # isort
+    "B",            # bugbear
+    "UP",           # pyupgrade
+    "C4",           # comprehensions
+    "SIM",          # simplify
+    "RUF",          # ruff-specific
+]
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # function calls in defaults — pydantic Field()
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]
+"examples/**" = ["E501"]
+# These resources intentionally use typing.List[...] (not list[...]) to dodge
+# a mypy quirk: methods named `list()` shadow the builtin in their own class.
+"ligandai/resources/memory.py" = ["UP006", "UP035"]
+"ligandai/resources/programs.py" = ["UP006", "UP035"]
+"ligandai/resources/receptors.py" = ["UP006", "UP035"]
+# Bivalent's _linker_dump uses `l` for parallel structure with _target_dump(t).
+"ligandai/resources/bivalent.py" = ["E741"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_no_return = true
+plugins = ["pydantic.mypy"]
+# Note: not using strict=true because resource methods named `list`/`get` shadow
+# builtins in their own class scope — mypy then misreads `list[X]` as subscripting
+# the method. This is a known limitation; we use selective options instead.
+
+[[tool.mypy.overrides]]
+module = "ligandai.resources.*"
+# Resources intentionally name methods `list`, `get`, etc.; mypy gets confused by
+# `list[T]` annotations in the same class. Disable disallow-any-generics for
+# resources only.
+disallow_any_generics = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires LIGANDAI_TEST_API_KEY env var (deselect with '-m \"not integration\"')",
+    "slow: tests that take >5s",
+]
+
+[tool.coverage.run]
+source = ["ligandai"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@overload",
+]
