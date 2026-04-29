@@ -1,0 +1,231 @@
+# LIGANDAI Python SDK
+
+Official Python SDK for the [LIGANDAI](https://ligandai.com) platform — peptide
+design, structure prediction, scoring, and discovery.
+
+```bash
+pip install ligandai
+```
+
+```python
+from ligandai import LigandAI
+
+client = LigandAI(api_key="lgai_pro_...")
+print(f"Tier: {client.tier}, Credits: {client.credits}")
+
+# Find tissue-specific surface markers
+markers = client.discovery.tissue_markers(target_tissues=["Liver"], top_n=2000)
+
+# Resolve a structure for the top marker
+gene = markers.top[0].gene
+structure = client.structures.get(gene)
+analysis = client.structures.analyze(gene, analysis_depth="full")
+
+# Generate peptides targeting the recommended pocket
+job = client.peptides.generate(
+    gene=gene,
+    num_peptides=300,
+    target_residues=[analysis.recommended_pocket] if analysis.recommended_pocket else None,
+    targeting_strategy="pocket_targeted",
+    auto_fold=True,
+    top_n_fold=25,
+)
+
+# Wait for completion (generation + auto-fold)
+result = job.wait(timeout=1800)
+print(f"Got {len(result.peptides)} peptides, top iPSAE: {result.peptides[0].ipsae}")
+```
+
+## Authentication
+
+```python
+# 1. Pass explicitly
+client = LigandAI(api_key="lgai_pro_...")
+
+# 2. Read from env var (preferred for prod)
+# $ export LIGANDAI_API_KEY=lgai_pro_...
+client = LigandAI()
+
+# 3. Custom base URL (dev / on-prem / enterprise)
+client = LigandAI(api_key="...", base_url="http://localhost:5050")
+```
+
+API keys carry a **tier prefix**:
+
+| Prefix | Tier | What it can do |
+|---|---|---|
+| `lgai_free_*` | free | search, view structures, get job status |
+| `lgai_edu_*`  | academia | + generate, fold, score, glycosylation |
+| `lgai_pro_*`  | pro | + bivalent, transport vasculome (no batch ops) |
+| `lgai_ent_*`  | enterprise | everything + batch operations + priority queue |
+| `lgai_sa_*`   | superadmin | all features (internal) |
+
+The client detects the tier from the prefix at construction — no network call.
+
+```python
+client.tier                     # "pro"
+client.credits                  # int
+client.feature_allowed("...")   # bool
+client.max_peptides_per_generation
+client.rate_limit_per_minute
+```
+
+When a method requires a higher tier than the key carries, it raises
+`LigandAITierError` **client-side**, before sending the request.
+
+## Resource Namespaces
+
+| Namespace | Endpoints | What it does |
+|---|---|---|
+| `client.account`       | `/api/auth/user`, `/api/user-credits`, ... | profile, credits, tier limits |
+| `client.receptors`     | `/api/receptordb/*` | search, browse, download PDBs |
+| `client.structures`    | `/api/structure/*`, `/api/gene-resolver/*` | gene → PDB / AlphaFold |
+| `client.proteins`      | `/api/protein-info/*`, `/api/protein-variants/*` | UniProt info, variants, custom PDBs |
+| `client.discovery`     | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*` | tissue markers, scRNA, GEO import |
+| `client.diseases`      | `/api/disease-viewer/*` | disease search, mutations |
+| `client.peptides`      | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/binder-scoring/*` | generate, fold, score |
+| `client.bivalent`      | `/api/ligandforge/bivalent/*` | bispecific design (pro+) |
+| `client.synthesis`     | `/api/synthesis-checkout/*`, `/api/adaptyv/*` | quote, cart, order |
+| `client.memory`        | `/api/episodic-memory/*` | memory search & save |
+| `client.programs`      | `/api/ptf/programs/*`, `/api/ptf/sessions/*` | programs, projects, sessions |
+| `client.charts`        | `/api/charts/*` | matplotlib chart generation |
+| `client.reports`       | `/api/reports/*` | PDF report generation |
+| `client.jobs`          | `/api/jobs/*` | list, cancel, stream |
+
+## Long-Running Jobs
+
+Generation, folding, and scoring submit GPU work and return a `Job`:
+
+```python
+job = client.peptides.generate(gene="EGFR", num_peptides=300)
+job.id              # str
+job.status          # "queued" | "running" | "complete" | "failed"
+job.progress        # 0-100 or None
+job.estimated_credits
+
+# Block until done
+result = job.wait(timeout=1800, poll_interval=2.0)
+
+# Or stream live progress events (SSE)
+for event in job.stream():
+    print(f"{event.stage}: {event.message} ({event.progress})")
+
+# Cancel
+job.cancel()
+```
+
+Async equivalents:
+
+```python
+import asyncio
+from ligandai import AsyncLigandAI
+
+async def design_for_genes(genes):
+    async with AsyncLigandAI() as client:
+        jobs = await asyncio.gather(*[
+            client.peptides.generate(gene=g, num_peptides=300) for g in genes
+        ])
+        results = await asyncio.gather(*[j.wait() for j in jobs])
+        return results
+
+results = asyncio.run(design_for_genes(["EGFR", "HER2", "KIT"]))
+```
+
+## Errors
+
+```python
+from ligandai import (
+    LigandAIError,           # base
+    LigandAIAuthError,       # 401 — invalid/expired/revoked key
+    LigandAITierError,       # 403 — feature requires higher tier
+    LigandAIRateLimitError,  # 429 — rate limit
+    LigandAICreditError,     # 402 — insufficient credits
+    LigandAINotFoundError,   # 404
+    LigandAIServerError,     # 5xx (auto-retried)
+    LigandAIValidationError, # 400/422
+)
+
+try:
+    job = client.peptides.generate(gene="EGFR", num_peptides=10000)
+except LigandAITierError as e:
+    print(f"Need {e.required_tier}, you have {e.current_tier}")
+except LigandAICreditError as e:
+    print(f"Need {e.required} credits, have {e.available}")
+```
+
+## Retry & Rate Limiting
+
+The SDK automatically retries on `429`, `5xx`, and transient network errors
+with exponential backoff (configurable via `max_retries=`). It also respects
+`Retry-After` and `X-RateLimit-Reset` headers.
+
+Per-tier rate limits:
+
+| Tier | req/min |
+|---|---|
+| free | 10 |
+| academia | 30 |
+| pro | 60 |
+| enterprise | 300 |
+
+## ReceptorDB-restricted Client
+
+For receptordb.com users, a thinner client exposes only browse / search /
+download (no API key required for read endpoints):
+
+```python
+from ligandai import ReceptorDBClient
+
+client = ReceptorDBClient()
+hits = client.search("EGFR")
+client.download_pdb(hits[0].complex_id, "egfr.pdb")
+
+# With API key — fold/generate
+client = ReceptorDBClient(api_key="lgai_basic_...")
+job = client.fold(sequences=["MAEEPQSD..."], target_gene="EGFR")
+```
+
+## Typed Models
+
+All request/response shapes are pydantic models. IDE autocompletion works
+out of the box, including for nested fields:
+
+```python
+from ligandai import BivalentTarget, LinkerConfig
+
+session = client.bivalent.start(
+    target1=BivalentTarget(gene="PDCD1", chain="A"),
+    target2=BivalentTarget(gene="CD274", chain="A"),
+    linker=LinkerConfig(position="C", length_min=8, length_max=20),
+    binder_length_min=15,
+    binder_length_max=40,
+    num_designs=200,
+)
+print(session.id, session.status)
+```
+
+## Examples
+
+See `examples/` for complete worked demos:
+
+- `examples/01_quickstart.py` — auth, tier check, simple search
+- `examples/02_end_to_end.py` — discovery → structure → generate → fold → score → cart
+- `examples/03_bivalent.py` — PD-1 / PD-L1 bispecific design
+- `examples/04_async_parallel.py` — design for many genes concurrently
+- `examples/05_custom_variant.py` — fold a mutation, save as variant, regenerate
+- `examples/06_streaming.py` — live SSE progress
+
+## Development
+
+```bash
+git clone https://github.com/ligandal/ligandai-python-sdk
+cd ligandai-python-sdk
+pip install -e ".[dev]"
+pytest
+mypy ligandai/
+ruff check ligandai/
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
