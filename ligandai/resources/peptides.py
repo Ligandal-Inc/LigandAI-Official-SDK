@@ -198,16 +198,201 @@ def _first_target_gene(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _set_if_missing(out: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None and out.get(key) is None:
+        out[key] = value
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _flatten_peptide(raw: dict[str, Any], gene: str | None = None) -> dict[str, Any]:
+    """Promote quality_scores sub-fields to top level for Peptide mapping."""
+    if not isinstance(raw, dict):
+        return {"sequence": str(raw), **({"targetGene": gene} if gene else {})}
+    qs = raw.get("quality_scores") or {}
+    out = dict(raw)
+    if gene and not out.get("targetGene") and not out.get("target_gene"):
+        out["targetGene"] = gene
+
+    _set_if_missing(out, "ligandiq", _first_present(raw.get("ligandiq_score"), qs.get("ligandiq_score")))
+    _set_if_missing(out, "predictedIpsae", _first_present(raw.get("predicted_ipsae"), qs.get("predicted_ipsae")))
+    predicted_iptm = _first_present(
+        raw.get("predicted_iptm"),
+        raw.get("pred_iptm"),
+        raw.get("ligandiq_pred_iptm"),
+        qs.get("predicted_iptm"),
+        qs.get("pred_iptm"),
+        qs.get("ligandiq_pred_iptm"),
+    )
+    legacy_predicted_ptm = _first_present(raw.get("predicted_ptm"), qs.get("predicted_ptm"))
+    # Legacy production LigandIQ payloads normalize Modal's pred_iptm head into
+    # quality_scores.predicted_ptm. Expose it only as predicted_iptm; current
+    # LigandIQ does not emit a distinct predicted pTM head.
+    if predicted_iptm is None and (
+        raw.get("ligandiq_score") is not None
+        or qs.get("ligandiq_score") is not None
+        or raw.get("predicted_ipsae") is not None
+        or qs.get("predicted_ipsae") is not None
+    ):
+        predicted_iptm = legacy_predicted_ptm
+    out.pop("predicted_ptm", None)
+    out.pop("predictedPtm", None)
+    _set_if_missing(out, "predictedIptm", predicted_iptm)
+    _set_if_missing(out, "predictedPlddt", _first_present(raw.get("predicted_plddt"), qs.get("predicted_plddt")))
+    _set_if_missing(out, "binderProb", _first_present(raw.get("binder_prob"), qs.get("binder_prob")))
+
+    # Stability / immuno (pro+ tier, may be None)
+    if not out.get("stability_grade") and raw.get("stability_scores"):
+        out["stabilityGrade"] = raw["stability_scores"].get("stability_grade")
+    if not out.get("immunogenicity_score") and raw.get("immuno_scores"):
+        out["immunogenicityScore"] = raw["immuno_scores"].get("immunogenicityScore")
+    return out
+
+
 def _extract_peptides(payload: dict[str, Any]) -> list[dict[str, Any]]:
     pep = payload.get("peptides")
     if isinstance(pep, list):
-        return list(pep)
+        return [_flatten_peptide(p) for p in pep]
+    # Dict keyed by gene (session detail format) → flatten all genes
+    if isinstance(pep, dict):
+        flat: list[dict[str, Any]] = []
+        for gene, gene_peps in pep.items():
+            if isinstance(gene_peps, list):
+                flat.extend(_flatten_peptide(p, gene=str(gene)) for p in gene_peps)
+        return flat
     nested = payload.get("results")
     if isinstance(nested, dict) and isinstance(nested.get("peptides"), list):
-        return list(nested["peptides"])
+        return [_flatten_peptide(p) for p in nested["peptides"]]
     if isinstance(nested, list):
-        return list(nested)
+        return [_flatten_peptide(p) for p in nested]
     return []
+
+
+def _has_generation_peptides(payload: dict[str, Any]) -> bool:
+    return bool(_extract_peptides(payload))
+
+
+def _unwrap_session_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the session object from the common session endpoint envelopes."""
+    if not isinstance(payload, dict):
+        return {}
+    session = payload.get("session")
+    if isinstance(session, dict):
+        return session
+    data = payload.get("data")
+    if isinstance(data, dict):
+        nested = data.get("session")
+        if isinstance(nested, dict):
+            return nested
+        if "peptides" in data:
+            return data
+    return payload
+
+
+def _session_id_from_payload(payload: dict[str, Any]) -> str | None:
+    sid = (
+        payload.get("sessionId")
+        or payload.get("session_id")
+        or payload.get("sessionID")
+        or payload.get("id")
+    )
+    return sid if isinstance(sid, str) else None
+
+
+def _generation_result_from_session(
+    payload: dict[str, Any],
+    session_response: dict[str, Any],
+    *,
+    fallback_session_id: str | None,
+    fallback_gene: str | None,
+) -> dict[str, Any]:
+    session = _unwrap_session_response(session_response)
+    result = dict(payload)
+
+    session_id = (
+        _session_id_from_payload(result)
+        or _session_id_from_payload(session)
+        or fallback_session_id
+    )
+    if session_id:
+        result.setdefault("sessionId", session_id)
+        result.setdefault("jobId", session_id)
+
+    gene = (
+        result.get("gene")
+        or session.get("gene")
+        or _first_target_gene(result)
+        or _first_target_gene(session)
+        or fallback_gene
+    )
+    if gene:
+        result.setdefault("gene", gene)
+
+    if not _has_generation_peptides(result) and session.get("peptides") is not None:
+        result["peptides"] = session["peptides"]
+
+    if result.get("totalGenerated") is None:
+        result["totalGenerated"] = (
+            session.get("totalGenerated")
+            or session.get("total_generated")
+            or session.get("total")
+            or len(_extract_peptides(result))
+            or None
+        )
+
+    if result.get("parameters") is None:
+        result["parameters"] = session.get("parameters") or session.get("config")
+
+    return result
+
+
+def _load_generation_result(
+    transport: Any,
+    info: Any,
+    *,
+    fallback_session_id: str | None,
+    fallback_gene: str | None,
+) -> dict[str, Any] | None:
+    payload = dict(info.result or {})
+    if _has_generation_peptides(payload):
+        return payload
+    session_id = _session_id_from_payload(payload) or fallback_session_id or getattr(info, "id", None)
+    if not session_id:
+        return payload
+    session_response = transport.request("GET", f"/api/ptf/sessions/{session_id}") or {}
+    return _generation_result_from_session(
+        payload,
+        session_response,
+        fallback_session_id=session_id,
+        fallback_gene=fallback_gene,
+    )
+
+
+async def _aload_generation_result(
+    transport: Any,
+    info: Any,
+    *,
+    fallback_session_id: str | None,
+    fallback_gene: str | None,
+) -> dict[str, Any] | None:
+    payload = dict(info.result or {})
+    if _has_generation_peptides(payload):
+        return payload
+    session_id = _session_id_from_payload(payload) or fallback_session_id or getattr(info, "id", None)
+    if not session_id:
+        return payload
+    session_response = await transport.request("GET", f"/api/ptf/sessions/{session_id}") or {}
+    return _generation_result_from_session(
+        payload,
+        session_response,
+        fallback_session_id=session_id,
+        fallback_gene=fallback_gene,
+    )
 
 
 # -- Sync resource ----------------------------------------------------------
@@ -268,6 +453,12 @@ class Peptides(Resource):
             cancel_path="/api/ptf/parallel/{job_id}/cancel",
             sse_path="/api/ptf/parallel/{job_id}/stream",
             initial={"id": job_id, "type": "generation", "status": "queued", **payload},
+            result_loader=lambda info: _load_generation_result(
+                self._transport,
+                info,
+                fallback_session_id=job_id,
+                fallback_gene=gene,
+            ),
         )
 
     def fold(
@@ -372,6 +563,12 @@ class Peptides(Resource):
             cancel_path="/api/ptf/parallel/{job_id}/cancel",
             sse_path="/api/ptf/parallel/{job_id}/stream",
             initial={"id": job_id, "type": "generation", "status": "running", **payload},
+            result_loader=lambda info: _load_generation_result(
+                self._transport,
+                info,
+                fallback_session_id=session_id,
+                fallback_gene=gene,
+            ),
         )
 
     def score_complex(
@@ -577,6 +774,12 @@ class AsyncPeptides(AsyncResource):
             cancel_path="/api/ptf/parallel/{job_id}/cancel",
             sse_path="/api/ptf/parallel/{job_id}/stream",
             initial={"id": job_id, "type": "generation", "status": "queued", **payload},
+            result_loader=lambda info: _aload_generation_result(
+                self._transport,
+                info,
+                fallback_session_id=job_id,
+                fallback_gene=gene,
+            ),
         )
 
     async def fold(
@@ -678,6 +881,12 @@ class AsyncPeptides(AsyncResource):
             cancel_path="/api/ptf/parallel/{job_id}/cancel",
             sse_path="/api/ptf/parallel/{job_id}/stream",
             initial={"id": job_id, "type": "generation", "status": "running", **payload},
+            result_loader=lambda info: _aload_generation_result(
+                self._transport,
+                info,
+                fallback_session_id=session_id,
+                fallback_gene=gene,
+            ),
         )
 
     async def score_complex(

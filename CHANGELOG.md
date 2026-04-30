@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] - 2026-04-30
+
+### Fixed
+
+- Treat legacy LigandIQ `quality_scores.predicted_ptm` as `Peptide.predicted_iptm`
+  only. The current LigandIQ quality head does not emit a distinct predicted pTM
+  value, so `Peptide.predicted_ptm` now remains unset for that legacy alias.
+
+## [0.1.7] - 2026-04-30
+
+### Fixed
+
+- Expose legacy LigandIQ `quality_scores.predicted_ptm` values as
+  `Peptide.predicted_iptm` when explicit `predicted_iptm` is absent, matching
+  production where Modal `pred_iptm` was normalized to `predicted_ptm`.
+
+## [0.1.6] - 2026-04-30
+
+### Fixed
+
+- Treat generation-only PTF `generation_complete` jobs as successful terminal
+  SDK jobs and hydrate sparse status payloads from `/api/ptf/sessions/{id}`.
+- Parse generation-only session peptide dictionaries keyed by gene.
+- Expose generation-time `predicted_ptm` and `predicted_plddt` separately from
+  folded `iptm`/`plddt`; do not map `predicted_ptm` into `predicted_iptm`.
+
 ## [0.1.0] - 2025
 
 ### Added
