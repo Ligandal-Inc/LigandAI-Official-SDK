@@ -102,6 +102,63 @@ def test_discovery_compare_groups(httpx_mock: HTTPXMock, client: LigandAI) -> No
     assert res.target_group == "Liver"
 
 
+# -- Peptides ---------------------------------------------------------------
+
+
+def test_peptide_generation_wait_hydrates_generation_complete_session(
+    httpx_mock: HTTPXMock, client: LigandAI
+) -> None:
+    session_id = "session_parallel_1777514048301_06885edc"
+    httpx_mock.add_response(
+        url=f"{BASE}/api/ptf/parallel/generate",
+        method="POST",
+        json={"sessionId": session_id, "status": "queued"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/ptf/parallel/{session_id}/status",
+        json={"id": session_id, "status": "generation_complete", "progress": 100},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/ptf/sessions/{session_id}",
+        json={
+            "id": session_id,
+            "gene": "IL31",
+            "peptides": {
+                "IL31": [
+                    {
+                        "sequence": "KHIIQIDRNQRPINFTIWRAPHVGRGIEETEEILTSAVTWANAISNGFRWQP",
+                        "quality_scores": {
+                            "ligandiq_score": 0.46,
+                            "predicted_ptm": 0.9204,
+                            "predicted_ipsae": 0.5367,
+                            "predicted_plddt": 0.8123,
+                        },
+                    }
+                ]
+            },
+        },
+    )
+
+    job = client.peptides.generate(gene="IL31", num_peptides=1, auto_fold=False)
+    assert job.session_id == session_id
+
+    result = job.wait(timeout=5, poll_interval=0.01)
+
+    assert result.session_id == session_id
+    assert result.gene == "IL31"
+    assert result.total_generated == 1
+    assert len(result.peptides) == 1
+    peptide = result.peptides[0]
+    assert peptide.target_gene == "IL31"
+    assert peptide.ligandiq == 0.46
+    assert peptide.predicted_ipsae == 0.5367
+    assert peptide.predicted_plddt == 0.8123
+    # Current production quality_scores uses predicted_ptm as a legacy name for
+    # LigandIQ's pred_iptm head; expose it only as predicted_iptm.
+    assert peptide.predicted_iptm == 0.9204
+    assert peptide.predicted_ptm is None
+
+
 # -- Tier gating -----------------------------------------------------------
 
 
