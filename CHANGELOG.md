@@ -7,7 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.2.0] - 2026-05-01
 
-### Added
+### Added — paid-only `/api/v1/peptides/*` surface (LIGANDAI_ALPHA_V2-afspr)
+
+- **`Peptides.by_gene(...)`** and **`AsyncPeptides.by_gene(...)`** — gene-level
+  peptide aggregation across all of the caller's sessions and programs. Wraps
+  `GET /api/v1/peptides/by-gene`. Returns `list[GeneSummary]` with folded
+  counts (total / great+ / elite), best iPSAE / best DeltaForge dG,
+  session/program coverage, last activity timestamp. Filters: `genes=`,
+  `min_ipsae=`, `program_id=`, `project_id=`, `since=`, paginated.
+- **`Peptides.list(gene, ...)`** and **`AsyncPeptides.list(...)`** — list the
+  actual peptide rows for a gene (peptides, not just counts). Wraps
+  `GET /api/ptf/generated-peptides/by-gene/:gene`.
+- **`Peptides.get(peptide_id, include=[...])`** and async equivalent — single-
+  peptide detail keyed by `ptf_fold_results.id`. Default thin response;
+  `include=["pocket_features"]` adds the per-residue 48-dim pocket feature
+  matrix and metadata; `include=["interface"]` adds per-receptor-chain
+  iPSAE/ipAE/pdockq2 + post-fold disulfide geometry; `include=["pdb"]` adds
+  the full PDB content (5–50 KB). Unknown include values raise `ValueError`
+  client-side and HTTP 400 server-side.
+
+### Added — types
+
+- **`GeneSummary`** Pydantic model in `ligandai.types` (mirrors server
+  `AggregatePeptidesByGeneRow`).
+- **`PeptideDetail`** Pydantic model in `ligandai.types` (mirrors the server
+  `GET /api/v1/peptides/:id` response, with optional heavy-field properties).
+- **`Peptide`** is now exported at the package top level (was previously only
+  importable via `ligandai.types`).
+
+### Added — paid-tier validation
+
+- **`LigandAIPaidTierRequired`** exception (subclass of `LigandAIError`).
+  Raised when the API key resolves to a tier (`free` / `academia`) that does
+  not include API access.
+  - Client-side fail-fast: `Peptides.by_gene/list/get` raise this immediately
+    on free-tier keys (no network round-trip).
+  - Server-side: the `/api/v1/peptides/*` middleware returns
+    `HTTP 402 Payment Required` with `{"error":"upgrade_required",...}`. The
+    SDK error mapper routes that response to `LigandAIPaidTierRequired`
+    (instead of `LigandAICreditError`), so callers can `except` the right
+    subclass.
+  - This is per the policy in
+    `/home/dre/.claude/projects/-home-dre/memory/feedback_api_paid_only.md`:
+    free users cannot use the SDK / `/api/v1/*` — those routes are
+    monetized; the web UI is the free-tier acquisition channel.
+
+### Changed — cysteine controls promoted from `extra` to typed kwargs (LIGANDAI_ALPHA_V2-lgxh7)
+
+The previous SDK accepted cysteine / cyclic controls only via `extra={...}`
+passthrough. They are now first-class typed kwargs on `Peptides.generate()`:
+
+- `cysteine_mode` — `"allow_all"` / `"disulfide_only"` (default) / `"exclude_all"`
+- `cyclic_mode` — `"none"` / `"lactam"` / `"disulfide"` / `"head_tail_contact"`
+- `cyclic_strength`, `strict_recombinant`, `dual_fold_viz`
+
+(See the existing v0.2.0 entries below for the full kwargs list — this entry
+documents the typing migration policy.)
+
+### Deprecated
+
+- Passing `cys_mode`, `cysteine_mode`, `cys_gate`, `cyclic_mode`, `cyclic_strength`,
+  `strict_recombinant`, `dual_fold_viz`, or `disulfide_constraints` via `extra={...}`
+  emits `DeprecationWarning` as of v0.2.0. The `extra` path still works for
+  backward compatibility but **will be hard-rejected in v0.3.0**. Migrate to the
+  typed kwargs.
+
+### Added — guidance kwargs (continued)
 
 - **`immuno_modules`** parameter on `Peptides.generate()` and `AsyncPeptides.generate()`:
   dict of booleans enabling specific MHC-I/II, BCR, TAP, TCR, and humanness epitope

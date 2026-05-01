@@ -41,12 +41,17 @@ from ligandai._constants import (
     Tier,
 )
 from ligandai._http import AsyncHTTPTransport, HTTPTransport
-from ligandai.errors import LigandAIAuthError, LigandAITierError
+from ligandai.errors import (
+    LigandAIAuthError,
+    LigandAIPaidTierRequired,
+    LigandAITierError,
+)
 from ligandai.resources.account import Account, AsyncAccount
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
+from ligandai.resources.msa import AsyncMSA, MSA
 from ligandai.resources.jobs import AsyncJobs, Jobs
 from ligandai.resources.memory import AsyncMemory, Memory
 from ligandai.resources.peptides import AsyncPeptides, Peptides
@@ -150,6 +155,39 @@ class _ClientCommon:
             required_tier=required,
         )
 
+    def _require_paid_tier(self) -> None:
+        """Fail fast if the API key resolves to a non-paid tier.
+
+        Used by the v0.2.0 ``/api/v1/peptides/*`` surface, which is paid-only
+        per platform policy. This raises :class:`LigandAIPaidTierRequired`
+        before the request even reaches the wire — friendlier than waiting
+        for the server's 402 response, especially when the tier can be read
+        from the key prefix without a network call.
+
+        When the tier cannot be determined locally (no key, unknown prefix),
+        we let the request proceed and surface the server's 402 cleanly via
+        the response error mapper.
+        """
+        # Locally inferred tier — None means anonymous OR unrecognized prefix;
+        # both should fail to use the paid surface.
+        if self._tier is None:
+            # Anonymous / unknown prefix: don't pre-emptively reject (the user
+            # may have set a base_url to a custom deployment that uses
+            # different prefixes); let the server's 402 surface through the
+            # error mapper.
+            return
+        if self._tier in ("pro", "enterprise", "superadmin"):
+            return
+        raise LigandAIPaidTierRequired(
+            (
+                "This SDK method requires a paid subscription "
+                f"(your key resolves to '{self._tier}' tier). "
+                "Visit https://ligandai.com/pricing to upgrade."
+            ),
+            current_tier=self._tier,
+            required_tier="pro",
+        )
+
     def __repr__(self) -> str:
         tier = self._tier or "anonymous"
         return f"{type(self).__name__}(tier={tier!r}, base_url={self._base_url!r})"
@@ -208,6 +246,7 @@ class LigandAI(_ClientCommon):
         self.discovery: Discovery = Discovery(self._transport, client=self)
         self.jobs: Jobs = Jobs(self._transport)
         self.memory: Memory = Memory(self._transport)
+        self.msa: MSA = MSA(self._transport)
         self.peptides: Peptides = Peptides(self._transport, client=self)
         self.programs: Programs = Programs(self._transport)
         self.proteins: Proteins = Proteins(self._transport)
@@ -294,6 +333,7 @@ class AsyncLigandAI(_ClientCommon):
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
         self.memory: AsyncMemory = AsyncMemory(self._transport)
+        self.msa: AsyncMSA = AsyncMSA(self._transport)
         self.peptides: AsyncPeptides = AsyncPeptides(self._transport, client=self)
         self.programs: AsyncPrograms = AsyncPrograms(self._transport)
         self.proteins: AsyncProteins = AsyncProteins(self._transport)
