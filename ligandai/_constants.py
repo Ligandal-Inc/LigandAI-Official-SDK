@@ -91,7 +91,7 @@ TIER_GPU_SLOTS: dict[Tier, int] = {
 }
 
 # Default URLs.
-DEFAULT_BASE_URL: str = "https://api.ligandai.com"
+DEFAULT_BASE_URL: str = "https://ligandai.com"
 DEFAULT_RECEPTORDB_URL: str = "https://receptordb.com"
 
 # HTTP defaults.

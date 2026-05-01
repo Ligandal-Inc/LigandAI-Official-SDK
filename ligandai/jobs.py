@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, Generic, TypeVar
 
 from ligandai._constants import (
@@ -31,8 +32,13 @@ from ligandai.errors import (
 from ligandai.types import JobEvent, JobInfo
 
 T = TypeVar("T")
-TERMINAL_STATUSES = frozenset({"complete", "completed", "failed", "cancelled", "error"})
-SUCCESS_STATUSES = frozenset({"complete", "completed"})
+TERMINAL_STATUSES = frozenset({
+    "complete", "completed", "failed", "cancelled", "error",
+    "generation_complete", "fold_complete",
+})
+SUCCESS_STATUSES = frozenset({"complete", "completed", "generation_complete", "fold_complete"})
+ResultLoader = Callable[[JobInfo], dict[str, Any] | None]
+AsyncResultLoader = Callable[[JobInfo], Awaitable[dict[str, Any] | None] | dict[str, Any] | None]
 
 
 class Job(Generic[T]):
@@ -72,6 +78,7 @@ class Job(Generic[T]):
         cancel_path: str | None = None,
         sse_path: str | None = None,
         initial: dict[str, Any] | None = None,
+        result_loader: ResultLoader | None = None,
     ) -> None:
         self._transport = transport
         self._job_id = job_id
@@ -80,6 +87,7 @@ class Job(Generic[T]):
         self._status_path = status_path
         self._cancel_path = cancel_path
         self._sse_path = sse_path
+        self._result_loader = result_loader
         self._info: JobInfo = JobInfo.model_validate(
             initial if initial is not None else {"id": job_id, "type": job_type, "status": "queued"}
         )
@@ -116,6 +124,12 @@ class Job(Generic[T]):
             sid = self._info.result.get("sessionId") or self._info.result.get("session_id")
             if isinstance(sid, str):
                 return sid
+        extra = getattr(self._info, "model_extra", None) or {}
+        sid = extra.get("sessionId") or extra.get("session_id")
+        if isinstance(sid, str):
+            return sid
+        if self._job_type == "generation" and self._job_id.startswith("session"):
+            return self._job_id
         return None
 
     @property
@@ -133,7 +147,8 @@ class Job(Generic[T]):
         Raises :class:`LigandAIJobError` if the job failed.
         """
         if self._result is None:
-            self.refresh()
+            if not self.is_terminal:
+                self.refresh()
             if not self.is_terminal:
                 raise LigandAIError(
                     f"Job {self._job_id} not yet complete (status={self.status}). "
@@ -145,9 +160,18 @@ class Job(Generic[T]):
                     job_id=self._job_id,
                     job_status=self.status,
                 )
-            payload = self._info.result or {}
+            payload = self._result_payload()
             self._result = self._parser(payload)
         return self._result
+
+    def _result_payload(self) -> dict[str, Any]:
+        payload = dict(self._info.result or {})
+        if self._result_loader is None:
+            return payload
+        loaded = self._result_loader(self._info)
+        if not loaded:
+            return payload
+        return _merge_result_payload(payload, loaded)
 
     def refresh(self) -> Job[T]:
         """Re-fetch the job status from the server."""
@@ -249,6 +273,7 @@ class AsyncJob(Generic[T]):
         cancel_path: str | None = None,
         sse_path: str | None = None,
         initial: dict[str, Any] | None = None,
+        result_loader: AsyncResultLoader | None = None,
     ) -> None:
         self._transport = transport
         self._job_id = job_id
@@ -257,6 +282,7 @@ class AsyncJob(Generic[T]):
         self._status_path = status_path
         self._cancel_path = cancel_path
         self._sse_path = sse_path
+        self._result_loader = result_loader
         self._info: JobInfo = JobInfo.model_validate(
             initial if initial is not None else {"id": job_id, "type": job_type, "status": "queued"}
         )
@@ -296,6 +322,12 @@ class AsyncJob(Generic[T]):
             sid = self._info.result.get("sessionId") or self._info.result.get("session_id")
             if isinstance(sid, str):
                 return sid
+        extra = getattr(self._info, "model_extra", None) or {}
+        sid = extra.get("sessionId") or extra.get("session_id")
+        if isinstance(sid, str):
+            return sid
+        if self._job_type == "generation" and self._job_id.startswith("session"):
+            return self._job_id
         return None
 
     async def refresh(self) -> AsyncJob[T]:
@@ -360,9 +392,20 @@ class AsyncJob(Generic[T]):
                     job_id=self._job_id,
                     job_status=self.status,
                 )
-            payload = self._info.result or {}
+            payload = await self._result_payload()
             self._result = self._parser(payload)
         return self._result
+
+    async def _result_payload(self) -> dict[str, Any]:
+        payload = dict(self._info.result or {})
+        if self._result_loader is None:
+            return payload
+        loaded = self._result_loader(self._info)
+        if inspect.isawaitable(loaded):
+            loaded = await loaded
+        if not loaded:
+            return payload
+        return _merge_result_payload(payload, loaded)
 
     async def stream(self) -> AsyncIterator[JobEvent]:
         if self._sse_path:
@@ -431,6 +474,21 @@ def _normalize_job_payload(
         if isinstance(err, str):
             out["errorMessage"] = err
     return out
+
+
+def _merge_result_payload(
+    base: dict[str, Any], loaded: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a hydrated result payload without discarding status-endpoint data."""
+    if not base:
+        return dict(loaded)
+    merged = dict(base)
+    for key, value in loaded.items():
+        if value is None:
+            continue
+        if key not in merged or merged[key] in ("", None, [], {}):
+            merged[key] = value
+    return merged
 
 
 def _normalize_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
