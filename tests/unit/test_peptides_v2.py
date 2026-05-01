@@ -53,6 +53,9 @@ def test_by_gene_parses_gene_summary(httpx_mock: HTTPXMock, pro_client: LigandAI
                     "greatPlusCount": 410,
                     "bestIpsae": 0.94,
                     "bestDeltaforgeDg": -7.6,
+                    "bestDeltaforgeV10Dg": -9.4,
+                    "deltaforgeV10ScoredCount": 18,
+                    "deltaforgeV10ScorerVersion": "v10_boltz2_gbr_2026_03_29",
                     "sessionCount": 12,
                     "programCount": 3,
                     "lastActivityAt": "2026-04-30T12:00:00Z",
@@ -72,6 +75,9 @@ def test_by_gene_parses_gene_summary(httpx_mock: HTTPXMock, pro_client: LigandAI
     assert r.great_plus_count == 410
     assert r.best_ipsae == pytest.approx(0.94)
     assert r.best_deltaforge_dg == pytest.approx(-7.6)
+    assert r.best_deltaforge_v10_dg == pytest.approx(-9.4)
+    assert r.deltaforge_v10_scored_count == 18
+    assert r.deltaforge_v10_scorer_version == "v10_boltz2_gbr_2026_03_29"
 
 
 def test_by_gene_forwards_filter_params(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
@@ -138,6 +144,27 @@ def test_get_thin_response(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
             "plddt": 89.5,
             "deltaG": -6.4,
             "predictedKd": 0.0023,
+            "deltaforgeV10": {
+                "delta_g": -9.25,
+                "kd_nm": 166.0,
+                "scorer": "deltaforge_v10_boltz2_calibrated_gbr",
+                "scorer_version": "v10_boltz2_gbr_2026_03_29",
+                "best_pair": {
+                    "receptor_chain": "A",
+                    "peptide_chain": "B",
+                    "delta_g": -9.25,
+                    "kd_nm": 166.0,
+                },
+                "pair_scores": [
+                    {
+                        "receptor_chain": "A",
+                        "peptide_chain": "B",
+                        "delta_g": -9.25,
+                        "kd_nm": 166.0,
+                        "contacts": 42,
+                    }
+                ],
+            },
             "createdAt": "2026-04-30T12:00:00Z",
         },
     )
@@ -147,6 +174,12 @@ def test_get_thin_response(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
     assert detail.gene == "GRIN1"
     assert detail.session_id == "sess_abc"
     assert detail.sequence == "ACDEFGHIK"
+    assert detail.deltaforge_v10 is not None
+    assert detail.deltaforge_v10.scorer_version == "v10_boltz2_gbr_2026_03_29"
+    assert detail.deltaforge_v10.best_pair is not None
+    assert detail.deltaforge_v10.best_pair.receptor_chain == "A"
+    assert detail.deltaforge_v10.pair_scores is not None
+    assert detail.deltaforge_v10.pair_scores[0].contacts == 42
     # Heavy fields default to None when not requested
     assert detail.pocket_features_48_dim is None
     assert detail.pocket_features_metadata is None
@@ -215,6 +248,84 @@ def test_get_rejects_invalid_id(pro_client: LigandAI) -> None:
 def test_get_rejects_unknown_include(pro_client: LigandAI) -> None:
     with pytest.raises(ValueError, match="Unknown include value"):
         pro_client.peptides.get(1, include=["bogus"])  # type: ignore[list-item]
+
+
+# ---------- DeltaForge V10 / raw PDB scoring -----------------------------
+
+
+def test_score_complex_forwards_deltaforge_scorer(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/binder-scoring/fold-and-score",
+        json={"jobId": "score_job_1"},
+    )
+    job = pro_client.peptides.score_complex(
+        binder_sequence="ACDEFG",
+        target_sequence="HIKLMNP",
+        scorer="v10",
+    )
+    assert job.id == "score_job_1"
+    request = httpx_mock.get_request()
+    assert request is not None
+    import json as _json
+    body = _json.loads(request.read())
+    assert body["scorer"] == "v10"
+
+
+def test_score_pdb_posts_raw_pdb_and_parses_v10_decomposition(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/deltaforge/score-pdb",
+        json={
+            "success": True,
+            "delta_g": -9.25,
+            "kd_nm": 166.0,
+            "scorer": "deltaforge_v10_boltz2_calibrated_gbr",
+            "scorer_version": "v10_boltz2_gbr_2026_03_29",
+            "model_sha256": "sha",
+            "aggregate_method": "boltzmann_parallel",
+            "best_pair": {
+                "receptor_chain": "A",
+                "peptide_chain": "B",
+                "delta_g": -9.25,
+                "kd_nm": 166.0,
+            },
+            "pair_scores": [
+                {
+                    "receptor_chain": "A",
+                    "peptide_chain": "B",
+                    "delta_g": -9.25,
+                    "kd_nm": 166.0,
+                    "contacts": 42,
+                }
+            ],
+        },
+    )
+
+    score = pro_client.peptides.score_pdb(
+        pdb_content="ATOM      1  CA  ALA A   1       0.0     0.0     0.0  1.00 85.00           C\n",
+        receptor_chains=["A"],
+        peptide_chain="B",
+        scorer="v10",
+    )
+
+    assert score.dg == pytest.approx(-9.25)
+    assert score.kd_nm == pytest.approx(166.0)
+    assert score.scorer_version == "v10_boltz2_gbr_2026_03_29"
+    assert score.best_pair is not None
+    assert score.best_pair.receptor_chain == "A"
+    assert score.pair_scores is not None
+    assert score.pair_scores[0].contacts == 42
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    import json as _json
+    body = _json.loads(request.read())
+    assert body["receptorChains"] == ["A"]
+    assert body["peptideChain"] == "B"
+    assert body["scorer"] == "v10"
 
 
 # ---------- paid-tier validation -----------------------------------------

@@ -88,7 +88,7 @@ When a method requires a higher tier than the key carries, it raises
 | `client.proteins`      | `/api/protein-info/*`, `/api/protein-variants/*` | UniProt info, variants, custom PDBs |
 | `client.discovery`     | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*` | tissue markers, scRNA, GEO import |
 | `client.diseases`      | `/api/disease-viewer/*` | disease search, mutations |
-| `client.peptides`      | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/binder-scoring/*` | generate, fold, score |
+| `client.peptides`      | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/binder-scoring/*`, `/api/v1/deltaforge/score-pdb` | generate, fold, score |
 | `client.bivalent`      | `/api/ligandforge/bivalent/*` | bispecific design (pro+) |
 | `client.synthesis`     | `/api/synthesis-checkout/*`, `/api/adaptyv/*` | quote, cart, order |
 | `client.memory`        | `/api/episodic-memory/*` | memory search & save |
@@ -96,6 +96,57 @@ When a method requires a higher tier than the key carries, it raises
 | `client.charts`        | `/api/charts/*` | matplotlib chart generation |
 | `client.reports`       | `/api/reports/*` | PDF report generation |
 | `client.jobs`          | `/api/jobs/*` | list, cancel, stream |
+
+## Billing & Account Management (v0.3.0+)
+
+```python
+# Check balance and runway
+bal = client.account.get_balance()
+print(f"{bal.credits} credits, {bal.days_remaining:.1f} days runway")
+
+# Auto top-up when low
+if bal.credits < 10000:
+    client.account.top_up(amount_usd=200)
+
+# Estimate cost before running a big job
+est = client.peptides.estimate_cost(num_peptides=1000, auto_fold=True, fold_top_n=100)
+print(f"This run will cost ~{est.credits} credits (${est.cost_usd:.2f})")
+
+# Configure automatic top-ups
+client.account.configure_auto_topup(
+    enabled=True,
+    threshold_credits=5000,
+    amount_usd=200,
+)
+
+# Inspect recent transactions
+txns = client.account.billing_usage(period="30d")
+for t in txns[:5]:
+    print(f"[{t.type}] {t.amount:+d} credits — {t.description}")
+```
+
+## DeltaForge V10 Scoring
+
+```python
+# Fold a target/binder pair, then score with DeltaForge auto mode.
+job = client.peptides.score_complex(
+    binder_sequence="ACDEFGHIK",
+    target_sequence="MNPQRSTVWY",
+    scorer="auto",  # auto | current | v10
+)
+score = job.wait().results
+print(score.dg, score.kd_nm, score.scorer_version)
+
+# Score your own PDB directly, with multivalent per-chain decomposition.
+score = client.peptides.score_pdb(
+    pdb_file="complex.pdb",
+    receptor_chains=["A", "C"],
+    peptide_chain="B",
+    scorer="v10",
+)
+for pair in score.pair_scores or []:
+    print(pair.receptor_chain, pair.peptide_chain, pair.dg, pair.contacts)
+```
 
 ## Guidance Modules (v0.2.0+)
 

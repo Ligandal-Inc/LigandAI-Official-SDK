@@ -58,9 +58,50 @@ class Credits(_LGModel):
 class CreditTransaction(_LGModel):
     id: int | str
     amount: int
-    operation: str
+    operation: str | None = None
+    type: str | None = None  # 'topup' | 'auto_topup' | 'usage_gpu' | 'refund' | ...
     description: str | None = None
+    balance_after: int | None = Field(default=None, alias="balanceAfter")
     occurred_at: datetime | None = Field(default=None, alias="occurredAt")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+
+
+class AccountBalance(_LGModel):
+    """Current account balance and burn-rate summary."""
+
+    credits: int
+    burn_rate_30d: int | None = Field(default=None, alias="burnRate30d")
+    days_remaining: float | None = Field(default=None, alias="daysRemaining")
+    tier: str | None = None
+    auto_topup_enabled: bool | None = Field(default=None, alias="autoTopupEnabled")
+
+
+class TopUpResult(_LGModel):
+    """Result of a credit top-up attempt."""
+
+    success: bool
+    credits_added: int | None = Field(default=None, alias="creditsAdded")
+    new_balance: int | None = Field(default=None, alias="newBalance")
+    payment_intent_id: str | None = Field(default=None, alias="paymentIntentId")
+    checkout_url: str | None = Field(default=None, alias="checkoutUrl")
+
+
+class AutoTopupConfig(_LGModel):
+    """Auto top-up configuration for an account."""
+
+    enabled: bool
+    threshold_credits: int | None = Field(default=None, alias="thresholdCredits")
+    amount_usd: int | None = Field(default=None, alias="amountUsd")
+    last_charged_at: datetime | None = Field(default=None, alias="lastChargedAt")
+    failure_count: int | None = Field(default=None, alias="failureCount")
+
+
+class CostEstimate(_LGModel):
+    """Credit cost estimate for a generation + folding job."""
+
+    credits: int
+    cost_usd: float = Field(alias="costUsd")
+    breakdown: dict[str, int] | None = None  # {'generation': X, 'folding': Y, 'scoring': Z}
 
 
 class TierLimits(_LGModel):
@@ -429,7 +470,22 @@ class GeneSummary(_LGModel):
     best_deltaforge_dg: float | None = Field(
         default=None,
         alias="bestDeltaforgeDg",
-        description="MIN(delta_g) — most negative = strongest binder.",
+        description="Legacy MIN(delta_g) from the unversioned DeltaForge field.",
+    )
+    best_deltaforge_v10_dg: float | None = Field(
+        default=None,
+        alias="bestDeltaforgeV10Dg",
+        description="Versioned V10 MIN(delta_g) from ptf_deltaforge_scores.",
+    )
+    deltaforge_v10_scored_count: int = Field(
+        default=0,
+        alias="deltaforgeV10ScoredCount",
+        description="Number of scored V10 folds contributing to this gene row.",
+    )
+    deltaforge_v10_scorer_version: str | None = Field(
+        default=None,
+        alias="deltaforgeV10ScorerVersion",
+        description="Version label for the V10 aggregate, when present.",
     )
     session_count: int = Field(
         alias="sessionCount",
@@ -472,6 +528,7 @@ class PeptideDetail(_LGModel):
     plddt: float | None = None
     delta_g: float | None = Field(default=None, alias="deltaG")
     predicted_kd: float | None = Field(default=None, alias="predictedKd")
+    deltaforge_v10: DeltaForgeScore | None = Field(default=None, alias="deltaforgeV10")
     created_at: datetime = Field(alias="createdAt")
 
     # Gated by include=["pocket_features"]
@@ -554,11 +611,40 @@ class FoldResult(_LGModel):
     chain_pair_iptm: dict[str, float] | None = Field(default=None, alias="chainPairIptm")
 
 
+class DeltaForgeBestPair(_LGModel):
+    receptor_chain: str | None = Field(default=None, alias="receptor_chain")
+    peptide_chain: str | None = Field(default=None, alias="peptide_chain")
+    dg: float | None = Field(default=None, alias="delta_g")
+    kd_nm: float | None = Field(default=None, alias="kd_nm")
+
+
+class DeltaForgePairScore(_LGModel):
+    receptor_chain: str | None = Field(default=None, alias="receptor_chain")
+    peptide_chain: str | None = Field(default=None, alias="peptide_chain")
+    dg: float | None = Field(default=None, alias="delta_g")
+    kd_nm: float | None = Field(default=None, alias="kd_nm")
+    contacts: int | None = None
+    hydrogen_bonds: int | None = Field(default=None, alias="hydrogen_bonds")
+    salt_bridges: int | None = Field(default=None, alias="salt_bridges")
+    hydrophobic_contacts: int | None = Field(default=None, alias="hydrophobic_contacts")
+    features: dict[str, Any] | None = None
+
+
 class DeltaForgeScore(_LGModel):
     dg: float | None = None
     kd: float | None = None
+    kd_nm: float | None = Field(default=None, alias="kd_nm")
     contacts: int | None = None
     interface_residues: list[int] | None = Field(default=None, alias="interfaceResidues")
+    scorer: str | None = None
+    scorer_version: str | None = Field(default=None, alias="scorer_version")
+    model_sha256: str | None = Field(default=None, alias="model_sha256")
+    feature_schema_version: str | None = Field(default=None, alias="feature_schema_version")
+    aggregate_method: str | None = Field(default=None, alias="aggregate_method")
+    best_pair: DeltaForgeBestPair | None = Field(default=None, alias="best_pair")
+    pair_scores: list[DeltaForgePairScore] | None = Field(default=None, alias="pair_scores")
+    pair_errors: list[dict[str, Any]] | None = Field(default=None, alias="pair_errors")
+    warnings: list[str] | None = None
     metadata: dict[str, Any] | None = None
 
 

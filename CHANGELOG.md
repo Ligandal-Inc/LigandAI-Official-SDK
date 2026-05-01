@@ -5,7 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - 2026-05-01
+## [0.3.1] - 2026-04-30
+
+### Added — billing surface (`client.account` + `client.peptides.estimate_cost`)
+
+- **`Account.get_balance()`** and **`AsyncAccount.get_balance()`** — fetches the
+  current credit balance, 30-day burn rate, days-of-runway, tier, and
+  auto-topup status from `GET /api/billing/account-summary`. Returns a new
+  `AccountBalance` model.
+- **`Account.billing_usage(period="30d")`** and async equivalent — fetches the
+  recent credit transaction history (period: `"7d"` | `"30d"` | `"90d"`) from
+  the same summary endpoint. Returns `list[CreditTransaction]`.
+- **`Account.top_up(amount_usd, save_card, payment_method_id)`** and async —
+  posts to `POST /api/billing/topup`. When `payment_method_id` is provided (or
+  a card is saved on file), charges immediately off-session and returns credits
+  added + new balance. Otherwise returns a `checkout_url` for the browser Stripe
+  flow. Returns `TopUpResult`.
+- **`Account.configure_auto_topup(enabled, threshold_credits, amount_usd)`** and
+  async — configures automatic top-ups via `POST /api/billing/auto-topup/configure`.
+  Returns `AutoTopupConfig`.
+- **`Peptides.estimate_cost(num_peptides, auto_fold, fold_top_n, fold_trajectories)`**
+  and async — estimates credits and USD cost for a generation + folding run via
+  `GET /api/billing/estimate`. Returns `CostEstimate` with `credits` (int),
+  `cost_usd` (float), and a `breakdown` dict by phase (generation, folding, scoring).
+
+### Added — new types (`ligandai.types`)
+
+- **`AccountBalance`** — credits, burn_rate_30d, days_remaining, tier, auto_topup_enabled.
+- **`TopUpResult`** — success, credits_added, new_balance, payment_intent_id, checkout_url.
+- **`AutoTopupConfig`** — enabled, threshold_credits, amount_usd, last_charged_at, failure_count.
+- **`CostEstimate`** — credits, cost_usd, breakdown dict by phase.
+
+All four types are now exported at the package top level.
+
+### Changed — `CreditTransaction` model
+
+- Added `type` field (billing transaction type: `"topup"` / `"auto_topup"` /
+  `"usage_gpu"` / `"refund"` / etc.) alongside the existing `operation` field.
+- Added `balance_after` field (balance after this transaction applied).
+- Added `created_at` alias alongside the existing `occurred_at`.
+- `operation` is now optional (nullable) for forward compatibility with the
+  billing system's new transaction schema.
 
 ### Fixed — publish blockers
 
