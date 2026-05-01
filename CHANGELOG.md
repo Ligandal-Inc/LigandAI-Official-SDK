@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] - 2026-05-01
+## [0.3.0] - 2026-05-01
+
+### Fixed — publish blockers
+
+- **`DEFAULT_BASE_URL`** corrected to `https://ligandai.com` (was
+  `https://api.ligandai.com`, which is unreachable). Without this fix, fresh
+  installs would fail their first request.
+- **`jobs.TERMINAL_STATUSES`** now includes `generation_complete` and
+  `fold_complete`. Previously, `Job.wait()` would hang forever on jobs whose
+  Modal callbacks emit those terminal events.
+- **`jobs.SUCCESS_STATUSES`** mirrors the same additions.
+- **`Job` / `AsyncJob`** now accept an optional `result_loader` callback
+  (sync or async) for deferred result hydration, plus improved `session_id`
+  resolution from `model_extra` and `job_id` prefix when the result dict
+  doesn't carry it.
+- **`ligandai.resources.msa`** — new file backing the `MSAChain` and
+  `MSAResult` types already exported by `ligandai.__init__`. Without it,
+  `from ligandai import MSAResult` would raise on package init.
+
+(0.2.0 was published to PyPI with only the parameter coverage in
+"comprehensive generation parameter coverage"; this 0.3.0 layers the v1
+peptide surface and the publish blockers on top.)
 
 ### Added — paid-only `/api/v1/peptides/*` surface (LIGANDAI_ALPHA_V2-afspr)
 
