@@ -3,6 +3,11 @@
 Official Python SDK for the [LIGANDAI](https://ligandai.com) platform — peptide
 design, structure prediction, scoring, and discovery.
 
+> **License & Terms** — By installing or using this SDK you agree to the
+> [LigandAI Terms of Service](https://ligandai.com/terms) and
+> [End User License Agreement](https://ligandai.com/eula). API usage is logged
+> for billing and abuse prevention. See `LICENSE` for the full agreement.
+
 ```bash
 pip install ligandai
 ```
@@ -91,6 +96,69 @@ When a method requires a higher tier than the key carries, it raises
 | `client.charts`        | `/api/charts/*` | matplotlib chart generation |
 | `client.reports`       | `/api/reports/*` | PDF report generation |
 | `client.jobs`          | `/api/jobs/*` | list, cancel, stream |
+
+## Guidance Modules (v0.2.0+)
+
+Pro+ tier keys unlock guidance modules that steer LigandForge during generation:
+
+```python
+# Immunogenicity guidance — reduce MHC-I/II epitopes and improve humanness
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=200,
+    immunogenicity=True,
+    immuno_strength=2.5,
+    immuno_modules={"mhc_i": True, "mhc_ii": True, "humanness": True},
+)
+
+# Serum stability — resist trypsin/DPP-IV/chymotrypsin cleavage
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=200,
+    serum_stability=True,
+    stability_strength=2.0,
+    stability_mode="resist",
+    stability_modules={"trypsin": True, "chymotrypsin": True, "dppiv": True},
+)
+
+# Extended plasma half-life
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=200,
+    halflife="extended",
+    halflife_strength=2.5,
+)
+
+# Charge / solubility filtering (pro+ tier)
+# Keep only peptides with net charge < -1.0
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=200,
+    charge_mode="lt",
+    charge_value=-1.0,
+)
+
+# Cyclic peptides — terminal Cys-Cys disulfide (primary Adaptyv synthesis route)
+# Requires academia / pro / enterprise / discovery_partner tier.
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=100,
+    length_range=(12, 22),      # cyclic-friendly length range
+    cyclic_mode="disulfide",
+    strict_recombinant=True,    # forbid internal Cys (required for Adaptyv path)
+)
+
+result = job.wait(timeout=1800)
+for p in result.peptides:
+    if p.stability_scores:
+        print(f"{p.sequence}: grade={p.stability_scores.stability_grade}, "
+              f"halflife={p.stability_scores.predicted_halflife_hours:.1f}h")
+    if p.immuno_scores:
+        print(f"  immuno_grade={p.immuno_scores.immuno_grade}, "
+              f"pop_coverage={p.immuno_scores.population_coverage_pct:.0f}%")
+    if p.cyclic_mode and p.cyclic_mode != "none":
+        print(f"  cyclic={p.cyclic_mode}")
+```
 
 ## Long-Running Jobs
 
