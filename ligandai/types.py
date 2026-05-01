@@ -397,6 +397,127 @@ class Peptide(_LGModel):
     )
 
 
+class GeneSummary(_LGModel):
+    """Per-gene peptide aggregation row from ``client.peptides.by_gene()``.
+
+    Mirrors the server-side ``AggregatePeptidesByGeneRow`` (see
+    ``server/storage.ts``) and the response shape of
+    ``GET /api/v1/peptides/by-gene``.
+
+    A ``GeneSummary`` answers "what binders do I have for gene X?" — folded
+    counts, best scores, session/program coverage. To get the actual peptide
+    sequences for a gene, follow up with :meth:`Peptides.list`.
+    """
+
+    gene: str = Field(description="Canonical UPPER-cased gene symbol.")
+    folded_count: int = Field(
+        alias="foldedCount",
+        description="Total non-deleted folds for this gene.",
+    )
+    elite_count: int = Field(
+        alias="eliteCount",
+        description="Folds with iPSAE ≥ 0.85.",
+    )
+    great_plus_count: int = Field(
+        alias="greatPlusCount",
+        description="Folds with iPSAE ≥ 0.66.",
+    )
+    best_ipsae: float = Field(
+        alias="bestIpsae",
+        description="MAX(iPSAE) across all folds for this gene.",
+    )
+    best_deltaforge_dg: float | None = Field(
+        default=None,
+        alias="bestDeltaforgeDg",
+        description="MIN(delta_g) — most negative = strongest binder.",
+    )
+    session_count: int = Field(
+        alias="sessionCount",
+        description="Distinct PTF sessions producing this gene.",
+    )
+    program_count: int = Field(
+        alias="programCount",
+        description="Distinct non-null program_db_id values.",
+    )
+    last_activity_at: datetime = Field(
+        alias="lastActivityAt",
+        description="MAX(created_at) across all folds for this gene.",
+    )
+
+
+class PeptideDetail(_LGModel):
+    """Single-peptide detail returned by ``client.peptides.get(id)``.
+
+    Default response is "thin" — sequence + scores + metadata, no heavy
+    fields. The heavy fields below are populated only when the matching
+    string is passed to ``include=`` on the SDK call:
+
+    - ``include=["pocket_features"]`` →  ``pocket_features_48_dim`` +
+      ``pocket_features_metadata``
+    - ``include=["interface"]`` → ``peptide_per_receptor`` +
+      ``disulfide_analysis``
+    - ``include=["pdb"]`` → ``pdb_content``
+
+    Mirrors the server's ``GET /api/v1/peptides/:id`` response shape.
+    """
+
+    id: int = Field(description="ptf_fold_results.id (serial primary key).")
+    gene: str
+    session_id: str = Field(alias="sessionId")
+    sequence: str
+    conformation: str | None = None
+    ipsae: float | None = None
+    ptm: float | None = None
+    iptm: float | None = None
+    plddt: float | None = None
+    delta_g: float | None = Field(default=None, alias="deltaG")
+    predicted_kd: float | None = Field(default=None, alias="predictedKd")
+    created_at: datetime = Field(alias="createdAt")
+
+    # Gated by include=["pocket_features"]
+    pocket_features_48_dim: list[list[float]] | None = Field(
+        default=None,
+        alias="pocketFeatures48Dim",
+        description=(
+            "Per-residue 48-dim pocket feature matrix from generation. Shape "
+            "[n_pocket_residues][48]. Populated only when 'pocket_features' "
+            "is in the include= list."
+        ),
+    )
+    pocket_features_metadata: dict[str, Any] | None = Field(
+        default=None,
+        alias="pocketFeaturesMetadata",
+        description=(
+            "Pocket metadata accompanying the 48-dim matrix — pocket_residue_indices, "
+            "target_regions, conformation_name, etc."
+        ),
+    )
+
+    # Gated by include=["interface"]
+    peptide_per_receptor: dict[str, dict[str, float]] | None = Field(
+        default=None,
+        alias="peptidePerReceptor",
+        description=(
+            "Per-receptor-chain interface metrics keyed by chain id, with "
+            "values { ipsae, ipae, pdockq2, n_contacts }."
+        ),
+    )
+    disulfide_analysis: dict[str, Any] | None = Field(
+        default=None,
+        alias="disulfideAnalysis",
+        description=(
+            "Post-fold cysteine geometry analysis: { pairs, unpaired_cys, total_cys }."
+        ),
+    )
+
+    # Gated by include=["pdb"]
+    pdb_content: str | None = Field(
+        default=None,
+        alias="pdbContent",
+        description="Full PDB text content (5–50KB).",
+    )
+
+
 class PeptideInput(_LGModel):
     sequence: str
     name: str | None = None

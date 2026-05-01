@@ -16,10 +16,15 @@ Endpoint mapping (server source-of-truth):
 - :meth:`Peptides.search`                 → ``GET  /api/ptf/genes/summary`` + filter
 - :meth:`Peptides.search_by_pocket`       → ``GET  /api/ptf/peptides/by-pocket``
 - :meth:`Peptides.get_elite`              → ``GET  /api/ptf/parallel/{sid}/elite``
+- :meth:`Peptides.by_gene`                → ``GET  /api/v1/peptides/by-gene``  (paid-only, v0.2.0+)
+- :meth:`Peptides.list`                   → ``GET  /api/ptf/generated-peptides/by-gene/:gene``  (v0.2.0+)
+- :meth:`Peptides.get`                    → ``GET  /api/v1/peptides/:id``       (paid-only, v0.2.0+)
 """
 
 from __future__ import annotations
 
+import warnings
+from datetime import datetime
 from typing import Any, Literal
 
 from ligandai.errors import LigandAIError
@@ -28,14 +33,69 @@ from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     DeltaForgeScore,
     FoldResult,
+    GeneSummary,
     GenerationResult,
     LigandIQScore,
     Peptide,
+    PeptideDetail,
     PeptideInput,
     ResidueRange,
     Sequence,
     SolubilityResult,
 )
+
+# Allowed values for ``Peptides.get(include=[...])``. The server validates this
+# against an allowlist and returns 400 for unknown entries — keep this in sync.
+_IncludeField = Literal["pocket_features", "interface", "pdb"]
+_ALLOWED_INCLUDE: frozenset[str] = frozenset({"pocket_features", "interface", "pdb"})
+
+# Cysteine-control keys that used to be passed via ``extra={...}`` and are now
+# first-class typed kwargs on :meth:`Peptides.generate`. We continue to accept
+# them via ``extra`` for backward compatibility but emit a DeprecationWarning;
+# they will be hard-rejected in v0.3.0.
+_DEPRECATED_EXTRA_CYS_KEYS: frozenset[str] = frozenset({
+    "cys_mode",
+    "cysteine_mode",
+    "cysteineMode",
+    "cys_gate",
+    "cysteine_gate",
+    "cyclic_mode",
+    "cyclicMode",
+    "cyclic_strength",
+    "cyclicStrength",
+    "strict_recombinant",
+    "strictRecombinant",
+    "dual_fold_viz",
+    "dualFoldViz",
+    "disulfide_constraints",
+    "disulfideConstraints",
+})
+
+
+def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
+    """Emit DeprecationWarning when cys-related keys arrive via ``extra=``.
+
+    The typed kwargs (``cysteine_mode``, ``cyclic_mode``, etc.) are the
+    blessed surface as of v0.2.0. The ``extra`` path still works for
+    backward compatibility, but will be hard-rejected in v0.3.0.
+    """
+    if not extra:
+        return
+    leaked = sorted(k for k in extra if k in _DEPRECATED_EXTRA_CYS_KEYS)
+    if not leaked:
+        return
+    keys = ", ".join(leaked)
+    warnings.warn(
+        (
+            f"Passing cysteine/cyclic controls via extra={{}} is deprecated as of "
+            f"ligandai v0.2.0 (got: {keys}). Pass them as typed kwargs on "
+            f"Peptides.generate() — e.g. cysteine_mode=, cyclic_mode=, "
+            f"strict_recombinant=, ... — instead. The extra-dict path will be "
+            f"removed in v0.3.0."
+        ),
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 _TargetingStrategy = Literal["full_surface", "pocket_targeted"]
 
@@ -618,6 +678,9 @@ class Peptides(Resource):
         """
         if self._client is not None:
             self._client._require_feature("generate_peptides")
+        # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
+        # use the typed kwargs above. Hard-rejected in v0.3.0.
+        _warn_deprecated_cys_extra(extra)
         body = _generation_body(
             gene=gene,
             num_peptides=num_peptides,
@@ -939,6 +1002,155 @@ class Peptides(Resource):
         items = payload if isinstance(payload, list) else payload.get("peptides", [])
         return [Peptide.model_validate(p) for p in items]
 
+    # ------------------------------------------------------------------
+    # v0.2.0 surface — paid-only /api/v1/peptides/* (LIGANDAI_ALPHA_V2-afspr)
+    # ------------------------------------------------------------------
+
+    def by_gene(
+        self,
+        genes: list[str] | None = None,
+        min_ipsae: float | None = None,
+        program_id: int | None = None,
+        project_id: int | None = None,
+        since: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[GeneSummary]:
+        """``GET /api/v1/peptides/by-gene`` — gene-level peptide aggregation.
+
+        Aggregates peptide stats per gene across **all of the caller's
+        sessions and programs**. Use this to answer "what binders do I have
+        for gene X?" — one row per gene with folded counts, best scores,
+        program/session coverage. Follow up with :meth:`list` for the
+        actual peptide rows.
+
+        **Auth:** Paid tiers only (pro/enterprise/superadmin). Free / academia
+        keys raise :class:`~ligandai.errors.LigandAIPaidTierRequired` from the
+        server's 402 response.
+
+        Args:
+            genes: Optional whitelist (case-insensitive). When omitted, all
+                genes the caller has folds for are returned.
+            min_ipsae: Filter aggregation to folds with iPSAE ≥ this threshold.
+                ``foldedCount`` reflects only folds meeting the bar.
+            program_id: Restrict to one program (Layer-4 program DB id).
+            project_id: Restrict to one project.
+            since: Only count folds at or after this timestamp.
+            limit: Page size (max 200; server caps).
+            offset: Pagination offset.
+
+        Returns:
+            List of :class:`~ligandai.types.GeneSummary` rows, sorted by
+            ``last_activity_at`` descending. To compute total pages, divide
+            the server's ``total`` (in the raw response, not exposed here)
+            by your ``limit``.
+        """
+        if self._client is not None:
+            self._client._require_paid_tier()
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if genes:
+            params["genes"] = ",".join(g.upper() for g in genes if g)
+        if min_ipsae is not None:
+            params["minIpsae"] = min_ipsae
+        if program_id is not None:
+            params["programId"] = program_id
+        if project_id is not None:
+            params["projectId"] = project_id
+        if since is not None:
+            params["since"] = since.isoformat()
+        payload = self._transport.request("GET", "/api/v1/peptides/by-gene", params=params) or {}
+        rows = payload.get("rows", []) if isinstance(payload, dict) else []
+        return [GeneSummary.model_validate(r) for r in rows]
+
+    def list(
+        self,
+        gene: str,
+        min_ipsae: float | None = None,
+        include_unfolded: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Peptide]:
+        """List the actual peptide rows for a gene (peptides, not just counts).
+
+        Wraps ``GET /api/ptf/generated-peptides/by-gene/:gene``. Returns the
+        peptide sequences with their predicted/folded scores. Use this after
+        :meth:`by_gene` when you've identified a gene worth drilling into.
+
+        Args:
+            gene: Gene symbol (case-insensitive; upper-cased server-side).
+            min_ipsae: Filter to folds with iPSAE ≥ this threshold.
+            include_unfolded: When True, include pre-fold rows (predicted
+                scores only); default False keeps the response post-fold.
+            limit: Page size.
+            offset: Pagination offset.
+        """
+        if not gene or not gene.strip():
+            raise ValueError("gene must be a non-empty string")
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if min_ipsae is not None:
+            params["min_ipsae"] = min_ipsae
+        if include_unfolded:
+            params["include_unfolded"] = "true"
+        payload = self._transport.request(
+            "GET", f"/api/ptf/generated-peptides/by-gene/{gene}", params=params
+        ) or []
+        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+        return [Peptide.model_validate(p) for p in items]
+
+    def get(
+        self,
+        peptide_id: int | str,
+        include: list[_IncludeField] | None = None,
+    ) -> PeptideDetail:
+        """``GET /api/v1/peptides/:id`` — single-peptide detail.
+
+        Default response is "thin" — sequence + scores + metadata, no heavy
+        fields. Heavy fields are gated behind ``include=`` to keep typical
+        reads fast.
+
+        **Auth:** Paid tiers only. Free / academia keys raise
+        :class:`~ligandai.errors.LigandAIPaidTierRequired`.
+
+        Args:
+            peptide_id: ``ptf_fold_results.id`` (positive integer). Strings
+                are accepted and parsed.
+            include: Optional list of heavy fields to fetch:
+
+                - ``"pocket_features"`` adds ``pocket_features_48_dim`` and
+                  ``pocket_features_metadata``.
+                - ``"interface"`` adds ``peptide_per_receptor`` and
+                  ``disulfide_analysis``.
+                - ``"pdb"`` adds ``pdb_content`` (5-50KB).
+
+                Unknown values raise ``ValueError`` client-side; the server
+                also rejects them with HTTP 400.
+        """
+        if self._client is not None:
+            self._client._require_paid_tier()
+        try:
+            id_int = int(peptide_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"peptide_id must be a positive integer (got {peptide_id!r})"
+            ) from exc
+        if id_int <= 0:
+            raise ValueError(f"peptide_id must be > 0 (got {id_int})")
+
+        params: dict[str, Any] = {}
+        if include:
+            unknown = [v for v in include if v not in _ALLOWED_INCLUDE]
+            if unknown:
+                raise ValueError(
+                    f"Unknown include value(s): {unknown}. "
+                    f"Allowed: {sorted(_ALLOWED_INCLUDE)}"
+                )
+            params["include"] = ",".join(include)
+
+        payload = self._transport.request(
+            "GET", f"/api/v1/peptides/{id_int}", params=params
+        ) or {}
+        return PeptideDetail.model_validate(payload)
+
 
 # -- Async resource ---------------------------------------------------------
 
@@ -985,6 +1197,9 @@ class AsyncPeptides(AsyncResource):
         """Async variant of :meth:`Peptides.generate`. See that method for full docs."""
         if self._client is not None:
             self._client._require_feature("generate_peptides")
+        # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
+        # use the typed kwargs above. Hard-rejected in v0.3.0.
+        _warn_deprecated_cys_extra(extra)
         body = _generation_body(
             gene=gene,
             num_peptides=num_peptides,
@@ -1289,3 +1504,87 @@ class AsyncPeptides(AsyncResource):
         payload = await self._transport.request("GET", f"/api/ptf/parallel/{session_id}/elite") or []
         items = payload if isinstance(payload, list) else payload.get("peptides", [])
         return [Peptide.model_validate(p) for p in items]
+
+    # --- v0.2.0 paid-only surface (async) ---
+
+    async def by_gene(
+        self,
+        genes: list[str] | None = None,
+        min_ipsae: float | None = None,
+        program_id: int | None = None,
+        project_id: int | None = None,
+        since: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[GeneSummary]:
+        """Async variant of :meth:`Peptides.by_gene`."""
+        if self._client is not None:
+            self._client._require_paid_tier()
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if genes:
+            params["genes"] = ",".join(g.upper() for g in genes if g)
+        if min_ipsae is not None:
+            params["minIpsae"] = min_ipsae
+        if program_id is not None:
+            params["programId"] = program_id
+        if project_id is not None:
+            params["projectId"] = project_id
+        if since is not None:
+            params["since"] = since.isoformat()
+        payload = await self._transport.request(
+            "GET", "/api/v1/peptides/by-gene", params=params
+        ) or {}
+        rows = payload.get("rows", []) if isinstance(payload, dict) else []
+        return [GeneSummary.model_validate(r) for r in rows]
+
+    async def list(
+        self,
+        gene: str,
+        min_ipsae: float | None = None,
+        include_unfolded: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Peptide]:
+        """Async variant of :meth:`Peptides.list`."""
+        if not gene or not gene.strip():
+            raise ValueError("gene must be a non-empty string")
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if min_ipsae is not None:
+            params["min_ipsae"] = min_ipsae
+        if include_unfolded:
+            params["include_unfolded"] = "true"
+        payload = await self._transport.request(
+            "GET", f"/api/ptf/generated-peptides/by-gene/{gene}", params=params
+        ) or []
+        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+        return [Peptide.model_validate(p) for p in items]
+
+    async def get(
+        self,
+        peptide_id: int | str,
+        include: list[_IncludeField] | None = None,
+    ) -> PeptideDetail:
+        """Async variant of :meth:`Peptides.get`."""
+        if self._client is not None:
+            self._client._require_paid_tier()
+        try:
+            id_int = int(peptide_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"peptide_id must be a positive integer (got {peptide_id!r})"
+            ) from exc
+        if id_int <= 0:
+            raise ValueError(f"peptide_id must be > 0 (got {id_int})")
+        params: dict[str, Any] = {}
+        if include:
+            unknown = [v for v in include if v not in _ALLOWED_INCLUDE]
+            if unknown:
+                raise ValueError(
+                    f"Unknown include value(s): {unknown}. "
+                    f"Allowed: {sorted(_ALLOWED_INCLUDE)}"
+                )
+            params["include"] = ",".join(include)
+        payload = await self._transport.request(
+            "GET", f"/api/v1/peptides/{id_int}", params=params
+        ) or {}
+        return PeptideDetail.model_validate(payload)

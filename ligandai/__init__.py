@@ -31,6 +31,7 @@ from ligandai.errors import (
     LigandAICreditError,
     LigandAIError,
     LigandAINotFoundError,
+    LigandAIPaidTierRequired,
     LigandAIRateLimitError,
     LigandAIServerError,
     LigandAITierError,
@@ -41,7 +42,12 @@ from ligandai.jobs import AsyncJob, Job
 from ligandai.receptordb import AsyncReceptorDBClient, ReceptorDBClient
 from ligandai.types import (
     BivalentTarget,
+    GeneSummary,
     LinkerConfig,
+    MSAChain,
+    MSAResult,
+    Peptide,
+    PeptideDetail,
     PeptideInput,
     ResidueRange,
     SynthesisPeptide,
@@ -54,6 +60,7 @@ __all__ = [
     "AsyncReceptorDBClient",
     # Types
     "BivalentTarget",
+    "GeneSummary",
     # Jobs
     "Job",
     # Clients
@@ -63,12 +70,17 @@ __all__ = [
     # Errors
     "LigandAIError",
     "LigandAINotFoundError",
+    "LigandAIPaidTierRequired",
     "LigandAIRateLimitError",
     "LigandAIServerError",
     "LigandAITierError",
     "LigandAIValidationError",
     "LinkerConfig",
+    "MSAChain",
+    "MSAResult",
     "NotSupportedOnReceptorDB",
+    "Peptide",
+    "PeptideDetail",
     "PeptideInput",
     "ReceptorDBClient",
     "ResidueRange",

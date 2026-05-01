@@ -127,6 +127,50 @@ class LigandAICreditError(LigandAIError):
         self.available = available
 
 
+class LigandAIPaidTierRequired(LigandAIError):
+    """402 — the SDK requires a paid (pro/enterprise) subscription.
+
+    Distinct from :class:`LigandAICreditError` (which means "your tier is fine
+    but you've run out of credits"). This error means the **API key itself**
+    resolves to a tier (free/academia) that does not include API access at
+    all.
+
+    The server returns this on every `/api/v1/peptides/*` request from a
+    free-tier key with::
+
+        HTTP 402 Payment Required
+        {"error": "upgrade_required",
+         "message": "...",
+         "tier_required": "pro",
+         "current_tier": "free"}
+
+    Visit https://ligandai.com/pricing to upgrade.
+
+    Attributes
+    ----------
+    current_tier : str | None
+        The tier of the API key in use.
+    required_tier : str | None
+        The minimum tier that grants SDK access. Always ``"pro"`` for the
+        v1 surface.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "This SDK requires a paid subscription. "
+            "Visit https://ligandai.com/pricing to upgrade."
+        ),
+        *,
+        current_tier: str | None = None,
+        required_tier: str | None = "pro",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.current_tier = current_tier
+        self.required_tier = required_tier
+
+
 class LigandAINotFoundError(LigandAIError):
     """404 — resource (gene, complex, job, etc.) not found."""
 
@@ -228,6 +272,23 @@ def error_from_response(
     if status_code == 401:
         return LigandAIAuthError(message, **common)
     if status_code == 402:
+        # Two flavors of 402:
+        #   - upgrade_required (paid-tier gate on /api/v1/*) → LigandAIPaidTierRequired
+        #   - insufficient credits (per-operation credit check) → LigandAICreditError
+        # Discriminate by the `error` field so the SDK raises the most informative
+        # subclass; both still satisfy `isinstance(e, LigandAIError)`.
+        err_kind = (payload.get("error") or "").lower()
+        if err_kind == "upgrade_required" or payload.get("tier_required"):
+            return LigandAIPaidTierRequired(
+                message,
+                current_tier=payload.get("currentTier")
+                or payload.get("current_tier"),
+                required_tier=payload.get("requiredTier")
+                or payload.get("required_tier")
+                or payload.get("tier_required")
+                or "pro",
+                **common,
+            )
         return LigandAICreditError(
             message,
             required=payload.get("required"),
