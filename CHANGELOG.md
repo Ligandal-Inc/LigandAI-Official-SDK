@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-05-01
+
+### Added
+
+- **`immuno_modules`** parameter on `Peptides.generate()` and `AsyncPeptides.generate()`:
+  dict of booleans enabling specific MHC-I/II, BCR, TAP, TCR, and humanness epitope
+  modules (e.g. `{"mhc_i": True, "mhc_ii": True, "humanness": True}`). Forwarded as
+  `immunoModules` in the request body. Requires pro+ tier.
+- **`stability_modules`** parameter: dict enabling specific protease modules
+  (trypsin, chymotrypsin, elastase, dppiv, plasmin, neprilysin). Forwarded as
+  `stabilityModules`. Requires pro+ tier.
+- **Charge / solubility filtering** — four new params: `charge_mode`
+  (`"off"` / `"lt"` / `"gt"` / `"between"`), `charge_value`, `charge_min`,
+  `charge_max`, `min_solubility`. Server activates the filtered Modal worker when
+  any non-default constraint is present and the user is on a pro+ tier.
+- **Cyclization** (`cyclic_mode`, `cyclic_strength`, `strict_recombinant`,
+  `dual_fold_viz`): `"disulfide"` (primary recombinant-shippable, terminal Cys-Cys),
+  `"lactam"` (head-to-tail amide, prediction/viz layer), or `"head_tail_contact"`
+  (soft B-matrix bias). Tier-gated to academia / pro / pro_commercial / enterprise /
+  discovery_partner; basic/free receive HTTP 403 from the server.
+- **`StabilityScores`** and **`ImmunoScores`** structured output models in `types.py`,
+  surfacing the full `stability_scores` and `immuno_scores` JSONB columns from the
+  server schema (halflife, cleavage_risk, grades, epitope counts, TAP/BCR/TCR scores,
+  population coverage).
+- **`Peptide.stability_scores`** and **`Peptide.immuno_scores`** typed fields (map to
+  the new structured models above).
+- **`Peptide.cyclic_mode`** field: reflects `guidance_config.cyclicMode` from the
+  server DB, present after generation.
+- **`_CyclicMode`** and **`_ChargeMode`** Literal type aliases exposed at module level.
+- CLI (`ligandai generate peptides`): all new flags mirroring SDK — `--cysteine-mode`,
+  `--quality-guided`, `--immunogenicity`, `--immuno-strength`, `--serum-stability`,
+  `--stability-strength`, `--stability-mode`, `--halflife`, `--halflife-strength`,
+  `--charge-mode`, `--charge-value`, `--charge-min`, `--charge-max`,
+  `--min-solubility`, `--cyclic-mode`, `--cyclic-strength`, `--strict-recombinant`,
+  `--dual-fold-viz`.
+
+### Fixed
+
+- `cysteine_mode` was previously absent from server request body. Combined with the
+  server-side dead-wire fix in `modal_workers/ligandforge_v6_5.py`, the SDK now
+  correctly forwards the cysteine placement policy end-to-end. Requesting
+  `num_peptides=N` returns exactly N peptides regardless of cysteine policy
+  (rejection-sampling backpressure on the server side).
+
+### Output fields
+
+`Peptide` now exposes: `stability_scores` (halflife, cleavage risk, grade, protease
+site counts), `immuno_scores` (risk score, grade, epitope counts by class,
+population coverage), and `cyclic_mode` (which cyclization constraint was active).
+
 ## [0.1.8] - 2026-04-30
 
 ### Fixed

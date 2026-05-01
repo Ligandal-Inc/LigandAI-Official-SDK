@@ -72,10 +72,30 @@ class TierLimits(_LGModel):
     rate_limit_per_minute: int | None = Field(default=None, alias="rateLimitPerMinute")
 
 
+class MSAChain(_LGModel):
+    csv: str
+    hits: int = 0
+
+
+class MSAResult(_LGModel):
+    chains: dict[str, MSAChain]
+    cached: bool = False
+    elapsed_ms: int | None = None
+    gene: str | None = None
+    cache_key: str | None = Field(default=None, alias="cache_key")
+
+
 class UsageSummary(_LGModel):
     today_input_tokens: int | None = Field(default=None, alias="todayInputTokens")
     today_output_tokens: int | None = Field(default=None, alias="todayOutputTokens")
     daily_token_limit: int | None = Field(default=None, alias="dailyTokenLimit")
+    # Credit consumption (today)
+    credits_used_today: int | None = Field(default=None, alias="creditsUsedToday")
+    credits_used_generation: int | None = Field(default=None, alias="creditsUsedGeneration")
+    credits_used_folding: int | None = Field(default=None, alias="creditsUsedFolding")
+    credits_used_ligandiq: int | None = Field(default=None, alias="creditsUsedLigandIQ")
+    credits_used_ai: int | None = Field(default=None, alias="creditsUsedAI")
+    credits_by_type: dict[str, int] | None = Field(default=None, alias="creditsByType")
 
 
 # -- Receptors / structures ---------------------------------------------------
@@ -259,21 +279,122 @@ class BBBReceptor(_LGModel):
 # -- Peptides / generation / folding ----------------------------------------
 
 
+class StabilityScores(_LGModel):
+    """Proteolytic stability + half-life scores emitted by the guided Modal worker.
+
+    Populated when ``serum_stability=True`` (and/or ``halflife`` is set) in
+    :meth:`~ligandai.resources.peptides.Peptides.generate`.
+
+    All fields are optional — they are present only when the corresponding
+    guidance module was active during generation.
+    """
+
+    predicted_halflife_min: float | None = Field(
+        default=None, alias="predicted_halflife_min",
+        description="Predicted plasma half-life in minutes.",
+    )
+    predicted_halflife_hours: float | None = Field(
+        default=None, alias="predicted_halflife_hours",
+        description="Predicted plasma half-life in hours.",
+    )
+    cleavage_risk_score: float | None = Field(
+        default=None, alias="cleavage_risk_score",
+        description="Composite protease cleavage risk (0 = stable, 1 = labile).",
+    )
+    n_terminal_class: str | None = Field(
+        default=None, alias="n_terminal_class",
+        description="N-end rule class (e.g. 'stabilizing', 'destabilizing').",
+    )
+    n_terminal_halflife_min: float | None = Field(
+        default=None, alias="n_terminal_halflife_min",
+    )
+    c_terminal_score: float | None = Field(
+        default=None, alias="c_terminal_score",
+    )
+    stability_grade: str | None = Field(
+        default=None, alias="stability_grade",
+        description="Composite proteolytic stability grade A–F.",
+    )
+    trypsin_sites: int | None = Field(default=None, alias="trypsin_sites")
+    chymotrypsin_sites: int | None = Field(default=None, alias="chymotrypsin_sites")
+    dppiv_vulnerable: bool | None = Field(default=None, alias="dppiv_vulnerable")
+    trp_count: int | None = Field(default=None, alias="trp_count")
+
+
+class ImmunoScores(_LGModel):
+    """Immunogenicity scores emitted by the guided Modal worker.
+
+    Populated when ``immunogenicity=True`` in
+    :meth:`~ligandai.resources.peptides.Peptides.generate`.
+    """
+
+    immuno_risk_score: float | None = Field(
+        default=None, alias="immuno_risk_score",
+        description="Composite immunogenicity risk score (0 = low, 1 = high).",
+    )
+    immuno_grade: str | None = Field(
+        default=None, alias="immuno_grade",
+        description="Composite immunogenicity grade A–F.",
+    )
+    mhc_i_epitope_count: int | None = Field(default=None, alias="mhc_i_epitope_count")
+    mhc_ii_epitope_count: int | None = Field(default=None, alias="mhc_ii_epitope_count")
+    tap_transport_score: float | None = Field(default=None, alias="tap_transport_score")
+    bcr_epitope_score: float | None = Field(default=None, alias="bcr_epitope_score")
+    tcr_contact_score: float | None = Field(default=None, alias="tcr_contact_score")
+    population_coverage_pct: float | None = Field(
+        default=None, alias="population_coverage_pct",
+        description="Estimated population HLA coverage percentage.",
+    )
+
+
 class Peptide(_LGModel):
     name: str | None = None
     sequence: str
     target_gene: str | None = Field(default=None, alias="targetGene")
+    # Pre-fold predicted scores (available immediately after generation)
+    predicted_ipsae: float | None = Field(default=None, alias="predictedIpsae")
+    predicted_iptm: float | None = Field(default=None, alias="predictedIptm")
+    predicted_ptm: float | None = Field(default=None, alias="predictedPtm")
+    predicted_plddt: float | None = Field(default=None, alias="predictedPlddt")
+    binder_prob: float | None = Field(default=None, alias="binderProb")
+    ligandiq: float | None = None
+    # Post-fold structural scores (only available after Boltz-2 folding)
     ipsae: float | None = None
     iptm: float | None = None
     ptm: float | None = None
     plddt: float | None = None
+    # DeltaForge thermodynamic scores (only available after fold + scoring)
     deltaforge_dg: float | None = Field(default=None, alias="deltaforgeDg")
     deltaforge_kd: float | None = Field(default=None, alias="deltaforgeKd")
-    ligandiq: float | None = None
     classification: str | None = None
     rank: int | None = None
     fold_id: str | None = Field(default=None, alias="foldId")
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
+    # Pro+ tier guidance scores (populated when the corresponding guidance
+    # module was active during generation)
+    stability_grade: str | None = Field(
+        default=None, alias="stabilityGrade",
+        description="Composite proteolytic stability grade A–F.",
+    )
+    immunogenicity_score: float | None = Field(
+        default=None, alias="immunogenicityScore",
+        description="Composite immunogenicity risk score (0–1).",
+    )
+    # Structured stability / immunogenicity sub-scores.
+    # Sourced from the ``stability_scores`` / ``immuno_scores`` JSONB columns.
+    stability_scores: StabilityScores | None = Field(
+        default=None, alias="stability_scores",
+        description="Detailed proteolytic stability + half-life scores.",
+    )
+    immuno_scores: ImmunoScores | None = Field(
+        default=None, alias="immuno_scores",
+        description="Detailed immunogenicity epitope scores.",
+    )
+    # Cyclic mode used during generation (from guidance_config.cyclicMode)
+    cyclic_mode: str | None = Field(
+        default=None, alias="cyclicMode",
+        description="Cyclic constraint active during generation: 'none'|'lactam'|'disulfide'|'head_tail_contact'.",
+    )
 
 
 class PeptideInput(_LGModel):

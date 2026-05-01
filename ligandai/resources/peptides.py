@@ -39,6 +39,60 @@ from ligandai.types import (
 
 _TargetingStrategy = Literal["full_surface", "pocket_targeted"]
 
+# Cyclic peptide mode. Controls which cyclization constraint is applied during
+# generation (recombinant-only scope — Adaptyv synthesis path).
+#
+# - ``"none"`` — linear peptide, no cyclic constraint (default).
+# - ``"lactam"`` — head-to-tail amide closure; PREDICTION/VIZ layer only.
+#   The synthesis order goes out as the disulfide (Cys-Cys) construct when
+#   the user accepts a lactam-designed peptide via Adaptyv.
+# - ``"disulfide"`` — terminal Cys-Cys bridge. PRIMARY recombinant-shippable
+#   mode. When ``strict_recombinant=True`` (default), no internal Cys allowed.
+# - ``"head_tail_contact"`` — soft B-matrix bias toward terminal-pair-favorable
+#   compositions; no synthesis constraint added.
+#
+# Tier-gated: requires academia / pro / pro_commercial / enterprise /
+# discovery_partner tier. basic/free → server returns HTTP 403.
+_CyclicMode = Literal["none", "lactam", "disulfide", "head_tail_contact"]
+
+# Charge filtering mode applied by the filtered Modal worker.
+# - ``"off"`` — no charge filter (default behavior when chargeMode='off').
+# - ``"lt"`` — keep peptides with net charge < chargeValue.
+# - ``"gt"`` — keep peptides with net charge > chargeValue.
+# - ``"between"`` — keep peptides with chargeMin ≤ net charge ≤ chargeMax.
+_ChargeMode = Literal["off", "lt", "gt", "between"]
+
+# Cysteine placement policy applied during peptide generation.
+#
+# - ``"allow_all"`` / ``"allow"`` — no filtering; the model is free to place
+#   cysteines anywhere. Use this when you want unconstrained generation, e.g.
+#   when targeting a covalent binder against a target Cys.
+# - ``"disulfide_only"`` / ``"stability_only"`` (default) — only keep peptides
+#   with 0 cysteines OR pairs whose positions form a plausible disulfide
+#   geometry (|i-j| in {3,4} or >=6).
+# - ``"exclude_all"`` / ``"exclude"`` — reject any peptide containing cysteine.
+#
+# Server-side this is enforced via rejection sampling with backpressure refill,
+# so requesting ``num_peptides=N`` returns exactly N peptides regardless of mode.
+_CysteineMode = Literal[
+    "allow_all",
+    "allow",
+    "disulfide_only",
+    "stability_only",
+    "exclude_all",
+    "exclude",
+]
+
+# Half-life guidance target. ``"extended"`` biases the model toward sequences
+# with longer plasma half-life; ``"rapid"`` biases toward fast-clearing peptides
+# (e.g. for dosing flexibility); ``"moderate"`` is the middle ground.
+_HalflifeTarget = Literal["extended", "rapid", "moderate"]
+
+# Proteolytic stability guidance mode. ``"resist"`` pushes the model away from
+# protease-cleavable motifs; ``"target"`` does the inverse (deliberately
+# cleavable, used for prodrugs / pro-peptides).
+_StabilityMode = Literal["resist", "target"]
+
 
 def _generation_target(
     gene: str,
@@ -73,6 +127,30 @@ def _generation_body(
     gen_gpus: int,
     fold_gpus: int,
     program_id: int | None,
+    cysteine_mode: _CysteineMode,
+    quality_guided: bool,
+    quality_guidance_scale: float,
+    immunogenicity: bool,
+    immuno_strength: float,
+    immuno_modules: dict[str, bool] | None,
+    serum_stability: bool,
+    stability_strength: float,
+    stability_mode: _StabilityMode,
+    stability_modules: dict[str, bool] | None,
+    halflife: _HalflifeTarget | None,
+    halflife_strength: float,
+    # Charge / solubility filtering (tier-gated; server activates filtered
+    # Modal worker when any non-default constraint is present).
+    charge_mode: _ChargeMode | None,
+    charge_value: float | None,
+    charge_min: float | None,
+    charge_max: float | None,
+    min_solubility: float | None,
+    # Cyclization (tier-gated: academia/pro/enterprise/discovery_partner only).
+    cyclic_mode: _CyclicMode | None,
+    cyclic_strength: float,
+    strict_recombinant: bool,
+    dual_fold_viz: bool,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
@@ -83,13 +161,53 @@ def _generation_body(
         "deimmunizeMode": deimmunize_mode,
         "genParallelCount": gen_gpus,
         "foldingGpus": fold_gpus,
+        "cysteineMode": cysteine_mode,
+        # Guidance modules (server defaults: all off; require pro+ tier or
+        # explicit moduleAccess override on the user record).
+        "qualityGuidedEnabled": quality_guided,
+        "qualityGuidanceScale": quality_guidance_scale,
+        "immunoEnabled": immunogenicity,
+        "immunoStrength": immuno_strength,
+        "stabilityEnabled": serum_stability,
+        "stabilityStrength": stability_strength,
+        "stabilityMode": stability_mode,
+        "halflifeEnabled": halflife is not None,
     }
+    if halflife is not None:
+        body["halflifeTarget"] = halflife
+        body["halflifeStrength"] = halflife_strength
     if num_peptides is not None:
         body["peptidesPerTarget"] = num_peptides
     if top_n_fold is not None:
         body["maxFoldsPerTarget"] = top_n_fold
     if program_id is not None:
         body["programId"] = program_id
+    # Optional immuno / stability sub-modules (dict of booleans per protease/epitope)
+    if immuno_modules is not None:
+        body["immunoModules"] = immuno_modules
+    if stability_modules is not None:
+        body["stabilityModules"] = stability_modules
+    # Charge / solubility filtering — only send non-None values; server uses
+    # its own defaults when these keys are absent.
+    if charge_mode is not None:
+        body["chargeMode"] = charge_mode
+    if charge_value is not None:
+        body["chargeValue"] = charge_value
+    if charge_min is not None:
+        body["chargeMin"] = charge_min
+    if charge_max is not None:
+        body["chargeMax"] = charge_max
+    if min_solubility is not None:
+        body["minSolubility"] = min_solubility
+    # Cyclization — only send when explicitly requested (non-None + non-"none").
+    # The server reads this via req.body.cyclicMode; tier gate is enforced
+    # server-side (HTTP 403 for basic/free), but we also document it here.
+    if cyclic_mode is not None and cyclic_mode != "none":
+        body["cyclicMode"] = cyclic_mode
+        body["cyclicStrength"] = cyclic_strength
+        body["strictRecombinant"] = strict_recombinant
+        if dual_fold_viz:
+            body["dualFoldViz"] = dual_fold_viz
     if extra:
         body.update(extra)
     return body
@@ -416,9 +534,88 @@ class Peptides(Resource):
         gen_gpus: int = 1,
         fold_gpus: int = 5,
         program_id: int | None = None,
+        cysteine_mode: _CysteineMode = "disulfide_only",
+        quality_guided: bool = False,
+        quality_guidance_scale: float = 1.0,
+        immunogenicity: bool = False,
+        immuno_strength: float = 2.0,
+        immuno_modules: dict[str, bool] | None = None,
+        serum_stability: bool = False,
+        stability_strength: float = 2.0,
+        stability_mode: _StabilityMode = "resist",
+        stability_modules: dict[str, bool] | None = None,
+        halflife: _HalflifeTarget | None = None,
+        halflife_strength: float = 2.0,
+        # Charge / solubility filtering (pro+ tier only; server activates
+        # filtered Modal worker when any non-default constraint is present).
+        charge_mode: _ChargeMode | None = None,
+        charge_value: float | None = None,
+        charge_min: float | None = None,
+        charge_max: float | None = None,
+        min_solubility: float | None = None,
+        # Cyclization (tier-gated: academia/pro/enterprise/discovery_partner).
+        # Pass ``cyclic_mode="disulfide"`` for terminal Cys-Cys bridge (primary
+        # recombinant-shippable mode), ``"lactam"`` for head-to-tail amide
+        # closure (prediction/viz layer only), or ``"head_tail_contact"`` for
+        # soft B-matrix bias without a synthesis constraint.
+        # basic/free users receive HTTP 403 from the server.
+        cyclic_mode: _CyclicMode | None = None,
+        cyclic_strength: float = 2.0,
+        strict_recombinant: bool = True,
+        dual_fold_viz: bool = False,
         **extra: Any,
     ) -> Job[GenerationResult]:
-        """Submit a peptide generation job. Returns a :class:`Job`."""
+        """Submit a peptide generation job. Returns a :class:`Job`.
+
+        Args:
+            gene: Target gene symbol (e.g. ``"EGFR"``).
+            num_peptides: Peptides to generate per target (server default 300).
+            length_range: ``(min_aa, max_aa)`` length bounds (default ``(20, 70)``).
+            target_residues: Optional pocket residue ranges for guided targeting.
+            targeting_strategy: ``"full_surface"`` or ``"pocket_targeted"``.
+            auto_fold: Run Boltz-2 folding automatically after generation.
+            top_n_fold: Cap on how many peptides to fold per target.
+            ec_domain_trimming: Trim signal peptide / EC domain before generation.
+            deimmunize_mode: Apply post-generation deimmunization.
+            variant_id: Protein variant ID (from ``peptides.variants``).
+            gen_gpus: GPU count for generation (default 1).
+            fold_gpus: GPU count for folding (default 5).
+            program_id: Program/workstream ID to associate session with.
+            cysteine_mode: Cysteine placement policy (``"disulfide_only"`` /
+                ``"allow_all"`` / ``"exclude_all"``).
+            quality_guided: Enable quality-guided generation (pro+ tier).
+            quality_guidance_scale: Scale for quality guidance (default 1.0).
+            immunogenicity: Enable immunogenicity guidance (pro+ tier).
+            immuno_strength: Immunogenicity guidance strength 1.0–3.0.
+            immuno_modules: Optional dict enabling specific epitope modules,
+                e.g. ``{"mhc_i": True, "mhc_ii": True, "humanness": True}``.
+            serum_stability: Enable proteolytic stability guidance (pro+ tier).
+            stability_strength: Stability guidance strength 1.0–3.0.
+            stability_mode: ``"resist"`` (avoid cleavage) or ``"target"`` (prodrug).
+            stability_modules: Optional dict enabling specific protease modules,
+                e.g. ``{"trypsin": True, "dppiv": True}``.
+            halflife: Half-life target (``"extended"`` / ``"rapid"`` / ``"moderate"``).
+                ``None`` disables half-life guidance (default).
+            halflife_strength: Half-life guidance strength 1.0–3.0.
+            charge_mode: Charge filter mode (pro+ tier). ``"lt"`` keeps peptides
+                with net charge < ``charge_value``; ``"gt"`` keeps those above;
+                ``"between"`` uses ``charge_min``/``charge_max`` bounds;
+                ``"off"`` disables filtering (server default).
+            charge_value: Threshold for ``charge_mode="lt"`` or ``"gt"``.
+            charge_min: Lower bound for ``charge_mode="between"``.
+            charge_max: Upper bound for ``charge_mode="between"``.
+            min_solubility: Minimum GRAVY-based solubility score filter.
+            cyclic_mode: Cyclization constraint — ``"disulfide"`` (terminal
+                Cys-Cys, primary recombinant-shippable), ``"lactam"``
+                (head-to-tail amide, prediction only), or
+                ``"head_tail_contact"`` (soft bias). Requires
+                academia/pro/enterprise/discovery_partner tier.
+            cyclic_strength: Soft-constraint strength for cyclic guidance.
+            strict_recombinant: For ``cyclic_mode="disulfide"``, forbid internal
+                Cys residues (required for Adaptyv synthesis path).
+            dual_fold_viz: For ``cyclic_mode="lactam"``, also fold the
+                Cys-wrapped (disulfide) variant for side-by-side comparison.
+        """
         if self._client is not None:
             self._client._require_feature("generate_peptides")
         body = _generation_body(
@@ -435,6 +632,27 @@ class Peptides(Resource):
             gen_gpus=gen_gpus,
             fold_gpus=fold_gpus,
             program_id=program_id,
+            cysteine_mode=cysteine_mode,
+            quality_guided=quality_guided,
+            quality_guidance_scale=quality_guidance_scale,
+            immunogenicity=immunogenicity,
+            immuno_strength=immuno_strength,
+            immuno_modules=immuno_modules,
+            serum_stability=serum_stability,
+            stability_strength=stability_strength,
+            stability_mode=stability_mode,
+            stability_modules=stability_modules,
+            halflife=halflife,
+            halflife_strength=halflife_strength,
+            charge_mode=charge_mode,
+            charge_value=charge_value,
+            charge_min=charge_min,
+            charge_max=charge_max,
+            min_solubility=min_solubility,
+            cyclic_mode=cyclic_mode,
+            cyclic_strength=cyclic_strength,
+            strict_recombinant=strict_recombinant,
+            dual_fold_viz=dual_fold_viz,
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -741,8 +959,30 @@ class AsyncPeptides(AsyncResource):
         gen_gpus: int = 1,
         fold_gpus: int = 5,
         program_id: int | None = None,
+        cysteine_mode: _CysteineMode = "disulfide_only",
+        quality_guided: bool = False,
+        quality_guidance_scale: float = 1.0,
+        immunogenicity: bool = False,
+        immuno_strength: float = 2.0,
+        immuno_modules: dict[str, bool] | None = None,
+        serum_stability: bool = False,
+        stability_strength: float = 2.0,
+        stability_mode: _StabilityMode = "resist",
+        stability_modules: dict[str, bool] | None = None,
+        halflife: _HalflifeTarget | None = None,
+        halflife_strength: float = 2.0,
+        charge_mode: _ChargeMode | None = None,
+        charge_value: float | None = None,
+        charge_min: float | None = None,
+        charge_max: float | None = None,
+        min_solubility: float | None = None,
+        cyclic_mode: _CyclicMode | None = None,
+        cyclic_strength: float = 2.0,
+        strict_recombinant: bool = True,
+        dual_fold_viz: bool = False,
         **extra: Any,
     ) -> AsyncJob[GenerationResult]:
+        """Async variant of :meth:`Peptides.generate`. See that method for full docs."""
         if self._client is not None:
             self._client._require_feature("generate_peptides")
         body = _generation_body(
@@ -759,6 +999,27 @@ class AsyncPeptides(AsyncResource):
             gen_gpus=gen_gpus,
             fold_gpus=fold_gpus,
             program_id=program_id,
+            cysteine_mode=cysteine_mode,
+            quality_guided=quality_guided,
+            quality_guidance_scale=quality_guidance_scale,
+            immunogenicity=immunogenicity,
+            immuno_strength=immuno_strength,
+            immuno_modules=immuno_modules,
+            serum_stability=serum_stability,
+            stability_strength=stability_strength,
+            stability_mode=stability_mode,
+            stability_modules=stability_modules,
+            halflife=halflife,
+            halflife_strength=halflife_strength,
+            charge_mode=charge_mode,
+            charge_value=charge_value,
+            charge_min=charge_min,
+            charge_max=charge_max,
+            min_solubility=min_solubility,
+            cyclic_mode=cyclic_mode,
+            cyclic_strength=cyclic_strength,
+            strict_recombinant=strict_recombinant,
+            dual_fold_viz=dual_fold_viz,
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
