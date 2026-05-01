@@ -1,21 +1,72 @@
-MIT License
+LigandAI Python SDK — Proprietary License
 
-Copyright (c) 2025 Ligandal, Inc.
+Copyright © 2025 Ligandal, Inc. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+TERMS OF USE AND EULA AGREEMENT
+--------------------------------
+BY INSTALLING, COPYING, ACCESSING, OR OTHERWISE USING THIS SOFTWARE, YOU
+AGREE TO BE BOUND BY THE LIGANDAI TERMS OF SERVICE AND END USER LICENSE
+AGREEMENT (COLLECTIVELY, THE "AGREEMENT"), AVAILABLE AT:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+    https://ligandai.com/terms
+    https://ligandai.com/eula
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IF YOU DO NOT AGREE TO THE AGREEMENT, DO NOT INSTALL OR USE THIS SOFTWARE.
+
+This Agreement is between you (either an individual or a single entity, the
+"User") and Ligandal, Inc. ("Ligandal," "we," or "us") and governs your use
+of the LigandAI Python SDK and any related documentation (collectively, the
+"Software").
+
+GRANT OF LICENSE
+----------------
+Subject to User's compliance with the Agreement, Ligandal grants User a
+limited, non-exclusive, non-transferable, non-sublicensable license to use
+the Software solely to access and interact with the LigandAI platform via
+User's authorized API key.
+
+RESTRICTIONS
+------------
+User may NOT:
+- Remove, alter, or obscure any copyright, trademark, or proprietary notice.
+- Reverse engineer, decompile, or disassemble any portion of the Software.
+- Sublicense, sell, resell, transfer, assign, or otherwise dispose of the
+  Software or any right therein without prior written consent from Ligandal.
+- Use the Software to develop a competing product or service.
+- Use the Software in violation of any applicable export control laws.
+
+DATA AND PRIVACY
+----------------
+All API calls made through the Software are logged by Ligandal for billing,
+abuse prevention, and platform analytics as described in the LigandAI Privacy
+Policy at https://ligandai.com/privacy. By using the Software you consent to
+such logging.
+
+DISCLAIMER OF WARRANTIES
+-------------------------
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND. LIGANDAL
+EXPRESSLY DISCLAIMS ALL WARRANTIES, EXPRESS OR IMPLIED, INCLUDING ANY IMPLIED
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NON-INFRINGEMENT.
+
+LIMITATION OF LIABILITY
+-----------------------
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL LIGANDAL BE LIABLE
+FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ARISING FROM YOUR USE OF THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES. LIGANDAL'S TOTAL CUMULATIVE LIABILITY ARISING OUT OF OR RELATED
+TO THIS AGREEMENT SHALL NOT EXCEED THE FEES PAID BY USER IN THE TWELVE MONTHS
+PRECEDING THE CLAIM.
+
+GOVERNING LAW
+-------------
+This Agreement is governed by the laws of the State of California, without
+regard to conflict-of-law principles.
+
+ENTIRE AGREEMENT
+----------------
+This License, together with the LigandAI Terms of Service and End User
+License Agreement at https://ligandai.com/terms and https://ligandai.com/eula,
+constitutes the entire agreement between the parties regarding the Software.
+
+Contact: legal@ligandal.com

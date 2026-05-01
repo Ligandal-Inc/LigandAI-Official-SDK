@@ -11,6 +11,7 @@ Endpoint mapping (server source-of-truth):
 - :meth:`Peptides.fold_custom_mutation`   → ``POST /api/ptf/fold-custom-mutation`` (or boltz2/modified-fold)
 - :meth:`Peptides.continue_folding`       → ``POST /api/ptf/parallel/{sid}/continue``
 - :meth:`Peptides.score_complex`          → ``POST /api/binder-scoring/fold-and-score``
+- :meth:`Peptides.score_pdb`              → ``POST /api/v1/deltaforge/score-pdb``
 - :meth:`Peptides.score_with_ligandiq`    → ``POST /api/ptf/parallel/{sid}/ligandiq-score``
 - :meth:`Peptides.analyze_solubility`     → ``POST /api/peptide-features/solubility``
 - :meth:`Peptides.search`                 → ``GET  /api/ptf/genes/summary`` + filter
@@ -25,12 +26,14 @@ from __future__ import annotations
 
 import warnings
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from ligandai.errors import LigandAIError
 from ligandai.jobs import AsyncJob, Job
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
+    CostEstimate,
     DeltaForgeScore,
     FoldResult,
     GeneSummary,
@@ -48,6 +51,8 @@ from ligandai.types import (
 # against an allowlist and returns 400 for unknown entries — keep this in sync.
 _IncludeField = Literal["pocket_features", "interface", "pdb"]
 _ALLOWED_INCLUDE: frozenset[str] = frozenset({"pocket_features", "interface", "pdb"})
+_DeltaForgeScorer = Literal["auto", "current", "v10"]
+_DeltaForgeAggregateMethod = Literal["boltzmann_parallel", "best_pair", "mean_pair"]
 
 # Cysteine-control keys that used to be passed via ``extra={...}`` and are now
 # first-class typed kwargs on :meth:`Peptides.generate`. We continue to accept
@@ -95,6 +100,29 @@ def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
         ),
         DeprecationWarning,
         stacklevel=3,
+    )
+
+
+def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
+    scoring = data.get("scoring") or data.get("deltaforge") or data
+    return DeltaForgeScore.model_validate(
+        {
+            "dg": scoring.get("dg") or scoring.get("delta_g"),
+            "kd": scoring.get("kd") or scoring.get("kd_nm"),
+            "kd_nm": scoring.get("kd_nm"),
+            "contacts": scoring.get("contacts") or scoring.get("contact_count") or scoring.get("num_contacts"),
+            "interfaceResidues": scoring.get("interface_residues"),
+            "scorer": scoring.get("scorer"),
+            "scorer_version": scoring.get("scorer_version"),
+            "model_sha256": scoring.get("model_sha256"),
+            "feature_schema_version": scoring.get("feature_schema_version"),
+            "aggregate_method": scoring.get("aggregate_method"),
+            "best_pair": scoring.get("best_pair"),
+            "pair_scores": scoring.get("pair_scores"),
+            "pair_errors": scoring.get("pair_errors"),
+            "warnings": scoring.get("warnings"),
+            "metadata": scoring.get("metadata") or scoring,
+        }
     )
 
 _TargetingStrategy = Literal["full_surface", "pocket_targeted"]
@@ -858,6 +886,7 @@ class Peptides(Resource):
         target_sequence: str,
         binder_name: str = "binder",
         target_name: str = "target",
+        scorer: _DeltaForgeScorer = "auto",
     ) -> Job[DeltaForgeScore]:
         """``POST /api/binder-scoring/fold-and-score`` — submit a fold + DeltaForge scoring job.
 
@@ -869,6 +898,7 @@ class Peptides(Resource):
             "targetSequence": target_sequence,
             "binderName": binder_name,
             "targetName": target_name,
+            "scorer": scorer,
         }
         payload = self._transport.request("POST", "/api/binder-scoring/fold-and-score", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""
@@ -876,25 +906,59 @@ class Peptides(Resource):
             raise LigandAIError("Server did not return a jobId", response=payload)
 
         def parse(data: dict[str, Any]) -> DeltaForgeScore:
-            scoring = data.get("scoring") or data.get("deltaforge") or data
-            return DeltaForgeScore.model_validate(
-                {
-                    "dg": scoring.get("dg") or scoring.get("delta_g"),
-                    "kd": scoring.get("kd"),
-                    "contacts": scoring.get("contacts") or scoring.get("contact_count"),
-                    "interfaceResidues": scoring.get("interface_residues"),
-                    "metadata": scoring.get("metadata"),
-                }
-            )
+            return _parse_deltaforge_score(data)
 
         return Job(
             self._transport,
             job_id,
             job_type="scoring",
             parser=parse,
-            status_path="/api/binder-scoring/job/{job_id}",
+            status_path=f"/api/binder-scoring/job/{{job_id}}?scorer={scorer}",
             initial={"id": job_id, "type": "scoring", "status": "submitted"},
         )
+
+    def score_pdb(
+        self,
+        *,
+        pdb_content: str | None = None,
+        pdb_file: str | Path | None = None,
+        receptor_chains: list[str] | None = None,
+        peptide_chain: str | None = None,
+        chain_a: str | None = None,
+        chain_b: str | None = None,
+        scorer: _DeltaForgeScorer = "auto",
+        aggregate_method: _DeltaForgeAggregateMethod = "boltzmann_parallel",
+        include_features: bool = False,
+    ) -> DeltaForgeScore:
+        """Score a user-provided PDB with DeltaForge.
+
+        Pass either ``pdb_content=`` or ``pdb_file=``. ``receptor_chains`` and
+        ``peptide_chain`` are preferred; ``chain_a`` / ``chain_b`` are accepted
+        as aliases for single-interface scoring.
+        """
+        if not pdb_content and not pdb_file:
+            raise ValueError("Pass pdb_content= or pdb_file=")
+        if pdb_content and pdb_file:
+            raise ValueError("Pass only one of pdb_content= or pdb_file=")
+        content = pdb_content if pdb_content is not None else Path(pdb_file).read_text()
+        receptors = receptor_chains or ([chain_a] if chain_a else None)
+        peptide = peptide_chain or chain_b
+        if not receptors or not peptide:
+            raise ValueError("Pass receptor_chains= and peptide_chain=, or chain_a= and chain_b=")
+
+        payload = self._transport.request(
+            "POST",
+            "/api/v1/deltaforge/score-pdb",
+            json={
+                "pdbContent": content,
+                "receptorChains": receptors,
+                "peptideChain": peptide,
+                "scorer": scorer,
+                "aggregateMethod": aggregate_method,
+                "includeFeatures": include_features,
+            },
+        ) or {}
+        return _parse_deltaforge_score(payload)
 
     def score_with_ligandiq(
         self,
@@ -1152,6 +1216,40 @@ class Peptides(Resource):
         return PeptideDetail.model_validate(payload)
 
 
+    def estimate_cost(
+        self,
+        *,
+        num_peptides: int,
+        auto_fold: bool = True,
+        fold_top_n: int | None = None,
+        fold_trajectories: int = 4,
+    ) -> CostEstimate:
+        """``GET /api/billing/estimate`` — estimate the credit cost of a generation + folding job.
+
+        Args:
+            num_peptides: Number of peptides to generate.
+            auto_fold: Whether folding will run automatically (default True).
+            fold_top_n: Cap on peptides folded; when None the server uses its default.
+            fold_trajectories: Diffusion samples per fold (default 4, matches Boltz-2 default).
+
+        Returns:
+            :class:`~ligandai.types.CostEstimate` with ``credits`` (int),
+            ``cost_usd`` (float), and ``breakdown`` dict by phase
+            (generation, folding, scoring).
+        """
+        params: dict[str, Any] = {
+            "num_peptides": num_peptides,
+            "auto_fold": auto_fold,
+            "fold_trajectories": fold_trajectories,
+        }
+        if fold_top_n is not None:
+            params["top_n"] = fold_top_n
+        payload = (
+            self._transport.request("GET", "/api/billing/estimate", params=params) or {}
+        )
+        return CostEstimate.model_validate(payload)
+
+
 # -- Async resource ---------------------------------------------------------
 
 
@@ -1371,12 +1469,14 @@ class AsyncPeptides(AsyncResource):
         target_sequence: str,
         binder_name: str = "binder",
         target_name: str = "target",
+        scorer: _DeltaForgeScorer = "auto",
     ) -> AsyncJob[DeltaForgeScore]:
         body = {
             "binderSequence": binder_sequence,
             "targetSequence": target_sequence,
             "binderName": binder_name,
             "targetName": target_name,
+            "scorer": scorer,
         }
         payload = await self._transport.request("POST", "/api/binder-scoring/fold-and-score", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""
@@ -1384,25 +1484,53 @@ class AsyncPeptides(AsyncResource):
             raise LigandAIError("Server did not return a jobId", response=payload)
 
         def parse(data: dict[str, Any]) -> DeltaForgeScore:
-            scoring = data.get("scoring") or data.get("deltaforge") or data
-            return DeltaForgeScore.model_validate(
-                {
-                    "dg": scoring.get("dg") or scoring.get("delta_g"),
-                    "kd": scoring.get("kd"),
-                    "contacts": scoring.get("contacts") or scoring.get("contact_count"),
-                    "interfaceResidues": scoring.get("interface_residues"),
-                    "metadata": scoring.get("metadata"),
-                }
-            )
+            return _parse_deltaforge_score(data)
 
         return AsyncJob(
             self._transport,
             job_id,
             job_type="scoring",
             parser=parse,
-            status_path="/api/binder-scoring/job/{job_id}",
+            status_path=f"/api/binder-scoring/job/{{job_id}}?scorer={scorer}",
             initial={"id": job_id, "type": "scoring", "status": "submitted"},
         )
+
+    async def score_pdb(
+        self,
+        *,
+        pdb_content: str | None = None,
+        pdb_file: str | Path | None = None,
+        receptor_chains: list[str] | None = None,
+        peptide_chain: str | None = None,
+        chain_a: str | None = None,
+        chain_b: str | None = None,
+        scorer: _DeltaForgeScorer = "auto",
+        aggregate_method: _DeltaForgeAggregateMethod = "boltzmann_parallel",
+        include_features: bool = False,
+    ) -> DeltaForgeScore:
+        if not pdb_content and not pdb_file:
+            raise ValueError("Pass pdb_content= or pdb_file=")
+        if pdb_content and pdb_file:
+            raise ValueError("Pass only one of pdb_content= or pdb_file=")
+        content = pdb_content if pdb_content is not None else Path(pdb_file).read_text()
+        receptors = receptor_chains or ([chain_a] if chain_a else None)
+        peptide = peptide_chain or chain_b
+        if not receptors or not peptide:
+            raise ValueError("Pass receptor_chains= and peptide_chain=, or chain_a= and chain_b=")
+
+        payload = await self._transport.request(
+            "POST",
+            "/api/v1/deltaforge/score-pdb",
+            json={
+                "pdbContent": content,
+                "receptorChains": receptors,
+                "peptideChain": peptide,
+                "scorer": scorer,
+                "aggregateMethod": aggregate_method,
+                "includeFeatures": include_features,
+            },
+        ) or {}
+        return _parse_deltaforge_score(payload)
 
     async def score_with_ligandiq(
         self,
@@ -1588,3 +1716,25 @@ class AsyncPeptides(AsyncResource):
             "GET", f"/api/v1/peptides/{id_int}", params=params
         ) or {}
         return PeptideDetail.model_validate(payload)
+
+    async def estimate_cost(
+        self,
+        *,
+        num_peptides: int,
+        auto_fold: bool = True,
+        fold_top_n: int | None = None,
+        fold_trajectories: int = 4,
+    ) -> CostEstimate:
+        """Async variant of :meth:`Peptides.estimate_cost`."""
+        params: dict[str, Any] = {
+            "num_peptides": num_peptides,
+            "auto_fold": auto_fold,
+            "fold_trajectories": fold_trajectories,
+        }
+        if fold_top_n is not None:
+            params["top_n"] = fold_top_n
+        payload = (
+            await self._transport.request("GET", "/api/billing/estimate", params=params)
+            or {}
+        )
+        return CostEstimate.model_validate(payload)
