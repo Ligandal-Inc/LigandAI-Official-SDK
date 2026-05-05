@@ -69,7 +69,7 @@ class CreditTransaction(_LGModel):
 class AccountBalance(_LGModel):
     """Current account balance and burn-rate summary."""
 
-    credits: int
+    credits: int = Field(alias="balance")
     burn_rate_30d: int | None = Field(default=None, alias="burnRate30d")
     days_remaining: float | None = Field(default=None, alias="daysRemaining")
     tier: str | None = None
@@ -790,6 +790,150 @@ class Mutation(_LGModel):
     consequence: str | None = None
     pathogenic: bool | None = None
     disease_id: int | None = Field(default=None, alias="diseaseId")
+
+
+# -- Synthesis / BLI Linker ---------------------------------------------------
+
+
+class BiotinLinker(_LGModel):
+    """A biotinylation linker/spacer option for BLI synthesis orders.
+
+    Mirrors ``LinkerConfig`` in ``server/linker-configuration.ts``.
+    Used by :meth:`~ligandai.resources.synthesis.Synthesis.linker_options`,
+    :meth:`~ligandai.resources.synthesis.Synthesis.recommend_linker`, and
+    :meth:`~ligandai.resources.synthesis.Synthesis.generation_mask_guidance`.
+    """
+
+    id: str
+    position: Literal["n_terminal", "c_terminal"]
+    type: str
+    description: str
+    format: str | None = None
+    recommended_for: list[str] = Field(default_factory=list, alias="recommendedFor")
+    length_angstroms: float = Field(alias="lengthAngstroms")
+    cost_addon: int | None = Field(default=None, alias="costAddon")
+    flexibility: Literal["rigid", "semi_flexible", "flexible", "highly_flexible"] | None = None
+
+
+class LinkerRecommendation(_LGModel):
+    """Server-recommended BLI biotinylation linker with reasoning."""
+
+    recommended: BiotinLinker
+    alternatives: list[BiotinLinker] = Field(default_factory=list)
+    reasoning: list[str] = Field(default_factory=list)
+
+
+class BindingOrientationResult(_LGModel):
+    """Which peptide terminus contacts the target — drives biotinylation choice."""
+
+    binding_end: Literal["n", "c", "middle"] = Field(alias="bindingEnd")
+    recommended_biotinylation: Literal["n", "c"] = Field(alias="recommendedBiotinylation")
+    confidence: float
+    reasoning: str
+    contact_density: dict[str, int] = Field(default_factory=dict, alias="contactDensity")
+
+
+class GenerationMaskGuidance(_LGModel):
+    """Generation-time mask hint derived from the planned BLI linker.
+
+    Tells the generator which terminus to avoid placing the binding interface
+    near (because that end will be tethered to the sensor surface).
+    """
+
+    avoid_binding_region: Literal["n_terminal", "c_terminal"] | None = Field(
+        default=None, alias="avoidBindingRegion"
+    )
+    avoid_residue_count: int = Field(default=0, alias="avoidResidueCount")
+    mask_hint: str = Field(alias="maskHint")
+    generation_constraints: dict[str, Any] = Field(
+        default_factory=dict, alias="generationConstraints"
+    )
+
+
+# -- Segment / scaffold config ------------------------------------------------
+
+
+class PeptideSegment(_LGModel):
+    """One segment in a multi-segment peptide design.
+
+    ``type`` values:
+    - ``"binding"``   — diffusion-generated with binding objective (contacts target)
+    - ``"linker"``    — diffusion-generated without binding mask (flexible connector)
+    - ``"stability"`` — diffusion-generated with intramolecular stability contacts
+    - ``"premade"``   — fixed, user-provided sequence (no generation)
+    """
+
+    id: str
+    type: Literal["binding", "linker", "stability", "premade"]
+    position: int
+    sequence: str | None = None
+    length_range: tuple[int, int] | None = Field(default=None, alias="lengthRange")
+    label: str | None = None
+    locked: bool = False
+
+
+class SegmentConfig(_LGModel):
+    """Multi-segment scaffold configuration for complex peptide designs.
+
+    ``mode="simple"`` — single contiguous binding domain (length_range applies to whole peptide).
+    ``mode="custom"`` — explicit ordered list of segments with individual types and lengths.
+
+    Presets exposed in the UI:
+    - ``"simple_binding"`` — one binding segment [20-50 AA]
+    - ``"stable_binding"`` — stability cap + binding core + stability cap
+    - ``"tat_cpp"`` — premade TAT + binding domain
+    - ``"helix_loop_helix"`` — binding + linker + binding
+    - ``"nes_signal"`` — binding domain + premade NES signal
+    - ``"rigid_linker_binding"`` — binding + premade GS rigid helical linker
+    """
+
+    mode: Literal["simple", "custom"] = "simple"
+    length_range: tuple[int, int] = Field(default=(20, 70), alias="lengthRange")
+    segments: list[PeptideSegment] = Field(default_factory=list)
+    auto_switch_to_custom: bool = Field(default=False, alias="autoSwitchToCustom")
+
+
+class PdcConfig(_LGModel):
+    """Peptide-Drug Conjugate configuration (Pro+ tier).
+
+    The drug payload is co-folded with Boltz-2 for accurate 3D structure prediction.
+    Built-in drugs: ciprofloxacin, vancomycin, gentamicin, doxorubicin, MMAE,
+    maytansine, FITC, Cy5, Alexa488, biotin, SN-38, gemcitabine.
+    """
+
+    drug_name: str | None = Field(default=None, alias="drugName")
+    drug_smiles: str | None = Field(default=None, alias="drugSmiles")
+    drug_mw: float | None = Field(default=None, alias="drugMw")
+    linker_sequence: str = Field(default="GSGSG", alias="linkerSequence")
+    linker_position: Literal["n_terminal", "c_terminal"] = Field(
+        default="c_terminal", alias="linkerPosition"
+    )
+    linker_type: Literal["stable", "cleavable_protease", "cleavable_ph", "disulfide"] = Field(
+        default="stable", alias="linkerType"
+    )
+    conjugation_chemistry: Literal["amide", "thioether", "ester", "click"] = Field(
+        default="amide", alias="conjugationChemistry"
+    )
+
+
+class EcTrimmingConfig(_LGModel):
+    """Full EC-trimming / structure-preparation configuration.
+
+    ``generation_mode`` controls which portion of the receptor is used for LigandForge
+    pocket feature extraction. ``folding_mode`` controls what is sent to Boltz-2.
+
+    Defaults are topology-aware:
+    - Single-pass TM: ``ec_only`` / ``ec_only``
+    - Multi-pass TM (GPCRs): ``ec_tm`` / ``trim_terminal_ic``
+    """
+
+    remove_signal_peptide: bool = Field(default=True, alias="removeSignalPeptide")
+    generation_mode: Literal["ec_only", "ec_tm", "full"] = Field(
+        default="ec_only", alias="generationMode"
+    )
+    folding_mode: Literal["ec_only", "trim_terminal_ic", "full"] = Field(
+        default="ec_only", alias="foldingMode"
+    )
 
 
 # -- Synthesis ----------------------------------------------------------------

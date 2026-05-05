@@ -148,6 +148,47 @@ for pair in score.pair_scores or []:
     print(pair.receptor_chain, pair.peptide_chain, pair.dg, pair.contacts)
 ```
 
+## Folding Controls and Peptide Viewing (v0.3.2+)
+
+```python
+job = client.peptides.generate(
+    gene="IL31",
+    num_peptides=25,
+    auto_fold=True,
+    top_n_fold=5,
+    num_trajectories=4,
+    folding_mode="parallel",
+    fold_strategy="top_ranked",
+)
+
+fold_job = client.peptides.fold(
+    ["ACDEFGHIK", "MNPQRSTVWY"],
+    sampling_steps=1000,
+    recycling_steps=5,
+    num_trajectories=10,
+    step_scale=1.2,
+)
+```
+
+```python
+from ligandai import (
+    align_candidates_to_receptor,
+    load_peptide_results,
+    rank_peptides,
+    serve_dashboard,
+    write_dashboard,
+)
+
+candidates = load_peptide_results(["fold_results.jsonl"])
+ranked = rank_peptides(candidates, score="ipsae", limit=10)
+aligned = align_candidates_to_receptor(ranked, "base_receptor.pdb", "aligned")
+handle = write_dashboard(aligned, "peptide_dashboard")
+serve_dashboard(handle, open_browser=True)
+```
+
+Terminal rendering can also launch ProteinView by Tristan Farmer / 001TMF,
+MIT License: https://github.com/001TMF/ProteinView.
+
 ## Guidance Modules (v0.2.0+)
 
 Pro+ tier keys unlock guidance modules that steer LigandForge during generation:
