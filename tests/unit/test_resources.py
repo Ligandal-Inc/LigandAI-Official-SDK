@@ -159,6 +159,33 @@ def test_peptide_generation_wait_hydrates_generation_complete_session(
     assert peptide.predicted_ptm is None
 
 
+def test_fold_forwards_advanced_boltz_knobs(httpx_mock: HTTPXMock, client: LigandAI) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/folding/predict",
+        method="POST",
+        json={"jobId": "fold_1"},
+    )
+    client.peptides.fold(
+        ["ACDEFGHIK"],
+        sampling_steps=1000,
+        recycling_steps=5,
+        diffusion_samples=1,
+        num_trajectories=10,
+        step_scale=1.2,
+    )
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    import json as _json
+
+    body = _json.loads(request.read())
+    assert body["samplingSteps"] == 1000
+    assert body["recyclingSteps"] == 5
+    assert body["diffusionSamples"] == 10
+    assert body["numTrajectories"] == 10
+    assert body["stepScale"] == 1.2
+
+
 # -- Tier gating -----------------------------------------------------------
 
 

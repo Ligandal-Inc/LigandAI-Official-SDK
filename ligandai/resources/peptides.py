@@ -35,14 +35,17 @@ from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     CostEstimate,
     DeltaForgeScore,
+    EcTrimmingConfig,
     FoldResult,
-    GeneSummary,
     GenerationResult,
+    GeneSummary,
     LigandIQScore,
+    PdcConfig,
     Peptide,
     PeptideDetail,
     PeptideInput,
     ResidueRange,
+    SegmentConfig,
     Sequence,
     SolubilityResult,
 )
@@ -239,6 +242,20 @@ def _generation_body(
     cyclic_strength: float,
     strict_recombinant: bool,
     dual_fold_viz: bool,
+    folding_mode: str | None,
+    fold_strategy: str | None,
+    folding_conformations: str | list[str] | None,
+    max_folds_per_target: int | None,
+    enable_expansion: bool | None,
+    auto_conformation_expansion: bool | None,
+    clash_resolution_enabled: bool | None,
+    md_relaxation_enabled: bool | None,
+    num_trajectories: int | None,
+    sampling_steps: int | None,
+    glycosylation_enabled: bool | None,
+    segment_config: "SegmentConfig | dict | None",
+    pdc_config: "PdcConfig | dict | None",
+    ec_trimming_config: "EcTrimmingConfig | dict | None",
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
@@ -268,6 +285,29 @@ def _generation_body(
         body["peptidesPerTarget"] = num_peptides
     if top_n_fold is not None:
         body["maxFoldsPerTarget"] = top_n_fold
+    if max_folds_per_target is not None:
+        body["maxFoldsPerTarget"] = max_folds_per_target
+    if folding_mode is not None:
+        body["foldingMode"] = folding_mode
+    if fold_strategy is not None:
+        body["foldStrategy"] = fold_strategy
+    if folding_conformations is not None:
+        body["foldingConformations"] = folding_conformations
+    if enable_expansion is not None:
+        body["enableExpansion"] = enable_expansion
+    if auto_conformation_expansion is not None:
+        body["autoConformationExpansion"] = auto_conformation_expansion
+    if clash_resolution_enabled is not None:
+        body["clashResolutionEnabled"] = clash_resolution_enabled
+    if md_relaxation_enabled is not None:
+        body["mdRelaxationEnabled"] = md_relaxation_enabled
+    if num_trajectories is not None:
+        body["numTrajectories"] = num_trajectories
+        body["diffusionSamples"] = num_trajectories
+    if sampling_steps is not None:
+        body["samplingSteps"] = sampling_steps
+    if glycosylation_enabled is not None:
+        body["glycosylationEnabled"] = glycosylation_enabled
     if program_id is not None:
         body["programId"] = program_id
     # Optional immuno / stability sub-modules (dict of booleans per protease/epitope)
@@ -296,6 +336,32 @@ def _generation_body(
         body["strictRecombinant"] = strict_recombinant
         if dual_fold_viz:
             body["dualFoldViz"] = dual_fold_viz
+    # Multi-segment scaffold config (binding/linker/stability/premade segments).
+    if segment_config is not None:
+        from ligandai.types import SegmentConfig
+        body["segmentConfig"] = (
+            segment_config.model_dump(by_alias=True)
+            if isinstance(segment_config, SegmentConfig)
+            else segment_config
+        )
+    # Peptide-Drug Conjugate configuration (Pro+ tier).
+    if pdc_config is not None:
+        from ligandai.types import PdcConfig
+        body["pdcConfig"] = (
+            pdc_config.model_dump(by_alias=True)
+            if isinstance(pdc_config, PdcConfig)
+            else pdc_config
+        )
+        body["pdcEnabled"] = True
+    # Fine-grained EC trimming / structure preparation.
+    if ec_trimming_config is not None:
+        from ligandai.types import EcTrimmingConfig
+        cfg = (
+            ec_trimming_config.model_dump(by_alias=True)
+            if isinstance(ec_trimming_config, EcTrimmingConfig)
+            else ec_trimming_config
+        )
+        body["ecTrimming"] = cfg
     if extra:
         body.update(extra)
     return body
@@ -312,6 +378,10 @@ def _fold_body(
     pegylation: bool | None = None,
     gpu_count: int = 1,
     diffusion_samples: int = 4,
+    sampling_steps: int | None = None,
+    recycling_steps: int | None = None,
+    num_trajectories: int | None = None,
+    step_scale: float | None = None,
 ) -> dict[str, Any]:
     """Build the body for ``POST /api/folding/predict``.
 
@@ -321,10 +391,18 @@ def _fold_body(
     body: dict[str, Any] = {
         "model": "boltz2",
         "gpuCount": gpu_count,
-        "diffusionSamples": diffusion_samples,
+        "diffusionSamples": num_trajectories if num_trajectories is not None else diffusion_samples,
         "templateMode": template_mode,
         "autoScore": auto_score,
     }
+    if sampling_steps is not None:
+        body["samplingSteps"] = sampling_steps
+    if recycling_steps is not None:
+        body["recyclingSteps"] = recycling_steps
+    if num_trajectories is not None:
+        body["numTrajectories"] = num_trajectories
+    if step_scale is not None:
+        body["stepScale"] = step_scale
     if target_gene is not None:
         body["targetGeneName"] = target_gene
     if msa_enabled is not None:
@@ -651,6 +729,20 @@ class Peptides(Resource):
         cyclic_strength: float = 2.0,
         strict_recombinant: bool = True,
         dual_fold_viz: bool = False,
+        folding_mode: str | None = None,
+        fold_strategy: str | None = None,
+        folding_conformations: str | list[str] | None = None,
+        max_folds_per_target: int | None = None,
+        enable_expansion: bool | None = None,
+        auto_conformation_expansion: bool | None = None,
+        clash_resolution_enabled: bool | None = None,
+        md_relaxation_enabled: bool | None = None,
+        num_trajectories: int | None = None,
+        sampling_steps: int | None = None,
+        glycosylation_enabled: bool | None = None,
+        segment_config: "SegmentConfig | dict | None" = None,
+        pdc_config: "PdcConfig | dict | None" = None,
+        ec_trimming_config: "EcTrimmingConfig | dict | None" = None,
         **extra: Any,
     ) -> Job[GenerationResult]:
         """Submit a peptide generation job. Returns a :class:`Job`.
@@ -671,20 +763,29 @@ class Peptides(Resource):
             program_id: Program/workstream ID to associate session with.
             cysteine_mode: Cysteine placement policy (``"disulfide_only"`` /
                 ``"allow_all"`` / ``"exclude_all"``).
-            quality_guided: Enable quality-guided generation (pro+ tier).
+            quality_guided: Enable quality-guided generation (basic+ tier, default ON
+                for basic+ when unset). Adds a +20 credit/peptide surcharge. Disabled
+                automatically when ``cyclic_mode`` is set (LigandIQ incompatible with
+                cyclic folds).
             quality_guidance_scale: Scale for quality guidance (default 1.0).
-            immunogenicity: Enable immunogenicity guidance (pro+ tier).
-            immuno_strength: Immunogenicity guidance strength 1.0–3.0.
-            immuno_modules: Optional dict enabling specific epitope modules,
-                e.g. ``{"mhc_i": True, "mhc_ii": True, "humanness": True}``.
-            serum_stability: Enable proteolytic stability guidance (pro+ tier).
-            stability_strength: Stability guidance strength 1.0–3.0.
+            immunogenicity: Enable immune guidance (academia+ tier). Steers
+                generation away from MHC-binding motifs toward sequences with low
+                predicted immunogenicity. Uses MHC-I/II anchor avoidance + scoring
+                during diffusion.
+            immuno_strength: Immune guidance strength 0.5–4.0 (default 2.0).
+                Enterprise tier unlocks values above 3.0.
+            immuno_modules: Optional per-module override, e.g.
+                ``{"mhc_i": True, "mhc_ii": True}``.
+            serum_stability: Enable stability guidance (academia+ tier). Suppresses
+                protease-recognition motifs to resist serum/lysosomal cleavage.
+                Use ``stability_mode="target"`` to flip this for prodrug designs.
+            stability_strength: Stability guidance strength 1.0-3.0.
             stability_mode: ``"resist"`` (avoid cleavage) or ``"target"`` (prodrug).
             stability_modules: Optional dict enabling specific protease modules,
                 e.g. ``{"trypsin": True, "dppiv": True}``.
             halflife: Half-life target (``"extended"`` / ``"rapid"`` / ``"moderate"``).
                 ``None`` disables half-life guidance (default).
-            halflife_strength: Half-life guidance strength 1.0–3.0.
+            halflife_strength: Half-life guidance strength 1.0-3.0.
             charge_mode: Charge filter mode (pro+ tier). ``"lt"`` keeps peptides
                 with net charge < ``charge_value``; ``"gt"`` keeps those above;
                 ``"between"`` uses ``charge_min``/``charge_max`` bounds;
@@ -703,6 +804,21 @@ class Peptides(Resource):
                 Cys residues (required for Adaptyv synthesis path).
             dual_fold_viz: For ``cyclic_mode="lactam"``, also fold the
                 Cys-wrapped (disulfide) variant for side-by-side comparison.
+            folding_mode: Server folding mode override, e.g. ``"serial"`` or
+                ``"parallel"``.
+            fold_strategy: Server fold strategy override.
+            folding_conformations: Conformation set to fold, e.g.
+                ``"generation"`` or ``["generation", "apo"]``.
+            max_folds_per_target: Explicit fold cap. Overrides ``top_n_fold``
+                when both are provided.
+            enable_expansion: Enable server-side conformation/peptide expansion.
+            auto_conformation_expansion: Let the server expand conformations
+                automatically.
+            clash_resolution_enabled: Enable server-side clash resolution before
+                folding/scoring.
+            md_relaxation_enabled: Enable MD relaxation when server-supported.
+            num_trajectories: Diffusion samples / trajectories per folded
+                peptide. ReceptorDB defaults to 4; set 1 to reduce runtime.
         """
         if self._client is not None:
             self._client._require_feature("generate_peptides")
@@ -744,6 +860,20 @@ class Peptides(Resource):
             cyclic_strength=cyclic_strength,
             strict_recombinant=strict_recombinant,
             dual_fold_viz=dual_fold_viz,
+            folding_mode=folding_mode,
+            fold_strategy=fold_strategy,
+            folding_conformations=folding_conformations,
+            max_folds_per_target=max_folds_per_target,
+            enable_expansion=enable_expansion,
+            auto_conformation_expansion=auto_conformation_expansion,
+            clash_resolution_enabled=clash_resolution_enabled,
+            md_relaxation_enabled=md_relaxation_enabled,
+            num_trajectories=num_trajectories,
+            sampling_steps=sampling_steps,
+            glycosylation_enabled=glycosylation_enabled,
+            segment_config=segment_config,
+            pdc_config=pdc_config,
+            ec_trimming_config=ec_trimming_config,
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -781,6 +911,10 @@ class Peptides(Resource):
         pegylation: bool | None = None,
         gpu_count: int = 1,
         diffusion_samples: int = 4,
+        sampling_steps: int | None = None,
+        recycling_steps: int | None = None,
+        num_trajectories: int | None = None,
+        step_scale: float | None = None,
     ) -> Job[FoldResult]:
         """Submit a Boltz-2 folding job (monomer or multimer)."""
         if self._client is not None:
@@ -795,6 +929,10 @@ class Peptides(Resource):
             pegylation=pegylation,
             gpu_count=gpu_count,
             diffusion_samples=diffusion_samples,
+            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps,
+            num_trajectories=num_trajectories,
+            step_scale=step_scale,
         )
         payload = self._transport.request("POST", "/api/folding/predict", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""
@@ -1290,6 +1428,20 @@ class AsyncPeptides(AsyncResource):
         cyclic_strength: float = 2.0,
         strict_recombinant: bool = True,
         dual_fold_viz: bool = False,
+        folding_mode: str | None = None,
+        fold_strategy: str | None = None,
+        folding_conformations: str | list[str] | None = None,
+        max_folds_per_target: int | None = None,
+        enable_expansion: bool | None = None,
+        auto_conformation_expansion: bool | None = None,
+        clash_resolution_enabled: bool | None = None,
+        md_relaxation_enabled: bool | None = None,
+        num_trajectories: int | None = None,
+        sampling_steps: int | None = None,
+        glycosylation_enabled: bool | None = None,
+        segment_config: "SegmentConfig | dict | None" = None,
+        pdc_config: "PdcConfig | dict | None" = None,
+        ec_trimming_config: "EcTrimmingConfig | dict | None" = None,
         **extra: Any,
     ) -> AsyncJob[GenerationResult]:
         """Async variant of :meth:`Peptides.generate`. See that method for full docs."""
@@ -1333,6 +1485,20 @@ class AsyncPeptides(AsyncResource):
             cyclic_strength=cyclic_strength,
             strict_recombinant=strict_recombinant,
             dual_fold_viz=dual_fold_viz,
+            folding_mode=folding_mode,
+            fold_strategy=fold_strategy,
+            folding_conformations=folding_conformations,
+            max_folds_per_target=max_folds_per_target,
+            enable_expansion=enable_expansion,
+            auto_conformation_expansion=auto_conformation_expansion,
+            clash_resolution_enabled=clash_resolution_enabled,
+            md_relaxation_enabled=md_relaxation_enabled,
+            num_trajectories=num_trajectories,
+            sampling_steps=sampling_steps,
+            glycosylation_enabled=glycosylation_enabled,
+            segment_config=segment_config,
+            pdc_config=pdc_config,
+            ec_trimming_config=ec_trimming_config,
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -1367,6 +1533,10 @@ class AsyncPeptides(AsyncResource):
         pegylation: bool | None = None,
         gpu_count: int = 1,
         diffusion_samples: int = 4,
+        sampling_steps: int | None = None,
+        recycling_steps: int | None = None,
+        num_trajectories: int | None = None,
+        step_scale: float | None = None,
     ) -> AsyncJob[FoldResult]:
         if self._client is not None:
             self._client._require_feature("predict_structure")
@@ -1380,6 +1550,10 @@ class AsyncPeptides(AsyncResource):
             pegylation=pegylation,
             gpu_count=gpu_count,
             diffusion_samples=diffusion_samples,
+            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps,
+            num_trajectories=num_trajectories,
+            step_scale=step_scale,
         )
         payload = await self._transport.request("POST", "/api/folding/predict", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""

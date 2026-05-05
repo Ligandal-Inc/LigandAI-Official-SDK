@@ -448,3 +448,46 @@ def test_cys_typed_kwargs_produce_expected_wire_body(
     assert body.get("cyclicMode") == "disulfide"
     assert body.get("cyclicStrength") == 2.5
     assert body.get("strictRecombinant") is True
+
+
+def test_generate_forwards_ptf_fold_controls(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/ptf/parallel/generate",
+        json={"sessionId": "sess_test"},
+    )
+    pro_client.peptides.generate(
+        gene="IL31",
+        num_peptides=25,
+        auto_fold=True,
+        top_n_fold=5,
+        fold_gpus=2,
+        folding_mode="parallel",
+        fold_strategy="ensemble",
+        folding_conformations=["generation", "apo"],
+        max_folds_per_target=7,
+        enable_expansion=False,
+        auto_conformation_expansion=False,
+        clash_resolution_enabled=False,
+        md_relaxation_enabled=True,
+        num_trajectories=4,
+    )
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    import json as _json
+
+    body = _json.loads(request.read())
+    assert body["autoFoldEnabled"] is True
+    assert body["maxFoldsPerTarget"] == 7
+    assert body["foldingGpus"] == 2
+    assert body["foldingMode"] == "parallel"
+    assert body["foldStrategy"] == "ensemble"
+    assert body["foldingConformations"] == ["generation", "apo"]
+    assert body["enableExpansion"] is False
+    assert body["autoConformationExpansion"] is False
+    assert body["clashResolutionEnabled"] is False
+    assert body["mdRelaxationEnabled"] is True
+    assert body["numTrajectories"] == 4
+    assert body["diffusionSamples"] == 4

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-05-03
+
+### Added
+
+- `Peptides.generate()` and `AsyncPeptides.generate()` now expose the PTF
+  fold-side controls used by the server: `folding_mode`, `fold_strategy`,
+  `folding_conformations`, `max_folds_per_target`, `enable_expansion`,
+  `auto_conformation_expansion`, `clash_resolution_enabled`,
+  `md_relaxation_enabled`, and `num_trajectories`.
+- `Peptides.fold()` and `AsyncPeptides.fold()` now expose advanced Boltz fold
+  controls: `sampling_steps`, `recycling_steps`, `num_trajectories`, and
+  `step_scale`.
+- Local peptide viewing helpers under `ligandai.peptide_viewer` can load
+  LigandForge/PTF JSON, JSONL, PDB, and result directories; rank candidates by
+  iPSAE or DeltaForge-style scores; align receptor+peptide folds to a base
+  receptor; launch ProteinView; and write/serve a localhost 3Dmol dashboard.
+
+### Notes
+
+- Terminal viewing support cites ProteinView by Tristan Farmer / 001TMF under
+  the MIT License: https://github.com/001TMF/ProteinView.
+
 ## [0.3.1] - 2026-04-30
 
 ### Added — billing surface (`client.account` + `client.peptides.estimate_cost`)
