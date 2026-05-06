@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Long-running job abstractions.
 
 Generation and folding operations return :class:`Job` (sync) or :class:`AsyncJob`

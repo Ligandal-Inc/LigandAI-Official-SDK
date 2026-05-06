@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Sphinx configuration for the LIGANDAI Python SDK docs."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from ligandai._version import __version__  # noqa: E402
 
 project = "LIGANDAI Python SDK"
 author = "Andre Watson"
-copyright = "2025, Ligandal, Inc."
+copyright = "2026, Ligandal, Inc."
 version = __version__
 release = __version__
 

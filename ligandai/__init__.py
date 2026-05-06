@@ -1,5 +1,5 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
-"""LIGANDAI® Python SDK.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
+"""LIGANDAI (TM) Python SDK.
 
 Official Python client for the LIGANDAI platform.
 
@@ -16,7 +16,7 @@ Example
     markers = client.discovery.tissue_markers(target_tissues=["Liver"])
 
     # Generate peptides
-    job = client.peptides.generate(gene="EGFR", num_peptides=300, auto_fold=True)
+    job = client.peptides.generate(gene="EGFR", num_peptides=50, auto_fold=True)
     result = job.wait()
 
 See https://docs.ligandai.com for full documentation.
@@ -30,11 +30,13 @@ from ligandai.errors import (
     LigandAIAuthError,
     LigandAICreditError,
     LigandAIError,
+    LigandAIJobError,
     LigandAINotFoundError,
     LigandAIPaidTierRequired,
     LigandAIRateLimitError,
     LigandAIServerError,
     LigandAITierError,
+    LigandAITimeoutError,
     LigandAIValidationError,
     NotSupportedOnReceptorDB,
 )
@@ -57,17 +59,33 @@ from ligandai.types import (
     AdaptyvExperiment,
     AdaptyvSequence,
     AdaptyvTarget,
+    ApiCallLogEntry,
     AutoTopupConfig,
     BindingOrientationResult,
     BiotinLinker,
     BivalentTarget,
+    ClientSessionUsage,
+    ClientSessionUsageSummary,
     CostEstimate,
     DeltaForgeBestPair,
     DeltaForgePairScore,
     DeltaForgeScore,
     EcTrimmingConfig,
-    GeneSummary,
     GenerationMaskGuidance,
+    GeneSummary,
+    GoalAcceptanceCriterion,
+    GoalBudgetState,
+    GoalChecklistItem,
+    GoalCompletionAudit,
+    GoalEvaluation,
+    GoalPlanStep,
+    GoalProgress,
+    GoalProjectState,
+    GoalRun,
+    GoalRunEvent,
+    GoalRunStart,
+    GoalStepRecord,
+    GoalTaskDependency,
     LinkerConfig,
     LinkerRecommendation,
     MSAChain,
@@ -83,6 +101,12 @@ from ligandai.types import (
     TargetGroup,
     TopUpResult,
 )
+from ligandai.version_check import (
+    emit_update_notice,
+    get_latest_pypi_version,
+    get_update_notice,
+    is_outdated,
+)
 
 __all__ = [
     "PROTEINVIEW_ATTRIBUTION",
@@ -90,6 +114,7 @@ __all__ = [
     "AdaptyvExperiment",
     "AdaptyvSequence",
     "AdaptyvTarget",
+    "ApiCallLogEntry",
     "AsyncJob",
     "AsyncLigandAI",
     "AsyncReceptorDBClient",
@@ -97,6 +122,8 @@ __all__ = [
     "BindingOrientationResult",
     "BiotinLinker",
     "BivalentTarget",
+    "ClientSessionUsage",
+    "ClientSessionUsageSummary",
     "CostEstimate",
     "DashboardHandle",
     "DeltaForgeBestPair",
@@ -105,16 +132,31 @@ __all__ = [
     "EcTrimmingConfig",
     "GeneSummary",
     "GenerationMaskGuidance",
+    "GoalAcceptanceCriterion",
+    "GoalBudgetState",
+    "GoalChecklistItem",
+    "GoalCompletionAudit",
+    "GoalEvaluation",
+    "GoalPlanStep",
+    "GoalProgress",
+    "GoalProjectState",
+    "GoalRun",
+    "GoalRunEvent",
+    "GoalRunStart",
+    "GoalStepRecord",
+    "GoalTaskDependency",
     "Job",
     "LigandAI",
     "LigandAIAuthError",
     "LigandAICreditError",
     "LigandAIError",
+    "LigandAIJobError",
     "LigandAINotFoundError",
     "LigandAIPaidTierRequired",
     "LigandAIRateLimitError",
     "LigandAIServerError",
     "LigandAITierError",
+    "LigandAITimeoutError",
     "LigandAIValidationError",
     "LinkerConfig",
     "LinkerRecommendation",
@@ -136,6 +178,10 @@ __all__ = [
     "__version__",
     "align_candidates_to_receptor",
     "align_pdb_to_receptor",
+    "emit_update_notice",
+    "get_latest_pypi_version",
+    "get_update_notice",
+    "is_outdated",
     "launch_proteinview",
     "load_peptide_results",
     "rank_peptides",

@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """End-to-end peptide design pipeline.
 
 Discovery → structure → generation → fold → score → synthesis cart.
@@ -42,11 +42,11 @@ def main() -> None:
         print(f"  Recommended pocket: {p.range} ({p.label})")
     print()
 
-    # 3. Generate peptides (free/basic: 100, pro: 1000, enterprise: 5000)
+    # 3. Generate peptides. The API enforces tier, credit, token, and GPU caps.
     print("Step 3/6: Peptide generation + auto-fold (this can take 10-30 min)")
     job = client.peptides.generate(
         gene=top_gene,
-        num_peptides=300,
+        num_peptides=min(client.max_peptides_per_generation or 10, 50),
         target_residues=[analysis.recommended_pocket] if analysis.recommended_pocket else None,
         targeting_strategy=("pocket_targeted" if analysis.recommended_pocket else "full_surface"),
         auto_fold=True,

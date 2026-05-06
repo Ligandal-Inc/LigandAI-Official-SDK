@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Chart generation endpoints (matplotlib-rendered server-side)."""
 
 from __future__ import annotations

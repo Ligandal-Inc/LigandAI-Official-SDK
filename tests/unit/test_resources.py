@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Resource methods against a mocked HTTP server."""
 
 from __future__ import annotations
@@ -172,6 +172,7 @@ def test_fold_forwards_advanced_boltz_knobs(httpx_mock: HTTPXMock, client: Ligan
         diffusion_samples=1,
         num_trajectories=10,
         step_scale=1.2,
+        contribute_to_receptordb=True,
     )
 
     request = httpx_mock.get_request()
@@ -184,6 +185,26 @@ def test_fold_forwards_advanced_boltz_knobs(httpx_mock: HTTPXMock, client: Ligan
     assert body["diffusionSamples"] == 10
     assert body["numTrajectories"] == 10
     assert body["stepScale"] == 1.2
+    assert body["contributeToReceptordb"] is True
+    assert body["submitToCommunity"] is True
+
+
+def test_fold_defaults_to_single_diffusion_sample(httpx_mock: HTTPXMock, client: LigandAI) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/folding/predict",
+        method="POST",
+        json={"jobId": "fold_1"},
+    )
+
+    client.peptides.fold(["ACDEFGHIK"])
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    import json as _json
+
+    body = _json.loads(request.read())
+    assert body["diffusionSamples"] == 1
+    assert "numTrajectories" not in body
 
 
 # -- Tier gating -----------------------------------------------------------
@@ -282,3 +303,9 @@ def test_residue_range_dump_format() -> None:
     assert dumped["chain"] == "A"
     assert dumped["start"] == 300
     assert dumped["end"] == 320
+
+
+def test_residue_range_from_selected_residues() -> None:
+    ranges = ResidueRange.from_residues([42, 34, 35, 36, 41, 42], chain="B", label="pocket")
+    assert [r.range for r in ranges] == ["B:34-36", "B:41-42"]
+    assert all(r.label == "pocket" for r in ranges)

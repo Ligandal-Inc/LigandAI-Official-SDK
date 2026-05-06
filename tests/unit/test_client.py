@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Client construction, tier detection, and feature gating."""
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ def test_unknown_prefix_yields_none_tier() -> None:
     "key,expected",
     [
         ("lgai_free_abc", "free"),
+        ("lgai_basic_abc", "basic"),
         ("lgai_edu_abc", "academia"),
         ("lgai_pro_abc", "pro"),
         ("lgai_ent_abc", "enterprise"),
@@ -54,25 +55,52 @@ def test_tier_prefix_detection(key: str, expected: str) -> None:
 
 def test_rate_limit_per_minute_by_tier() -> None:
     assert LigandAI(api_key="lgai_free_x").rate_limit_per_minute == 10
+    assert LigandAI(api_key="lgai_basic_x").rate_limit_per_minute == 20
     assert LigandAI(api_key="lgai_edu_x").rate_limit_per_minute == 30
     assert LigandAI(api_key="lgai_pro_x").rate_limit_per_minute == 60
     assert LigandAI(api_key="lgai_ent_x").rate_limit_per_minute == 300
 
 
 def test_max_peptides_per_generation_by_tier() -> None:
-    assert LigandAI(api_key="lgai_free_x").max_peptides_per_generation == 100
-    assert LigandAI(api_key="lgai_pro_x").max_peptides_per_generation == 1000
-    assert LigandAI(api_key="lgai_ent_x").max_peptides_per_generation == 5000
+    assert LigandAI(api_key="lgai_free_x").max_peptides_per_generation == 10
+    assert LigandAI(api_key="lgai_basic_x").max_peptides_per_generation == 100
+    assert LigandAI(api_key="lgai_edu_x").max_peptides_per_generation == 300
+    assert LigandAI(api_key="lgai_pro_x").max_peptides_per_generation == 300
+    assert LigandAI(api_key="lgai_ent_x").max_peptides_per_generation == 1000
+
+
+def test_folding_gpu_caps_by_tier() -> None:
+    assert LigandAI(api_key="lgai_free_x").max_concurrent_gpu_slots == 1
+    assert LigandAI(api_key="lgai_basic_x").max_concurrent_gpu_slots == 4
+    assert LigandAI(api_key="lgai_edu_x").max_concurrent_gpu_slots == 16
+    assert LigandAI(api_key="lgai_pro_x").max_concurrent_gpu_slots == 25
+    assert LigandAI(api_key="lgai_ent_x").max_concurrent_gpu_slots == 50
+
+
+def test_target_and_fold_caps_by_tier() -> None:
+    assert LigandAI(api_key="lgai_free_x").max_targets_per_generation == 3
+    assert LigandAI(api_key="lgai_basic_x").max_targets_per_generation is None
+    assert LigandAI(api_key="lgai_free_x").max_folds_per_generation == 10
+    assert LigandAI(api_key="lgai_pro_x").max_folds_per_generation is None
 
 
 def test_feature_allowed_by_tier() -> None:
     free = LigandAI(api_key="lgai_free_x")
     assert free.feature_allowed("search_receptors")
-    assert not free.feature_allowed("generate_peptides")
+    assert free.feature_allowed("generate_peptides")
+    assert free.feature_allowed("predict_structure")
+    assert not free.feature_allowed("advanced_guidance")
     assert not free.feature_allowed("transport_vasculome")
+
+    basic = LigandAI(api_key="lgai_basic_x")
+    assert basic.feature_allowed("generate_peptides")
+    assert basic.feature_allowed("predict_structure")
+    assert not basic.feature_allowed("transcriptomics_analysis")
+    assert not basic.feature_allowed("transport_vasculome")
 
     edu = LigandAI(api_key="lgai_edu_x")
     assert edu.feature_allowed("generate_peptides")
+    assert edu.feature_allowed("advanced_guidance")
     assert not edu.feature_allowed("transport_vasculome")
     assert not edu.feature_allowed("batch_operations")
 
@@ -94,7 +122,7 @@ def test_unknown_feature_passes_client_side() -> None:
 def test_require_feature_raises_for_low_tier() -> None:
     free = LigandAI(api_key="lgai_free_x")
     with pytest.raises(LigandAITierError) as exc_info:
-        free._require_feature("generate_peptides")
+        free._require_feature("advanced_guidance")
     assert exc_info.value.required_tier == "academia"
     assert exc_info.value.current_tier == "free"
 

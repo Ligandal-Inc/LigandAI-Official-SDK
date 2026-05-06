@@ -1,10 +1,11 @@
-// Copyright © 2025 Ligandal, Inc. All rights reserved.
+// Copyright © 2026 Ligandal, Inc. All rights reserved.
 /**
  * LigandAI Codex Skill — Claude Agent SDK
  *
  * Provides structured peptide design capabilities to Codex agents via the
  * LigandAI Python SDK. Handles generation, folding, BLI synthesis prep, and
- * billing through typed tool interfaces.
+ * billing through typed tool interfaces. Requires LIGANDAI_API_KEY; users can
+ * create keys from Settings > Developer/API Keys after logging in.
  *
  * Usage (Claude Agent SDK):
  *   import { ligandaiSkill } from "./ligandai-codex-skill";
@@ -21,11 +22,11 @@ const SEGMENT_TYPES = ["binding", "linker", "stability", "premade"] as const;
 type SegmentType = typeof SEGMENT_TYPES[number];
 
 const TIER_LABELS = {
-  free: "Free (100 peptides, 1 trajectory, 15 steps — locked)",
-  basic: "Basic (300 peptides, up to 4 trajectories, 50 steps)",
-  academia: "Academia (300 peptides, up to 10 trajectories, 1000 steps)",
-  pro: "Pro (1000 peptides, up to 10 trajectories, 1000 steps)",
-  enterprise: "Enterprise (5000 peptides, up to 10 trajectories, 1000 steps)",
+  free: "Free (10-generation cap, 10 folds, 3 targets, 1 folding GPU)",
+  basic: "Basic (100-generation cap, 4 folding GPUs with credits)",
+  academia: "Academia (300-generation cap, 16 folding GPUs, advanced guidance)",
+  pro: "Pro (300-generation cap, bivalent/transcriptomics, 25 folding GPUs)",
+  enterprise: "Enterprise (batch operations, priority queue, custom models)",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,12 +44,22 @@ const designPeptideTool: ToolDefinition = {
 - premade   — fixed sequence, not generated (use for TAT, NES, GS linkers, etc.)
 
 **Tier limits (server-enforced):**
-- free: 100 peptides, 1 trajectory max (15 steps, locked)
-- basic: 300 peptides, 4 trajectories max (15-50 steps)
-- academia/pro/enterprise: 300-5000 peptides, 10 trajectories max (15-1000 steps)
+- free: API keys, quality-guided generation up to 10 peptides, 10 folds, 3 targets, 1 folding GPU
+- basic: generation up to 100 peptides, 4 folding GPUs, credits/tokens still required
+- academia: generation up to 300 peptides, 16 folding GPUs, immuno/serum/logits guidance
+- pro: generation up to 300 peptides, transcriptomics/bivalent workflows, 25 folding GPUs
+- enterprise: batch operations, priority queue, custom models, and restricted datasets
+
+Generation uses the one-GPU server path. GPU caps above are folding caps, not
+generation GPU caps. All users, including free users, are bound by LigandAI
+ToS/EULA and submitted sequences may be retained under those terms.
 
 **Quick sampling (valid):** 15 steps / 1 trajectory — use for broad screening.
 **Production:** 50 steps / 4 trajectories — standard for final candidates.
+
+**Billing routing:** on 401 ask the user to create/set `LIGANDAI_API_KEY`; on
+402 route to credits/tokens; on 403 report currentTier, requiredTier, and GPU
+limit fields before asking the user to upgrade or reduce the job.
 
 **MSA note:** MSA is fetched for the receptor chain only. Designed peptides
 are de novo sequences — no MSA is run for them.
@@ -64,10 +75,10 @@ Returns session_id for polling via ligandai_get_job.`,
       },
       num_peptides: {
         type: "integer",
-        default: 300,
-        minimum: 10,
-        maximum: 5000,
-        description: "Peptides to generate (tier-gated max)",
+        default: 10,
+        minimum: 1,
+        maximum: 1000,
+        description: "Peptides to generate. Free cap=10, basic=100, academia/pro=300, enterprise=1000; server response is authoritative.",
       },
       length_min: { type: "integer", default: 20, minimum: 5, maximum: 100 },
       length_max: { type: "integer", default: 70, minimum: 10, maximum: 150 },
@@ -78,24 +89,24 @@ Returns session_id for polling via ligandai_get_job.`,
       },
       max_folds: {
         type: "integer",
-        default: 25,
-        minimum: 8,
-        maximum: 200,
-        description: "Peptides to fold (stratified across 16 bins: 4 energy × 4 length)",
+        default: 1,
+        minimum: 1,
+        maximum: 1000,
+        description: "Peptides to fold. Free cap=10; paid tiers are governed by generation allowance, credits, and server-side guards.",
       },
       num_trajectories: {
         type: "integer",
         default: 1,
         minimum: 1,
         maximum: 10,
-        description: "Boltz-2 diffusion samples per fold. Default=1 (all tiers); 4=standard quality (basic+); 10=max (academia+)",
+        description: "Boltz-2 diffusion samples per fold. Default=1; higher values consume more credits and remain server-authoritative.",
       },
       sampling_steps: {
         type: "integer",
         default: 50,
         minimum: 15,
         maximum: 1000,
-        description: "LigandForge diffusion steps. Free=15 locked, basic=15-50, academia+=15-1000",
+        description: "LigandForge diffusion steps. Default=50; server may clamp based on tier, credits, and job size.",
       },
       fold_strategy: {
         type: "string",
@@ -178,11 +189,11 @@ Returns session_id for polling via ligandai_get_job.`,
         enum: [0, 0.5, 1.0, 1.5],
         description: "0=none, 0.5=low, 1.0=medium, 1.5=high",
       },
-      // Quality-guided generation (basic+ default ON)
+      // Quality-guided generation (free+)
       quality_guided: {
         type: "boolean",
         default: false,
-        description: "Quality-guided generation using LigandForge v6.5 (basic+ default ON, +20 credits/peptide surcharge). Disabled automatically for cyclic modes.",
+        description: "Quality-guided generation using LigandForge v6.5. Available to all authenticated tiers, including free; credits and sequence-retention terms apply.",
       },
       quality_guidance_scale: { type: "number", default: 1.0 },
       // Immune guidance (academia+) — MHC-I/II anchor avoidance + scoring during diffusion
@@ -378,8 +389,8 @@ const estimateCostTool: ToolDefinition = {
     type: "object" as const,
     properties: {
       gene: { type: "string" },
-      num_peptides: { type: "integer", default: 300 },
-      max_folds: { type: "integer", default: 25 },
+      num_peptides: { type: "integer", default: 10 },
+      max_folds: { type: "integer", default: 1 },
       include_bli: { type: "boolean", default: false },
       include_deltaforge: { type: "boolean", default: true },
     },
@@ -393,8 +404,8 @@ from ligandai import LigandAI
 c = LigandAI()
 est = c.synthesis.estimate_cost(
     gene="${params.gene}",
-    num_peptides=${params.num_peptides ?? 300},
-    max_folds=${params.max_folds ?? 25},
+    num_peptides=${params.num_peptides ?? 10},
+    max_folds=${params.max_folds ?? 1},
     include_bli=${params.include_bli ? "True" : "False"},
     include_deltaforge=${params.include_deltaforge !== false ? "True" : "False"},
 )
@@ -556,10 +567,10 @@ function buildGenerateScript(params: Record<string, unknown>): string {
 
   parts.push(`job = c.peptides.generate(
     gene="${params.gene}",
-    num_peptides=${params.num_peptides ?? 300},
+    num_peptides=${params.num_peptides ?? 10},
     length_range=(${params.length_min ?? 20}, ${params.length_max ?? 70}),
     auto_fold=${params.auto_fold !== false ? "True" : "False"},
-    max_folds_per_target=${params.max_folds ?? 25},
+    max_folds_per_target=${params.max_folds ?? 1},
     num_trajectories=${params.num_trajectories ?? 1},
     sampling_steps=${params.sampling_steps ?? 50},
     fold_strategy="${params.fold_strategy ?? "consolidated"}",

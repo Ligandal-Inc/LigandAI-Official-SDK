@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Discovery / transcriptomics — tissue markers, scRNA, GEO, comparisons."""
 
 from __future__ import annotations

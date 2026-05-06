@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """MSA (Multiple Sequence Alignment) generation.
 
 Endpoint:
@@ -47,7 +47,7 @@ class MSA(Resource):
         Args:
             sequences: Mapping of chain ID to amino acid sequence,
                 e.g. ``{"A": "MVLSPADKTNVK..."}``. Up to 20 chains; each
-                sequence must be 10–5,000 residues.
+                sequence must be 10-5,000 residues.
             gene: Optional HGNC gene symbol (e.g. ``"IL31RA"``). Used for
                 caching and search-intelligence logging; pass it whenever
                 you know the target gene.

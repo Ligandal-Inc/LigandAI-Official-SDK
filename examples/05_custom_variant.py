@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Custom variant — fold a mutation, save as variant, then generate against it.
 
 Useful for designing peptides against disease-causing mutants (e.g., L858R EGFR).

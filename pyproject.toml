@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 
 [build-system]
 requires = ["hatchling>=1.21"]
@@ -6,10 +6,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ligandai"
-version = "0.3.2"
-description = "Official Python SDK for the LIGANDAI® platform — peptide design, structure prediction, scoring, and discovery."
+version = "0.3.6"
+description = "Official Python SDK for the LIGANDAI (TM) platform — peptide design, structure prediction, scoring, and discovery."
 readme = "README.md"
-license = { text = "Proprietary" }
+license = { text = "Proprietary. Use of this SDK constitutes acceptance of https://ligandai.com/terms and https://ligandai.com/eula." }
 requires-python = ">=3.10"
 authors = [
     { name = "Andre Watson", email = "dre@ligandal.com" },

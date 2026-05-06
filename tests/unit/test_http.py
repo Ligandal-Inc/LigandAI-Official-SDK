@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """HTTP transport — auth headers, retry, rate-limit parsing."""
 
 from __future__ import annotations

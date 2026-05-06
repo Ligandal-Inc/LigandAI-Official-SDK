@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Bivalent / bispecific peptide design.
 
 Designs a PD-1 / PD-L1 bispecific binder using the bivalent workflow.

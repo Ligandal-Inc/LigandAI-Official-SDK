@@ -1,8 +1,8 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Live SSE progress streaming for a generation job.
 
 Run:
-    LIGANDAI_API_KEY=lgai_pro_... python examples/06_streaming.py
+    LIGANDAI_API_KEY=lgai_basic_... python examples/06_streaming.py
 """
 
 from __future__ import annotations

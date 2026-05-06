@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Integration tests against a live LIGANDAI server.
 
 Skipped unless ``LIGANDAI_TEST_API_KEY`` is set. To run against the dev server:
@@ -57,7 +57,7 @@ def test_search_receptordb(live_client: LigandAI) -> None:
 
 @pytest.mark.integration
 def test_tier_detected(live_client: LigandAI) -> None:
-    assert live_client.tier in ("free", "academia", "pro", "enterprise", "superadmin")
+    assert live_client.tier in ("free", "basic", "academia", "pro", "enterprise", "superadmin")
 
 
 # ----------------------------------------------------------------------------

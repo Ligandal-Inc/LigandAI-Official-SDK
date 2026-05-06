@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] - 2026-05-06
+
+- Adds `ResidueRange.from_residues()` so Studio-style pocket selections can be
+  compressed into continuous chain-local ranges before peptide generation.
+- Documents pocket-targeted generation payloads for agents and preserves
+  multi-chain `targetResidues` wire-format coverage in SDK tests.
+
+## [0.3.5] - 2026-05-06
+
+- Publishes the corrected post-recovery SDK artifact after `0.3.4` was already
+  uploaded to PyPI and could not be replaced.
+- Adds basic-tier API-key awareness across local SDK entitlement checks,
+  examples, and agent guidance while leaving generation, folding, GPU, and
+  token enforcement to the authenticated LigandAI API.
+- Clarifies agent billing and upgrade routing for free/basic/pro/academia users,
+  including API-key creation from account settings and token/top-up prompts.
+- Keeps startup PyPI version reminders on the real `ligandai-python-sdk`
+  metadata path so Claude, Codex, and user shells can detect stale installs.
+- Updates package notices for 2026 and ties SDK installation/import/use to the
+  LigandAI Terms of Service and EULA.
+
+## [0.3.4] - 2026-05-05
+
+- Restores the public PyPI release line from the real `ligandai-python-sdk`
+  package after the accidental `1.0.x` uploads from the wrong package root.
+- Carries forward the SDK billing/session attribution, persistent goal-run,
+  peptide viewer, direct fold controls, and ReceptorDB contribution updates
+  intended for the `0.3.x` SDK line.
+- Adds SDK startup version reminders that validate PyPI release metadata before
+  recommending an agent or user run `python -m pip install --upgrade ligandai`.
+- Documents agent API-key creation, billing/token routing, GPU guard handling,
+  and Claude API Skill setup.
+- Updates package copyright notices to 2026 and clarifies that SDK
+  installation/import/use accepts the LigandAI Terms of Service and EULA.
+
+## [0.3.3] - 2026-05-05
+
+### Added
+
+- Direct `Peptides.fold()` / `AsyncPeptides.fold()` accept
+  `contribute_to_receptordb`. The SDK sends both the canonical
+  `contributeToReceptordb` field and the legacy `submitToCommunity` alias so
+  current servers can apply the documented ReceptorDB contribution discount to
+  eligible direct human receptor or receptor-complex folds and persist the
+  setting with fold outputs.
+
 ## [0.3.2] - 2026-05-03
 
 ### Added
@@ -21,6 +67,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   LigandForge/PTF JSON, JSONL, PDB, and result directories; rank candidates by
   iPSAE or DeltaForge-style scores; align receptor+peptide folds to a base
   receptor; launch ProteinView; and write/serve a localhost 3Dmol dashboard.
+- `client.goals` / `client.goals.start()` and async equivalents now expose
+  persistent AutoResearch goal runs (`/api/autoresearch/*`). Starting a run
+  requires `automatic_mode=True` and accepts `budget_cap_credits`,
+  `program_id`, `project_id`, `program_db_id`, `project_db_id`, and
+  `conversation_id`, plus `max_iterations` for evaluator follow-up loops.
+  Server-side execution is currently limited to internal pilot accounts.
+- New goal-run models: `GoalRunStart`, `GoalRun`, `GoalPlanStep`, and
+  `GoalStepRecord`, with typed acceptance criteria and evaluator history on
+  `GoalRun`. `GoalRun` also exposes the persisted Automatic Mode acknowledgement
+  and acknowledgement timestamp when returned by the server.
+- Goal runs now parse the server's derived project-management graph:
+  `GoalProjectState`, checklist items, dependencies, evidence, blockers,
+  next actions, progress, budget state, and completion audit. Use
+  `client.goals.graph(run_id)` to fetch the graph directly.
+- `client.goals.stream(run_id)` and the async equivalent now parse live
+  AutoResearch SSE events into `GoalRunEvent` objects. The stream starts with
+  the server's latest `hello` snapshot when available and then yields planning,
+  step, evaluation, and terminal events.
+
+### Changed
+
+- Direct SDK folds now default to one diffusion sample unless the caller
+  explicitly passes `diffusion_samples` or `num_trajectories`, matching the
+  current platform fold policy.
 
 ### Notes
 

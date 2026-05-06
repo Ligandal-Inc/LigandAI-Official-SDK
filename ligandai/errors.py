@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Typed exception hierarchy for the LIGANDAI SDK.
 
 All errors raised by the SDK subclass :class:`LigandAIError`. Server-side errors
@@ -128,20 +128,19 @@ class LigandAICreditError(LigandAIError):
 
 
 class LigandAIPaidTierRequired(LigandAIError):
-    """402 — the SDK requires a paid (pro/enterprise) subscription.
+    """402 — the SDK requires a paid subscription.
 
     Distinct from :class:`LigandAICreditError` (which means "your tier is fine
     but you've run out of credits"). This error means the **API key itself**
-    resolves to a tier (free/academia) that does not include API access at
-    all.
+    resolves to a tier that does not include the requested paid surface.
 
-    The server returns this on every `/api/v1/peptides/*` request from a
+    The server may return this on `/api/v1/peptides/*` requests from a
     free-tier key with::
 
         HTTP 402 Payment Required
         {"error": "upgrade_required",
          "message": "...",
-         "tier_required": "pro",
+         "tier_required": "basic",
          "current_tier": "free"}
 
     Visit https://ligandai.com/pricing to upgrade.
@@ -151,8 +150,7 @@ class LigandAIPaidTierRequired(LigandAIError):
     current_tier : str | None
         The tier of the API key in use.
     required_tier : str | None
-        The minimum tier that grants SDK access. Always ``"pro"`` for the
-        v1 surface.
+        The minimum tier that grants access to the requested paid surface.
     """
 
     def __init__(
@@ -163,7 +161,7 @@ class LigandAIPaidTierRequired(LigandAIError):
         ),
         *,
         current_tier: str | None = None,
-        required_tier: str | None = "pro",
+        required_tier: str | None = "basic",
         **kwargs: Any,
     ) -> None:
         super().__init__(message, **kwargs)

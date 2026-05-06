@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Synthesis cart, recommendations, Adaptyv direct API."""
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from ligandai.types import (
     AdaptyvTarget,
     BindingOrientationResult,
     BiotinLinker,
+    CostEstimate,
     GenerationMaskGuidance,
     LinkerRecommendation,
     SynthesisCart,
@@ -345,7 +346,7 @@ class Synthesis(Resource):
         include_deltaforge: bool = True,
         sampling_steps: int = 50,
         fold_trajectories: int = 1,
-    ) -> "CostEstimate":
+    ) -> CostEstimate:
         """Estimate credit cost for a generation + folding run before submitting.
 
         Args:
@@ -354,12 +355,11 @@ class Synthesis(Resource):
             max_folds: Planned fold count (affects folding cost).
             include_bli: Whether BLI synthesis is included (affects quote).
             include_deltaforge: Whether DeltaForge scoring is included.
-            sampling_steps: Diffusion sampling steps per fold (15-200). Steps ≤50
-                cost 1× base rate; each additional 50 steps adds another 1×.
-                E.g. 100 steps = 2×, 150 steps = 3×, 200 steps = 4× base rate.
+            sampling_steps: Diffusion sampling steps per fold (15-200). Steps <=50
+                cost 1x base rate; each additional 50 steps adds another 1x.
+                E.g. 100 steps = 2x, 150 steps = 3x, 200 steps = 4x base rate.
             fold_trajectories: Number of trajectory repeats per fold (default 1).
         """
-        from ligandai.types import CostEstimate
         params: dict[str, object] = {
             "gene": gene,
             "numPeptides": num_peptides,
@@ -628,7 +628,7 @@ class AsyncSynthesis(AsyncResource):
         include_deltaforge: bool = True,
         sampling_steps: int = 50,
         fold_trajectories: int = 1,
-    ) -> "CostEstimate":
+    ) -> CostEstimate:
         """Estimate credit cost for a generation + folding run before submitting.
 
         Args:
@@ -637,12 +637,11 @@ class AsyncSynthesis(AsyncResource):
             max_folds: Planned fold count (affects folding cost).
             include_bli: Whether BLI synthesis is included (affects quote).
             include_deltaforge: Whether DeltaForge scoring is included.
-            sampling_steps: Diffusion sampling steps per fold (15-200). Steps ≤50
-                cost 1× base rate; each additional 50 steps adds another 1×.
-                E.g. 100 steps = 2×, 150 steps = 3×, 200 steps = 4× base rate.
+            sampling_steps: Diffusion sampling steps per fold (15-200). Steps <=50
+                cost 1x base rate; each additional 50 steps adds another 1x.
+                E.g. 100 steps = 2x, 150 steps = 3x, 200 steps = 4x base rate.
             fold_trajectories: Number of trajectory repeats per fold (default 1).
         """
-        from ligandai.types import CostEstimate
         params: dict[str, object] = {
             "gene": gene,
             "numPeptides": num_peptides,

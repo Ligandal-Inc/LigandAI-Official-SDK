@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Public pydantic models for SDK request/response payloads.
 
 Models mirror the server-side schemas in ``shared/schema.ts``. They are
@@ -11,6 +11,7 @@ For internal-only types (HTTP machinery, rate limiter state) see
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Literal
 
@@ -139,6 +140,224 @@ class UsageSummary(_LGModel):
     credits_by_type: dict[str, int] | None = Field(default=None, alias="creditsByType")
 
 
+class ApiCallLogEntry(_LGModel):
+    """One SDK/API call audit row."""
+
+    id: int | str | None = None
+    method: str
+    endpoint: str
+    status_code: int | None = Field(default=None, alias="statusCode")
+    latency_ms: int | None = Field(default=None, alias="latencyMs")
+    sdk_version: str | None = Field(default=None, alias="sdkVersion")
+    sdk_language: str | None = Field(default=None, alias="sdkLanguage")
+    api_key_id: str | None = Field(default=None, alias="apiKeyId")
+    client_session_id: str | None = Field(default=None, alias="clientSessionId")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+
+
+class ClientSessionUsageSummary(_LGModel):
+    """Credit and request roll-up for a caller-provided SDK session ID."""
+
+    total_calls: int = Field(default=0, alias="totalCalls")
+    successful_calls: int = Field(default=0, alias="successfulCalls")
+    error_calls: int = Field(default=0, alias="errorCalls")
+    avg_latency_ms: int | None = Field(default=None, alias="avgLatencyMs")
+    first_call_at: datetime | None = Field(default=None, alias="firstCallAt")
+    last_call_at: datetime | None = Field(default=None, alias="lastCallAt")
+    credits_used: int = Field(default=0, alias="creditsUsed")
+    credit_events: int = Field(default=0, alias="creditEvents")
+
+
+class ClientSessionUsage(_LGModel):
+    """Server-side usage and credit accounting for one SDK session ID."""
+
+    client_session_id: str = Field(alias="clientSessionId")
+    calls: list[ApiCallLogEntry] = Field(default_factory=list)
+    summary: ClientSessionUsageSummary = Field(default_factory=ClientSessionUsageSummary)
+    period_days: int | None = Field(default=None, alias="periodDays")
+
+
+class GoalPlanStep(_LGModel):
+    """One planned step in a persistent goal-directed run."""
+
+    step: int | None = None
+    intent: str | None = None
+    tool: str | None = None
+    input: dict[str, Any] | None = None
+    rationale: str | None = None
+    optional: bool | None = None
+
+
+class GoalStepRecord(_LGModel):
+    """Execution record for one goal-run step."""
+
+    step_idx: int | None = Field(default=None, alias="stepIdx")
+    tool: str | None = None
+    input: Any = None
+    output: Any = None
+    error: str | None = None
+    started_at: datetime | None = Field(default=None, alias="startedAt")
+    completed_at: datetime | None = Field(default=None, alias="completedAt")
+    tokens_in: int | None = Field(default=None, alias="tokensIn")
+    tokens_out: int | None = Field(default=None, alias="tokensOut")
+
+
+class GoalAcceptanceCriterion(_LGModel):
+    """Auditable criterion used to decide whether a goal run is satisfied."""
+
+    id: str
+    label: str
+    metric: str | None = None
+    operator: str | None = None
+    target: str | int | float | bool | None = None
+    required: bool | None = None
+
+
+class GoalEvaluation(_LGModel):
+    """Evaluator checkpoint for a persistent goal run."""
+
+    evaluation_idx: int | None = Field(default=None, alias="evaluationIdx")
+    evaluated_at: datetime | None = Field(default=None, alias="evaluatedAt")
+    status: Literal["satisfied", "partial", "unsatisfied", "blocked"] | str
+    rationale: str | None = None
+    satisfied_criteria: list[str] = Field(default_factory=list, alias="satisfiedCriteria")
+    unsatisfied_criteria: list[str] = Field(default_factory=list, alias="unsatisfiedCriteria")
+    evidence: dict[str, Any] | None = None
+    next_action: str | None = Field(default=None, alias="nextAction")
+
+
+class GoalTaskDependency(_LGModel):
+    """Directed dependency edge in the derived goal task graph."""
+
+    from_item: str = Field(alias="from")
+    to: str
+    reason: str | None = None
+
+
+class GoalChecklistItem(_LGModel):
+    """Criterion or planned step in the derived project-management checklist."""
+
+    id: str
+    type: Literal["criterion", "step"] | str
+    label: str
+    status: str
+    required: bool | None = None
+    metric: str | None = None
+    operator: str | None = None
+    target: str | int | float | bool | None = None
+    step_idx: int | None = Field(default=None, alias="stepIdx")
+    tool: str | None = None
+    optional: bool | None = None
+    depends_on: list[str] = Field(default_factory=list, alias="dependsOn")
+    evidence: Any = None
+    blockers: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list, alias="nextActions")
+    started_at: datetime | None = Field(default=None, alias="startedAt")
+    completed_at: datetime | None = Field(default=None, alias="completedAt")
+
+
+class GoalProgress(_LGModel):
+    """Roll-up progress for a goal-directed run."""
+
+    total_items: int = Field(alias="totalItems")
+    completed_items: int = Field(alias="completedItems")
+    total_criteria: int = Field(alias="totalCriteria")
+    satisfied_criteria: int = Field(alias="satisfiedCriteria")
+    plan_steps: int = Field(alias="planSteps")
+    current_step_idx: int = Field(alias="currentStepIdx")
+    percent: int
+
+
+class GoalBudgetState(_LGModel):
+    """Budget cap and current credit burn for the run."""
+
+    cap_credits: int | None = Field(default=None, alias="capCredits")
+    consumed_credits: int = Field(alias="consumedCredits")
+    remaining_credits: int | None = Field(default=None, alias="remainingCredits")
+
+
+class GoalCompletionAudit(_LGModel):
+    """Completion rationale for terminal goal runs."""
+
+    status: str
+    reason: str | None = None
+    evaluated_at: datetime | None = Field(default=None, alias="evaluatedAt")
+    rationale: str | None = None
+    satisfied_criteria: list[str] = Field(default_factory=list, alias="satisfiedCriteria")
+    unsatisfied_criteria: list[str] = Field(default_factory=list, alias="unsatisfiedCriteria")
+
+
+class GoalProjectState(_LGModel):
+    """Derived beads-style task graph for a persistent goal run."""
+
+    objective: str
+    status: str
+    satisfaction_status: str = Field(alias="satisfactionStatus")
+    checklist: list[GoalChecklistItem] = Field(default_factory=list)
+    dependencies: list[GoalTaskDependency] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    blockers: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list, alias="nextActions")
+    progress: GoalProgress
+    budget: GoalBudgetState
+    completion_audit: GoalCompletionAudit | None = Field(default=None, alias="completionAudit")
+    updated_at: datetime | None = Field(default=None, alias="updatedAt")
+
+
+class GoalRun(_LGModel):
+    """Persistent AutoResearch/goal run state."""
+
+    run_id: str = Field(alias="runId")
+    user_id: str | None = Field(default=None, alias="userId")
+    program_db_id: int | None = Field(default=None, alias="programDbId")
+    project_db_id: int | None = Field(default=None, alias="projectDbId")
+    conversation_id: str | None = Field(default=None, alias="conversationId")
+    goal: str
+    status: str
+    plan: list[GoalPlanStep] | None = None
+    current_step_idx: int | None = Field(default=None, alias="currentStepIdx")
+    acceptance_criteria: list[GoalAcceptanceCriterion] = Field(default_factory=list, alias="acceptanceCriteria")
+    evaluation_history: list[GoalEvaluation] = Field(default_factory=list, alias="evaluationHistory")
+    satisfaction_status: str | None = Field(default=None, alias="satisfactionStatus")
+    iteration_count: int | None = Field(default=None, alias="iterationCount")
+    max_iterations: int | None = Field(default=None, alias="maxIterations")
+    step_history: list[GoalStepRecord] = Field(default_factory=list, alias="stepHistory")
+    tokens_used: int | None = Field(default=None, alias="tokensUsed")
+    credits_consumed: int | None = Field(default=None, alias="creditsConsumed")
+    budget_cap_credits: int | None = Field(default=None, alias="budgetCapCredits")
+    automatic_mode_acknowledged: bool | None = Field(default=None, alias="automaticModeAcknowledged")
+    automatic_mode_acknowledged_at: datetime | None = Field(default=None, alias="automaticModeAcknowledgedAt")
+    goal_state: GoalProjectState | None = Field(default=None, alias="goalState")
+    error_message: str | None = Field(default=None, alias="errorMessage")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+    started_at: datetime | None = Field(default=None, alias="startedAt")
+    completed_at: datetime | None = Field(default=None, alias="completedAt")
+    updated_at: datetime | None = Field(default=None, alias="updatedAt")
+
+
+class GoalRunStart(_LGModel):
+    """Response returned when a persistent goal run is started."""
+
+    run_id: str = Field(alias="runId")
+
+
+class GoalRunEvent(_LGModel):
+    """One SSE event from a persistent goal run stream."""
+
+    type: str
+    run_id: str | None = Field(default=None, alias="runId")
+    run: GoalRun | None = None
+    goal_state: GoalProjectState | None = Field(default=None, alias="goalState")
+    evaluation: GoalEvaluation | None = None
+    step: GoalPlanStep | None = None
+    step_idx: int | None = Field(default=None, alias="stepIdx")
+    plan: list[GoalPlanStep] | None = None
+    acceptance_criteria: list[GoalAcceptanceCriterion] | None = Field(default=None, alias="acceptanceCriteria")
+    error_message: str | None = Field(default=None, alias="errorMessage")
+    reason: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 # -- Receptors / structures ---------------------------------------------------
 
 
@@ -217,6 +436,35 @@ class ResidueRange(_LGModel):
     @property
     def range(self) -> str:
         return f"{self.chain}:{self.start}-{self.end}"
+
+    @classmethod
+    def from_residues(
+        cls,
+        residues: Iterable[int],
+        *,
+        chain: str = "A",
+        label: str | None = None,
+    ) -> list[ResidueRange]:
+        """Compress selected residue IDs into continuous ranges for one chain.
+
+        This mirrors the Studio pocket-selection UX: agents can pass arbitrary
+        selected residue IDs and send the resulting ranges to
+        ``Peptides.generate(target_residues=..., targeting_strategy="pocket_targeted")``.
+        """
+        sorted_residues = sorted({int(residue) for residue in residues})
+        if not sorted_residues:
+            return []
+
+        ranges: list[ResidueRange] = []
+        start = prev = sorted_residues[0]
+        for residue in sorted_residues[1:]:
+            if residue == prev + 1:
+                prev = residue
+                continue
+            ranges.append(cls(chain=chain, start=start, end=prev, label=label))
+            start = prev = residue
+        ranges.append(cls(chain=chain, start=start, end=prev, label=label))
+        return ranges
 
 
 class StructureAnalysis(_LGModel):
@@ -354,7 +602,7 @@ class StabilityScores(_LGModel):
     )
     stability_grade: str | None = Field(
         default=None, alias="stability_grade",
-        description="Composite proteolytic stability grade A–F.",
+        description="Composite proteolytic stability grade A-F.",
     )
     trypsin_sites: int | None = Field(default=None, alias="trypsin_sites")
     chymotrypsin_sites: int | None = Field(default=None, alias="chymotrypsin_sites")
@@ -375,7 +623,7 @@ class ImmunoScores(_LGModel):
     )
     immuno_grade: str | None = Field(
         default=None, alias="immuno_grade",
-        description="Composite immunogenicity grade A–F.",
+        description="Composite immunogenicity grade A-F.",
     )
     mhc_i_epitope_count: int | None = Field(default=None, alias="mhc_i_epitope_count")
     mhc_ii_epitope_count: int | None = Field(default=None, alias="mhc_ii_epitope_count")
@@ -411,15 +659,15 @@ class Peptide(_LGModel):
     rank: int | None = None
     fold_id: str | None = Field(default=None, alias="foldId")
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
-    # Pro+ tier guidance scores (populated when the corresponding guidance
+    # Academia+ tier guidance scores (populated when the corresponding guidance
     # module was active during generation)
     stability_grade: str | None = Field(
         default=None, alias="stabilityGrade",
-        description="Composite proteolytic stability grade A–F.",
+        description="Composite proteolytic stability grade A-F.",
     )
     immunogenicity_score: float | None = Field(
         default=None, alias="immunogenicityScore",
-        description="Composite immunogenicity risk score (0–1).",
+        description="Composite immunogenicity risk score (0-1).",
     )
     # Structured stability / immunogenicity sub-scores.
     # Sourced from the ``stability_scores`` / ``immuno_scores`` JSONB columns.
@@ -571,7 +819,7 @@ class PeptideDetail(_LGModel):
     pdb_content: str | None = Field(
         default=None,
         alias="pdbContent",
-        description="Full PDB text content (5–50KB).",
+        description="Full PDB text content (5-50KB).",
     )
 
 

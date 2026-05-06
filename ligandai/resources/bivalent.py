@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Bivalent / bispecific peptide design (Beta).
 
 This is a **niche, induced-proximity flow** — for forcing two SEPARATE proteins
@@ -7,7 +7,7 @@ binder domains joined by an optimised linker. Use cases: PROTAC-style induced
 proximity, molecular-glue peptides, forced heterodimerisation.
 
 If your target is itself a multimer (HER2 dimer, MHC class-II, antibody
-Fab+Fc, CD8αβ), do NOT use this module — multi-chain receptors are first-class
+Fab+Fc, CD8ab), do NOT use this module — multi-chain receptors are first-class
 via :class:`ligandai.resources.peptides.Peptides` with multi-chain target
 input. That path is the documented default.
 
@@ -96,7 +96,7 @@ class Bivalent(Resource):
         Run 1 generation.
         """
         if self._client is not None:
-            self._client._require_feature("predict_structure")
+            self._client._require_feature("bivalent_design")
         body = {
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
@@ -224,7 +224,7 @@ class Bivalent(Resource):
         :meth:`optimize_linker`.
         """
         if self._client is not None:
-            self._client._require_feature("predict_structure")
+            self._client._require_feature("bivalent_design")
         body = {
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
@@ -324,7 +324,7 @@ class Bivalent(Resource):
         you already have a validated T1 binder and only need T2 + the linker.
         """
         if self._client is not None:
-            self._client._require_feature("predict_structure")
+            self._client._require_feature("bivalent_design")
         body = {
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
@@ -354,8 +354,8 @@ class Bivalent(Resource):
         Dispatch validation folds through the bivalent fold orchestrator —
         gene→PDB resolution + per-target fold submissions + webhook routing
         back to the session. Pass the descriptors returned from :meth:`fold`
-        (or constructed manually). Each descriptor folds peptide × T1 or
-        peptide × T2 independently; aggregate score is
+        (or constructed manually). Each descriptor folds peptide x T1 or
+        peptide x T2 independently; aggregate score is
         ``min(iPTM_T1, iPTM_T2)``.
         """
         body = {
@@ -392,7 +392,7 @@ class AsyncBivalent(AsyncResource):
         num_designs: int = 100,
     ) -> BivalentSession:
         if self._client is not None:
-            self._client._require_feature("predict_structure")
+            self._client._require_feature("bivalent_design")
         body = {
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
@@ -502,7 +502,7 @@ class AsyncBivalent(AsyncResource):
         num_designs: int = 100,
     ) -> BivalentSession:
         if self._client is not None:
-            self._client._require_feature("predict_structure")
+            self._client._require_feature("bivalent_design")
         body = {
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
@@ -581,7 +581,7 @@ class AsyncBivalent(AsyncResource):
         num_designs: int = 100,
     ) -> BivalentSession:
         if self._client is not None:
-            self._client._require_feature("predict_structure")
+            self._client._require_feature("bivalent_design")
         body = {
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
