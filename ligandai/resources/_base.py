@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Resource base classes.
 
 Resource modules subclass ``Resource`` (sync) or ``AsyncResource`` (async).

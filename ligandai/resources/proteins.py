@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """UniProt info, variants, glycosylation, and custom protein uploads."""
 
 from __future__ import annotations

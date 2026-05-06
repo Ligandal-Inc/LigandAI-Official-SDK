@@ -6,14 +6,25 @@ design, structure prediction, scoring, and discovery.
 > **License & Terms** — By installing or using this SDK you agree to the
 > [LigandAI Terms of Service](https://ligandai.com/terms) and
 > [End User License Agreement](https://ligandai.com/eula). API usage is logged
-> for billing and abuse prevention. See `LICENSE` for the full agreement.
+> for billing and abuse prevention. Submitted sequences and job artifacts may
+> be retained under those terms. See `LICENSE` for the full agreement.
 
 ```bash
 pip install ligandai
 ```
 
+The SDK checks PyPI once per process when a client is created. If a newer valid
+`ligandal/ligandai-python-sdk` release exists, it emits:
+
+```bash
+python -m pip install --upgrade ligandai
+```
+
+Set `LIGANDAI_SKIP_VERSION_CHECK=1` in hermetic CI if network checks are not
+allowed.
+
 ```python
-from ligandai import LigandAI
+from ligandai import LigandAI, ResidueRange
 
 client = LigandAI(api_key="lgai_pro_...")
 print(f"Tier: {client.tier}, Credits: {client.credits}")
@@ -27,10 +38,14 @@ structure = client.structures.get(gene)
 analysis = client.structures.analyze(gene, analysis_depth="full")
 
 # Generate peptides targeting the recommended pocket
+pocket_ranges = []
+if analysis.recommended_pocket:
+    pocket_ranges = [analysis.recommended_pocket]
+
 job = client.peptides.generate(
     gene=gene,
-    num_peptides=300,
-    target_residues=[analysis.recommended_pocket] if analysis.recommended_pocket else None,
+    num_peptides=50,
+    target_residues=pocket_ranges,
     targeting_strategy="pocket_targeted",
     auto_fold=True,
     top_n_fold=25,
@@ -41,27 +56,57 @@ result = job.wait(timeout=1800)
 print(f"Got {len(result.peptides)} peptides, top iPSAE: {result.peptides[0].ipsae}")
 ```
 
+Selected pockets can span one or more chains. The helper below compresses
+arbitrary selected residues into the continuous chain ranges expected by the
+generation API:
+
+```python
+from ligandai import LigandAI, ResidueRange
+
+client = LigandAI(api_key="lgai_basic_...")
+
+target_residues = [
+    *ResidueRange.from_residues([34, 35, 36, 41, 42], chain="A", label="EC pocket 1"),
+    *ResidueRange.from_residues([102, 103, 104], chain="B", label="interface pocket"),
+]
+
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=25,
+    target_residues=target_residues,
+    targeting_strategy="pocket_targeted",
+    quality_guided=True,
+    auto_fold=True,
+)
+```
+
 ## Authentication
 
 ```python
 # 1. Pass explicitly
-client = LigandAI(api_key="lgai_pro_...")
+client = LigandAI(api_key="lgai_basic_...")
 
 # 2. Read from env var (preferred for prod)
-# $ export LIGANDAI_API_KEY=lgai_pro_...
+# $ export LIGANDAI_API_KEY=lgai_basic_...
 client = LigandAI()
 
 # 3. Custom base URL (dev / on-prem / enterprise)
 client = LigandAI(api_key="...", base_url="http://localhost:5050")
 ```
 
+Any authenticated LIGANDAI account, including free accounts, can create API
+keys from account settings in the Developer/API Keys area. API keys identify
+the account; the API still gates feature access by tier, credits/tokens, and
+GPU limits.
+
 API keys carry a **tier prefix**:
 
 | Prefix | Tier | What it can do |
 |---|---|---|
-| `lgai_free_*` | free | search, view structures, get job status |
-| `lgai_edu_*`  | academia | + generate, fold, score, glycosylation |
-| `lgai_pro_*`  | pro | + bivalent, transport vasculome (no batch ops) |
+| `lgai_free_*` | free | quality-guided generation up to 10 peptides, 10 folds, 3 targets, 1 folding GPU |
+| `lgai_basic_*` | basic | up to 100 peptides, paid folding allowance, 4 folding GPUs |
+| `lgai_edu_*`  | academia | up to 300 peptides, academia guidance modules, 16 folding GPUs |
+| `lgai_pro_*`  | pro | up to 300 peptides, transcriptomics analysis, bivalent, 25 folding GPUs |
 | `lgai_ent_*`  | enterprise | everything + batch operations + priority queue |
 | `lgai_sa_*`   | superadmin | all features (internal) |
 
@@ -72,11 +117,17 @@ client.tier                     # "pro"
 client.credits                  # int
 client.feature_allowed("...")   # bool
 client.max_peptides_per_generation
+client.max_folds_per_generation
+client.max_targets_per_generation
+client.max_concurrent_gpu_slots
 client.rate_limit_per_minute
 ```
 
 When a method requires a higher tier than the key carries, it raises
 `LigandAITierError` **client-side**, before sending the request.
+
+For agent-specific billing, token, API-key, and Claude Skill routing, see
+[`docs/agents.md`](docs/agents.md).
 
 ## Resource Namespaces
 
@@ -88,6 +139,7 @@ When a method requires a higher tier than the key carries, it raises
 | `client.proteins`      | `/api/protein-info/*`, `/api/protein-variants/*` | UniProt info, variants, custom PDBs |
 | `client.discovery`     | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*` | tissue markers, scRNA, GEO import |
 | `client.diseases`      | `/api/disease-viewer/*` | disease search, mutations |
+| `client.goals`         | `/api/autoresearch/*` | persistent goal-directed AutoResearch runs |
 | `client.peptides`      | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/binder-scoring/*`, `/api/v1/deltaforge/score-pdb` | generate, fold, score |
 | `client.bivalent`      | `/api/ligandforge/bivalent/*` | bispecific design (pro+) |
 | `client.synthesis`     | `/api/synthesis-checkout/*`, `/api/adaptyv/*` | quote, cart, order |
@@ -125,6 +177,62 @@ for t in txns[:5]:
     print(f"[{t.type}] {t.amount:+d} credits — {t.description}")
 ```
 
+### Track credits for a local agent or notebook run
+
+Pass a stable `client_session_id` to tag every API request from a Claude Code,
+Codex, notebook, or pipeline run. The dashboard exposes the same run ID under
+Account Billing -> API Activity.
+
+```python
+client = LigandAI(client_session_id="codex-il31-screen-20260505")
+
+with client.session("codex-il31-screen-20260505") as run:
+    job = client.peptides.generate(gene="IL31", num_peptides=25, auto_fold=True)
+    result = job.wait()
+
+print(run.credits_used)
+
+usage = client.account.session_usage("codex-il31-screen-20260505")
+print(usage.summary.total_calls, usage.summary.credits_used)
+```
+
+## Persistent Goal Runs (v0.3.2+)
+
+Goal runs are Automatic Mode jobs: they can keep running on the server and
+spending credits after your Python process exits until stopped or capped. The
+SDK requires `automatic_mode=True` as an explicit acknowledgement. This server
+capability is currently limited to internal pilot accounts.
+
+```python
+run = client.goals.start(
+    "Generate and fold IL31 peptides until at least five candidates exceed the iPSAE threshold",
+    automatic_mode=True,
+    budget_cap_credits=5000,
+    max_iterations=3,
+    conversation_id="optional-conversation-id",
+    program_id="optional-ptf-program-id",
+)
+
+status = client.goals.get(run.run_id)
+print(status.status, status.credits_consumed, status.budget_cap_credits)
+print(status.automatic_mode_acknowledged, status.automatic_mode_acknowledged_at)
+print(status.satisfaction_status, status.acceptance_criteria, status.evaluation_history[-1:])
+
+graph = client.goals.graph(run.run_id)
+print(graph.progress.percent, graph.next_actions[:1], graph.blockers)
+for item in graph.checklist:
+    print(item.status, item.type, item.label)
+
+for event in client.goals.stream(run.run_id):
+    print(event.type, event.run_id)
+    if event.type in {"completed", "failed"}:
+        break
+
+client.goals.pause(run.run_id)
+client.goals.resume(run.run_id)
+client.goals.stop(run.run_id)
+```
+
 ## DeltaForge V10 Scoring
 
 ```python
@@ -148,7 +256,13 @@ for pair in score.pair_scores or []:
     print(pair.receptor_chain, pair.peptide_chain, pair.dg, pair.contacts)
 ```
 
-## Folding Controls and Peptide Viewing (v0.3.2+)
+## Folding Controls and Peptide Viewing (v0.3.3+)
+
+Direct SDK folds default to one diffusion sample. Increase
+`num_trajectories`, `sampling_steps`, `recycling_steps`, or `step_scale` only
+when you need ensemble-validation depth. On eligible direct human receptor or
+receptor-complex folds, set `contribute_to_receptordb=True` to request
+ReceptorDB contribution and the documented discount.
 
 ```python
 job = client.peptides.generate(
@@ -159,6 +273,7 @@ job = client.peptides.generate(
     num_trajectories=4,
     folding_mode="parallel",
     fold_strategy="top_ranked",
+    sampling_steps=50,
 )
 
 fold_job = client.peptides.fold(
@@ -167,6 +282,7 @@ fold_job = client.peptides.fold(
     recycling_steps=5,
     num_trajectories=10,
     step_scale=1.2,
+    contribute_to_receptordb=True,
 )
 ```
 
@@ -191,7 +307,9 @@ MIT License: https://github.com/001TMF/ProteinView.
 
 ## Guidance Modules (v0.2.0+)
 
-Pro+ tier keys unlock guidance modules that steer LigandForge during generation:
+Quality-guided generation is available to all authenticated tiers, including
+free. Academia, pro, and enterprise keys unlock immunogenicity guidance, serum
+stability guidance, and logits-style advanced outputs:
 
 ```python
 # Immunogenicity guidance — reduce MHC-I/II epitopes and improve humanness
@@ -221,7 +339,7 @@ job = client.peptides.generate(
     halflife_strength=2.5,
 )
 
-# Charge / solubility filtering (pro+ tier)
+# Charge / solubility filtering (server-tier gated)
 # Keep only peptides with net charge < -1.0
 job = client.peptides.generate(
     gene="EGFR",
@@ -231,7 +349,7 @@ job = client.peptides.generate(
 )
 
 # Cyclic peptides — terminal Cys-Cys disulfide (primary Adaptyv synthesis route)
-# Requires academia / pro / enterprise / discovery_partner tier.
+# Requires academia/pro/enterprise tier.
 job = client.peptides.generate(
     gene="EGFR",
     num_peptides=100,
@@ -257,7 +375,7 @@ for p in result.peptides:
 Generation, folding, and scoring submit GPU work and return a `Job`:
 
 ```python
-job = client.peptides.generate(gene="EGFR", num_peptides=300)
+job = client.peptides.generate(gene="EGFR", num_peptides=10)
 job.id              # str
 job.status          # "queued" | "running" | "complete" | "failed"
 job.progress        # 0-100 or None
@@ -283,7 +401,7 @@ from ligandai import AsyncLigandAI
 async def design_for_genes(genes):
     async with AsyncLigandAI() as client:
         jobs = await asyncio.gather(*[
-            client.peptides.generate(gene=g, num_peptides=300) for g in genes
+            client.peptides.generate(gene=g, num_peptides=10) for g in genes
         ])
         results = await asyncio.gather(*[j.wait() for j in jobs])
         return results
@@ -324,6 +442,7 @@ Per-tier rate limits:
 | Tier | req/min |
 |---|---|
 | free | 10 |
+| basic | 20 |
 | academia | 30 |
 | pro | 60 |
 | enterprise | 300 |
@@ -388,4 +507,7 @@ ruff check ligandai/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Proprietary. By installing or using this SDK you agree to the
+[LigandAI Terms of Service](https://ligandai.com/terms), the
+[LigandAI End User License Agreement](https://ligandai.com/eula), and the
+license terms in [LICENSE](LICENSE).

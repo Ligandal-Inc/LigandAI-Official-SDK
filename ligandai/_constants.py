@@ -1,13 +1,13 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Constants mirrored from the LIGANDAI server.
 
 Source-of-truth references in the platform:
 
-- Tier prefixes: ``server/middleware/api-key-validator.ts:16``
-- Rate limits:   ``server/middleware/api-key-validator.ts:27-33``
-- Tier features: ``server/middleware/api-key-validator.ts:45-82``
-- Generation:    ``shared/schema.ts:TIER_GENERATION_LIMITS``
-- Fold limits:   ``shared/schema.ts:TIER_FOLD_LIMITS_BY_TARGET``
+- Tier prefixes: ``server/api-key-routes.ts:17``
+- API-key validation: ``server/enterprise-api-routes.ts:41``
+- Tier features: ``server/enterprise-api-routes.ts`` and ``server/routes.ts``
+- Generation:    ``server/routes.ts:tierLimits``
+- Fold limits:   ``server/enterprise-api-routes.ts:TIER_GPU_CAP``
 """
 
 from __future__ import annotations
@@ -15,24 +15,25 @@ from __future__ import annotations
 from typing import Literal
 
 # Tier identifiers from API key prefixes.
-# Mirrors API_KEY_PREFIXES in api-key-validator.ts.
-Tier = Literal["free", "academia", "pro", "enterprise", "superadmin"]
+# Mirrors API_KEY_PREFIXES in api-key-routes.ts.
+Tier = Literal["free", "basic", "academia", "pro", "enterprise", "superadmin"]
 
 API_KEY_PREFIXES: dict[Tier, str] = {
     "free": "lgai_free_",
+    "basic": "lgai_basic_",
     "academia": "lgai_edu_",
     "pro": "lgai_pro_",
     "enterprise": "lgai_ent_",
     "superadmin": "lgai_sa_",
 }
 
-# tierLevel ordering from server/middleware.ts:115 (without basic/pro_commercial/discovery_partner
-# which are session-tier only — API keys map to the five canonical tiers).
-TIER_ORDER: tuple[Tier, ...] = ("free", "academia", "pro", "enterprise", "superadmin")
+# tierLevel ordering from server/middleware.ts.
+TIER_ORDER: tuple[Tier, ...] = ("free", "basic", "academia", "pro", "enterprise", "superadmin")
 
 # Rate limits per minute by API key tier.
 TIER_RATE_LIMITS: dict[Tier, int] = {
     "free": 10,
+    "basic": 20,
     "academia": 30,
     "pro": 60,
     "enterprise": 300,
@@ -47,11 +48,18 @@ FEATURE_MIN_TIER: dict[str, Tier] = {
     "search_receptors": "free",
     "view_structure": "free",
     "get_job_status": "free",
-    # Academia
-    "generate_peptides": "academia",
-    "predict_structure": "academia",
-    "analyze_binding": "academia",
-    "predict_hotspots": "academia",
+    "generate_peptides": "free",
+    "predict_structure": "free",
+    "predict_hotspots": "free",
+    # Basic tier
+    "standard_generation": "basic",
+    # Academia tier
+    "advanced_guidance": "academia",
+    "logits_output": "academia",
+    # Pro tier
+    "analyze_binding": "pro",
+    "bivalent_design": "pro",
+    "transcriptomics_analysis": "pro",
     # Enterprise-only
     "batch_operations": "enterprise",
     "priority_queue": "enterprise",
@@ -59,35 +67,51 @@ FEATURE_MIN_TIER: dict[str, Tier] = {
     "transport_vasculome": "enterprise",
 }
 
-# Generation limits by tier (mirrors TIER_GENERATION_LIMITS in shared/schema.ts).
+# Generation limits by tier-visible design count (mirrors server/routes.ts tierLimits).
 # The SDK uses the tier-visible count, NEVER the backend pool size.
 TIER_GENERATION_LIMITS: dict[Tier, int] = {
-    "free": 100,
+    "free": 10,
+    "basic": 100,
     "academia": 300,
-    "pro": 1000,
-    "enterprise": 5000,
-    "superadmin": 5000,
+    "pro": 300,
+    "enterprise": 1000,
+    "superadmin": 1000,
 }
 
-# Fold limits per target by tier (mirrors TIER_FOLD_LIMITS_BY_TARGET).
+# Fold limits by tier. Paid tiers do not have a lower SDK-side fold cap; the
+# platform remains authoritative for credits, generation allowance, and abuse
+# guards.
 TIER_FOLD_LIMITS: dict[Tier, int | None] = {
-    "free": 1,
-    "academia": 50,
-    "pro": 100,
+    "free": 10,
+    "basic": None,
+    "academia": None,
+    "pro": None,
     "enterprise": None,  # unlimited
+    "superadmin": None,
+}
+
+# Target count limits by tier.
+TIER_TARGET_LIMITS: dict[Tier, int | None] = {
+    "free": 3,
+    "basic": None,
+    "academia": None,
+    "pro": None,
+    "enterprise": None,
     "superadmin": None,
 }
 
 # Default fold trajectories (Boltz-2 diffusion samples).
 DEFAULT_TRAJECTORIES: int = 4
 
-# Concurrent GPU slot limits (mirrors USER_GPU_LIMITS in gpu-quota-manager.ts).
+# Folding GPU caps by tier. Generation is submitted as a one-GPU job; these caps
+# apply to folding and parallel fold batches.
 TIER_GPU_SLOTS: dict[Tier, int] = {
-    "free": 2,
-    "academia": 12,
-    "pro": 24,
-    "enterprise": 96,
-    "superadmin": 96,
+    "free": 1,
+    "basic": 4,
+    "academia": 16,
+    "pro": 25,
+    "enterprise": 50,
+    "superadmin": 50,
 }
 
 # Default URLs.

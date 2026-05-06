@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Account, credits, tier limits, and billing."""
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     AccountBalance,
     AutoTopupConfig,
+    ClientSessionUsage,
     Credits,
     CreditTransaction,
     TierLimits,
@@ -156,6 +157,27 @@ class Account(Resource):
         )
         return AutoTopupConfig.model_validate(payload)
 
+    def session_usage(
+        self,
+        session_id: str,
+        period: Literal["7d", "30d", "90d", "all"] = "30d",
+    ) -> ClientSessionUsage:
+        """``GET /api/account/session-usage`` — calls and credits for one SDK run.
+
+        ``session_id`` should match the client's ``client_session_id`` or the
+        ID passed to ``client.session(...)``. This is designed for local agents
+        such as Claude Code or Codex to reconcile credit burn for a run.
+        """
+        payload = (
+            self._transport.request(
+                "GET",
+                "/api/account/session-usage",
+                params={"session_id": session_id, "period": period},
+            )
+            or {}
+        )
+        return ClientSessionUsage.model_validate(payload)
+
 
 class AsyncAccount(AsyncResource):
     async def me(self) -> User:
@@ -252,3 +274,18 @@ class AsyncAccount(AsyncResource):
             or {}
         )
         return AutoTopupConfig.model_validate(payload)
+
+    async def session_usage(
+        self,
+        session_id: str,
+        period: Literal["7d", "30d", "90d", "all"] = "30d",
+    ) -> ClientSessionUsage:
+        payload = (
+            await self._transport.request(
+                "GET",
+                "/api/account/session-usage",
+                params={"session_id": session_id, "period": period},
+            )
+            or {}
+        )
+        return ClientSessionUsage.model_validate(payload)

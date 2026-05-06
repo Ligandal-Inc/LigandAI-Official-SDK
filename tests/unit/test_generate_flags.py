@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Unit tests for the extended generate() flags added in v0.3.2+.
 
 Covers wire-format correctness for:
@@ -23,7 +23,7 @@ from pytest_httpx import HTTPXMock
 
 from ligandai import LigandAI
 from ligandai.errors import LigandAITierError
-from ligandai.types import EcTrimmingConfig, PdcConfig, PeptideSegment, SegmentConfig
+from ligandai.types import EcTrimmingConfig, PdcConfig, PeptideSegment, ResidueRange, SegmentConfig
 
 BASE = "http://api.ligandai.test"
 GEN_URL = f"{BASE}/api/ptf/parallel/generate"
@@ -40,6 +40,34 @@ def _body(httpx_mock: HTTPXMock) -> dict:
     req = httpx_mock.get_request()
     assert req is not None
     return json.loads(req.content)
+
+
+def test_pocket_targeted_multi_chain_ranges_in_wire_body(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    target_residues = [
+        *ResidueRange.from_residues([34, 35, 36, 41, 42], chain="A", label="pocket A"),
+        *ResidueRange.from_residues([102, 103, 104], chain="B", label="pocket B"),
+    ]
+
+    client.peptides.generate(
+        gene="EGFR",
+        target_residues=target_residues,
+        targeting_strategy="pocket_targeted",
+        quality_guided=True,
+    )
+
+    body = _body(httpx_mock)
+    target = body["targets"][0]
+    assert target["gene"] == "EGFR"
+    assert target["targetingStrategy"] == "pocket_targeted"
+    assert target["targetResidues"] == [
+        {"chain": "A", "start": 34, "end": 36, "label": "pocket A"},
+        {"chain": "A", "start": 41, "end": 42, "label": "pocket A"},
+        {"chain": "B", "start": 102, "end": 104, "label": "pocket B"},
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +235,14 @@ def test_quality_guidance_scale_in_body(httpx_mock: HTTPXMock, client: LigandAI)
     assert body["qualityGuidanceScale"] == pytest.approx(1.5)
 
 
+def test_quality_guided_allowed_for_free_tier(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    c = LigandAI(api_key="lgai_free_testkey", base_url=BASE, max_retries=1)
+    c.peptides.generate(gene="EGFR", quality_guided=True)
+    body = _body(httpx_mock)
+    assert body["qualityGuidedEnabled"] is True
+
+
 # ---------------------------------------------------------------------------
 # Immune guidance (immunogenicity)
 # ---------------------------------------------------------------------------
@@ -307,10 +343,26 @@ def test_min_solubility_in_body(httpx_mock: HTTPXMock, client: LigandAI) -> None
 
 
 def test_tier_gate_free_key_raises_ligandai_tier_error() -> None:
-    """Free-tier key → client-side LigandAITierError before HTTP (generate requires academia+)."""
+    """Free-tier key → client-side LigandAITierError for academia+ guidance."""
     c = LigandAI(api_key="lgai_free_testkey", base_url=BASE, max_retries=1)
-    with pytest.raises(LigandAITierError):
+    with pytest.raises(LigandAITierError) as exc_info:
         c.peptides.generate(gene="EGFR", immunogenicity=True)
+    assert exc_info.value.required_tier == "academia"
+    assert exc_info.value.current_tier == "free"
+
+
+def test_tier_gate_free_key_blocks_serum_stability() -> None:
+    c = LigandAI(api_key="lgai_free_testkey", base_url=BASE, max_retries=1)
+    with pytest.raises(LigandAITierError) as exc_info:
+        c.peptides.generate(gene="EGFR", serum_stability=True)
+    assert exc_info.value.required_tier == "academia"
+
+
+def test_tier_gate_free_key_blocks_logits_output() -> None:
+    c = LigandAI(api_key="lgai_free_testkey", base_url=BASE, max_retries=1)
+    with pytest.raises(LigandAITierError) as exc_info:
+        c.peptides.generate(gene="EGFR", return_logits=True)
+    assert exc_info.value.required_tier == "academia"
 
 
 def test_tier_gate_unknown_key_prefix_raises_ligandai_tier_error() -> None:

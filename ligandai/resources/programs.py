@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Programs, workstreams, projects, and sessions."""
 
 from __future__ import annotations

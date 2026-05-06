@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Job lifecycle: poll, wait, cancel, stream."""
 
 from __future__ import annotations

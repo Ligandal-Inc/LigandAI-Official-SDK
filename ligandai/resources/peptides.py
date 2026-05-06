@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Peptide generation, folding, and scoring.
 
 Public methods that submit GPU work return :class:`Job` (or :class:`AsyncJob`)
@@ -79,6 +79,16 @@ _DEPRECATED_EXTRA_CYS_KEYS: frozenset[str] = frozenset({
     "disulfideConstraints",
 })
 
+_LOGITS_EXTRA_KEYS: frozenset[str] = frozenset({
+    "return_logits",
+    "returnLogits",
+    "output_logits",
+    "outputLogits",
+    "include_logits",
+    "includeLogits",
+    "logits",
+})
+
 
 def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
     """Emit DeprecationWarning when cys-related keys arrive via ``extra=``.
@@ -104,6 +114,29 @@ def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
         DeprecationWarning,
         stacklevel=3,
     )
+
+
+def _requests_advanced_guidance(
+    *,
+    immunogenicity: bool,
+    immuno_modules: dict[str, bool] | None,
+    serum_stability: bool,
+    stability_modules: dict[str, bool] | None,
+    halflife: _HalflifeTarget | None,
+    cyclic_mode: _CyclicMode | None,
+    extra: dict[str, Any] | None,
+) -> bool:
+    """Return True for guidance outputs gated to academia/pro/enterprise."""
+    if (
+        immunogenicity
+        or immuno_modules is not None
+        or serum_stability
+        or stability_modules is not None
+        or halflife is not None
+        or (cyclic_mode is not None and cyclic_mode != "none")
+    ):
+        return True
+    return bool(extra and any(bool(extra.get(key)) for key in _LOGITS_EXTRA_KEYS))
 
 
 def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
@@ -142,8 +175,9 @@ _TargetingStrategy = Literal["full_surface", "pocket_targeted"]
 # - ``"head_tail_contact"`` — soft B-matrix bias toward terminal-pair-favorable
 #   compositions; no synthesis constraint added.
 #
-# Tier-gated: requires academia / pro / pro_commercial / enterprise /
-# discovery_partner tier. basic/free → server returns HTTP 403.
+# Tier-gated: advanced immunogenicity/stability/logits guidance remains
+# academia/pro/enterprise only. Quality-guided base generation is available to
+# all authenticated tiers, including free, subject to credits and limits.
 _CyclicMode = Literal["none", "lactam", "disulfide", "head_tail_contact"]
 
 # Charge filtering mode applied by the filtered Modal worker.
@@ -237,7 +271,7 @@ def _generation_body(
     charge_min: float | None,
     charge_max: float | None,
     min_solubility: float | None,
-    # Cyclization (tier-gated: academia/pro/enterprise/discovery_partner only).
+    # Cyclization (tier-gated: academia/pro/enterprise only).
     cyclic_mode: _CyclicMode | None,
     cyclic_strength: float,
     strict_recombinant: bool,
@@ -253,9 +287,9 @@ def _generation_body(
     num_trajectories: int | None,
     sampling_steps: int | None,
     glycosylation_enabled: bool | None,
-    segment_config: "SegmentConfig | dict | None",
-    pdc_config: "PdcConfig | dict | None",
-    ec_trimming_config: "EcTrimmingConfig | dict | None",
+    segment_config: SegmentConfig | dict | None,
+    pdc_config: PdcConfig | dict | None,
+    ec_trimming_config: EcTrimmingConfig | dict | None,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
@@ -267,8 +301,8 @@ def _generation_body(
         "genParallelCount": gen_gpus,
         "foldingGpus": fold_gpus,
         "cysteineMode": cysteine_mode,
-        # Guidance modules (server defaults: all off; require pro+ tier or
-        # explicit moduleAccess override on the user record).
+        # Guidance modules. Quality-guided generation is free+; immunogenicity,
+        # serum stability, and logits-style outputs are academia+.
         "qualityGuidedEnabled": quality_guided,
         "qualityGuidanceScale": quality_guidance_scale,
         "immunoEnabled": immunogenicity,
@@ -329,7 +363,7 @@ def _generation_body(
         body["minSolubility"] = min_solubility
     # Cyclization — only send when explicitly requested (non-None + non-"none").
     # The server reads this via req.body.cyclicMode; tier gate is enforced
-    # server-side (HTTP 403 for basic/free), but we also document it here.
+    # server-side (HTTP 403 for insufficient tiers), but we also document it here.
     if cyclic_mode is not None and cyclic_mode != "none":
         body["cyclicMode"] = cyclic_mode
         body["cyclicStrength"] = cyclic_strength
@@ -377,11 +411,12 @@ def _fold_body(
     glycosylation: bool | None = None,
     pegylation: bool | None = None,
     gpu_count: int = 1,
-    diffusion_samples: int = 4,
+    diffusion_samples: int = 1,
     sampling_steps: int | None = None,
     recycling_steps: int | None = None,
     num_trajectories: int | None = None,
     step_scale: float | None = None,
+    contribute_to_receptordb: bool | None = None,
 ) -> dict[str, Any]:
     """Build the body for ``POST /api/folding/predict``.
 
@@ -403,6 +438,9 @@ def _fold_body(
         body["numTrajectories"] = num_trajectories
     if step_scale is not None:
         body["stepScale"] = step_scale
+    if contribute_to_receptordb is not None:
+        body["contributeToReceptordb"] = contribute_to_receptordb
+        body["submitToCommunity"] = contribute_to_receptordb
     if target_gene is not None:
         body["targetGeneName"] = target_gene
     if msa_enabled is not None:
@@ -530,7 +568,7 @@ def _flatten_peptide(raw: dict[str, Any], gene: str | None = None) -> dict[str, 
     _set_if_missing(out, "predictedPlddt", _first_present(raw.get("predicted_plddt"), qs.get("predicted_plddt")))
     _set_if_missing(out, "binderProb", _first_present(raw.get("binder_prob"), qs.get("binder_prob")))
 
-    # Stability / immuno (pro+ tier, may be None)
+    # Stability / immuno (academia+ tier, may be None)
     if not out.get("stability_grade") and raw.get("stability_scores"):
         out["stabilityGrade"] = raw["stability_scores"].get("stability_grade")
     if not out.get("immunogenicity_score") and raw.get("immuno_scores"):
@@ -698,7 +736,7 @@ class Peptides(Resource):
         deimmunize_mode: bool = False,
         variant_id: int | None = None,
         gen_gpus: int = 1,
-        fold_gpus: int = 5,
+        fold_gpus: int = 1,
         program_id: int | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
         quality_guided: bool = False,
@@ -712,19 +750,19 @@ class Peptides(Resource):
         stability_modules: dict[str, bool] | None = None,
         halflife: _HalflifeTarget | None = None,
         halflife_strength: float = 2.0,
-        # Charge / solubility filtering (pro+ tier only; server activates
+        # Charge / solubility filtering (server-tier gated; server activates
         # filtered Modal worker when any non-default constraint is present).
         charge_mode: _ChargeMode | None = None,
         charge_value: float | None = None,
         charge_min: float | None = None,
         charge_max: float | None = None,
         min_solubility: float | None = None,
-        # Cyclization (tier-gated: academia/pro/enterprise/discovery_partner).
+        # Cyclization (tier-gated: academia/pro/enterprise).
         # Pass ``cyclic_mode="disulfide"`` for terminal Cys-Cys bridge (primary
         # recombinant-shippable mode), ``"lactam"`` for head-to-tail amide
         # closure (prediction/viz layer only), or ``"head_tail_contact"`` for
         # soft B-matrix bias without a synthesis constraint.
-        # basic/free users receive HTTP 403 from the server.
+        # insufficient-tier users receive HTTP 403 from the server.
         cyclic_mode: _CyclicMode | None = None,
         cyclic_strength: float = 2.0,
         strict_recombinant: bool = True,
@@ -740,39 +778,44 @@ class Peptides(Resource):
         num_trajectories: int | None = None,
         sampling_steps: int | None = None,
         glycosylation_enabled: bool | None = None,
-        segment_config: "SegmentConfig | dict | None" = None,
-        pdc_config: "PdcConfig | dict | None" = None,
-        ec_trimming_config: "EcTrimmingConfig | dict | None" = None,
+        segment_config: SegmentConfig | dict | None = None,
+        pdc_config: PdcConfig | dict | None = None,
+        ec_trimming_config: EcTrimmingConfig | dict | None = None,
         **extra: Any,
     ) -> Job[GenerationResult]:
         """Submit a peptide generation job. Returns a :class:`Job`.
 
         Args:
             gene: Target gene symbol (e.g. ``"EGFR"``).
-            num_peptides: Peptides to generate per target (server default 300).
+            num_peptides: Peptides to generate per target. Tier caps are free=10,
+                basic=100, academia/pro=300, enterprise=1000.
             length_range: ``(min_aa, max_aa)`` length bounds (default ``(20, 70)``).
             target_residues: Optional pocket residue ranges for guided targeting.
+                Multiple ranges may target one or more receptor chains. Use
+                ``ResidueRange.from_residues([32, 33, 34], chain="A")`` to
+                compress selected residues into continuous chain-local ranges.
             targeting_strategy: ``"full_surface"`` or ``"pocket_targeted"``.
             auto_fold: Run Boltz-2 folding automatically after generation.
             top_n_fold: Cap on how many peptides to fold per target.
             ec_domain_trimming: Trim signal peptide / EC domain before generation.
             deimmunize_mode: Apply post-generation deimmunization.
             variant_id: Protein variant ID (from ``peptides.variants``).
-            gen_gpus: GPU count for generation (default 1).
-            fold_gpus: GPU count for folding (default 5).
+            gen_gpus: GPU count for generation. Generation uses a one-GPU
+                server path; higher values are ignored or clamped server-side.
+            fold_gpus: GPU count for folding (default 1). Folding caps are
+                free=1, basic=4, academia=16, pro=25, enterprise=50.
             program_id: Program/workstream ID to associate session with.
             cysteine_mode: Cysteine placement policy (``"disulfide_only"`` /
                 ``"allow_all"`` / ``"exclude_all"``).
-            quality_guided: Enable quality-guided generation (basic+ tier, default ON
-                for basic+ when unset). Adds a +20 credit/peptide surcharge. Disabled
-                automatically when ``cyclic_mode`` is set (LigandIQ incompatible with
-                cyclic folds).
+            quality_guided: Enable quality-guided generation. Available to all
+                authenticated tiers, including free; server-side credits and
+                retention/licensing terms still apply.
             quality_guidance_scale: Scale for quality guidance (default 1.0).
             immunogenicity: Enable immune guidance (academia+ tier). Steers
                 generation away from MHC-binding motifs toward sequences with low
                 predicted immunogenicity. Uses MHC-I/II anchor avoidance + scoring
                 during diffusion.
-            immuno_strength: Immune guidance strength 0.5–4.0 (default 2.0).
+            immuno_strength: Immune guidance strength 0.5-4.0 (default 2.0).
                 Enterprise tier unlocks values above 3.0.
             immuno_modules: Optional per-module override, e.g.
                 ``{"mhc_i": True, "mhc_ii": True}``.
@@ -786,7 +829,7 @@ class Peptides(Resource):
             halflife: Half-life target (``"extended"`` / ``"rapid"`` / ``"moderate"``).
                 ``None`` disables half-life guidance (default).
             halflife_strength: Half-life guidance strength 1.0-3.0.
-            charge_mode: Charge filter mode (pro+ tier). ``"lt"`` keeps peptides
+            charge_mode: Charge filter mode (academia+ tier). ``"lt"`` keeps peptides
                 with net charge < ``charge_value``; ``"gt"`` keeps those above;
                 ``"between"`` uses ``charge_min``/``charge_max`` bounds;
                 ``"off"`` disables filtering (server default).
@@ -798,7 +841,7 @@ class Peptides(Resource):
                 Cys-Cys, primary recombinant-shippable), ``"lactam"``
                 (head-to-tail amide, prediction only), or
                 ``"head_tail_contact"`` (soft bias). Requires
-                academia/pro/enterprise/discovery_partner tier.
+                academia/pro/enterprise tier.
             cyclic_strength: Soft-constraint strength for cyclic guidance.
             strict_recombinant: For ``cyclic_mode="disulfide"``, forbid internal
                 Cys residues (required for Adaptyv synthesis path).
@@ -822,6 +865,16 @@ class Peptides(Resource):
         """
         if self._client is not None:
             self._client._require_feature("generate_peptides")
+            if _requests_advanced_guidance(
+                immunogenicity=immunogenicity,
+                immuno_modules=immuno_modules,
+                serum_stability=serum_stability,
+                stability_modules=stability_modules,
+                halflife=halflife,
+                cyclic_mode=cyclic_mode,
+                extra=extra,
+            ):
+                self._client._require_feature("advanced_guidance")
         # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
         # use the typed kwargs above. Hard-rejected in v0.3.0.
         _warn_deprecated_cys_extra(extra)
@@ -910,11 +963,12 @@ class Peptides(Resource):
         glycosylation: bool | None = None,
         pegylation: bool | None = None,
         gpu_count: int = 1,
-        diffusion_samples: int = 4,
+        diffusion_samples: int = 1,
         sampling_steps: int | None = None,
         recycling_steps: int | None = None,
         num_trajectories: int | None = None,
         step_scale: float | None = None,
+        contribute_to_receptordb: bool | None = None,
     ) -> Job[FoldResult]:
         """Submit a Boltz-2 folding job (monomer or multimer)."""
         if self._client is not None:
@@ -933,6 +987,7 @@ class Peptides(Resource):
             recycling_steps=recycling_steps,
             num_trajectories=num_trajectories,
             step_scale=step_scale,
+            contribute_to_receptordb=contribute_to_receptordb,
         )
         payload = self._transport.request("POST", "/api/folding/predict", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""
@@ -1226,8 +1281,8 @@ class Peptides(Resource):
         program/session coverage. Follow up with :meth:`list` for the
         actual peptide rows.
 
-        **Auth:** Paid tiers only (pro/enterprise/superadmin). Free / academia
-        keys raise :class:`~ligandai.errors.LigandAIPaidTierRequired` from the
+        **Auth:** Paid tiers only (basic/academia/pro/enterprise/superadmin).
+        Free keys raise :class:`~ligandai.errors.LigandAIPaidTierRequired` from the
         server's 402 response.
 
         Args:
@@ -1310,7 +1365,7 @@ class Peptides(Resource):
         fields. Heavy fields are gated behind ``include=`` to keep typical
         reads fast.
 
-        **Auth:** Paid tiers only. Free / academia keys raise
+        **Auth:** Paid tiers only. Free keys raise
         :class:`~ligandai.errors.LigandAIPaidTierRequired`.
 
         Args:
@@ -1405,7 +1460,7 @@ class AsyncPeptides(AsyncResource):
         deimmunize_mode: bool = False,
         variant_id: int | None = None,
         gen_gpus: int = 1,
-        fold_gpus: int = 5,
+        fold_gpus: int = 1,
         program_id: int | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
         quality_guided: bool = False,
@@ -1439,14 +1494,24 @@ class AsyncPeptides(AsyncResource):
         num_trajectories: int | None = None,
         sampling_steps: int | None = None,
         glycosylation_enabled: bool | None = None,
-        segment_config: "SegmentConfig | dict | None" = None,
-        pdc_config: "PdcConfig | dict | None" = None,
-        ec_trimming_config: "EcTrimmingConfig | dict | None" = None,
+        segment_config: SegmentConfig | dict | None = None,
+        pdc_config: PdcConfig | dict | None = None,
+        ec_trimming_config: EcTrimmingConfig | dict | None = None,
         **extra: Any,
     ) -> AsyncJob[GenerationResult]:
         """Async variant of :meth:`Peptides.generate`. See that method for full docs."""
         if self._client is not None:
             self._client._require_feature("generate_peptides")
+            if _requests_advanced_guidance(
+                immunogenicity=immunogenicity,
+                immuno_modules=immuno_modules,
+                serum_stability=serum_stability,
+                stability_modules=stability_modules,
+                halflife=halflife,
+                cyclic_mode=cyclic_mode,
+                extra=extra,
+            ):
+                self._client._require_feature("advanced_guidance")
         # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
         # use the typed kwargs above. Hard-rejected in v0.3.0.
         _warn_deprecated_cys_extra(extra)
@@ -1532,11 +1597,12 @@ class AsyncPeptides(AsyncResource):
         glycosylation: bool | None = None,
         pegylation: bool | None = None,
         gpu_count: int = 1,
-        diffusion_samples: int = 4,
+        diffusion_samples: int = 1,
         sampling_steps: int | None = None,
         recycling_steps: int | None = None,
         num_trajectories: int | None = None,
         step_scale: float | None = None,
+        contribute_to_receptordb: bool | None = None,
     ) -> AsyncJob[FoldResult]:
         if self._client is not None:
             self._client._require_feature("predict_structure")
@@ -1554,6 +1620,7 @@ class AsyncPeptides(AsyncResource):
             recycling_steps=recycling_steps,
             num_trajectories=num_trajectories,
             step_scale=step_scale,
+            contribute_to_receptordb=contribute_to_receptordb,
         )
         payload = await self._transport.request("POST", "/api/folding/predict", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""

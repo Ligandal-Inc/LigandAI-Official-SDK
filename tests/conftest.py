@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Shared pytest fixtures."""
 
 from __future__ import annotations
@@ -12,6 +12,10 @@ from ligandai import AsyncLigandAI, LigandAI
 
 TEST_BASE_URL = "http://api.ligandai.test"
 TEST_API_KEY = "lgai_pro_testkey0123456789ABCDEF"
+
+
+def pytest_configure() -> None:
+    os.environ.setdefault("LIGANDAI_SKIP_VERSION_CHECK", "1")
 
 
 @pytest.fixture

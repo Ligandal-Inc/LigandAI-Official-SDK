@@ -3,7 +3,7 @@
 Generation, folding, and scoring submit GPU work and return a `Job`:
 
 ```python
-job = client.peptides.generate(gene="EGFR", num_peptides=300)
+job = client.peptides.generate(gene="EGFR", num_peptides=10)
 
 # Properties
 job.id
@@ -30,7 +30,7 @@ from ligandai import AsyncLigandAI
 
 async def main():
     async with AsyncLigandAI() as client:
-        job = await client.peptides.generate(gene="EGFR", num_peptides=300)
+        job = await client.peptides.generate(gene="EGFR", num_peptides=10)
         result = await job.wait()
         # Or async stream
         async for event in job.stream():
@@ -47,7 +47,7 @@ import asyncio
 async def main():
     async with AsyncLigandAI() as client:
         jobs = await asyncio.gather(*[
-            client.peptides.generate(gene=g, num_peptides=300)
+            client.peptides.generate(gene=g, num_peptides=10)
             for g in ["EGFR", "HER2", "KIT"]
         ])
         results = await asyncio.gather(*[j.wait() for j in jobs])

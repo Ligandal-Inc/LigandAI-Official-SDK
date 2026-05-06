@@ -5,11 +5,11 @@ Official Python client for the [LIGANDAI](https://ligandai.com) platform.
 ```python
 from ligandai import LigandAI
 
-client = LigandAI(api_key="lgai_pro_...")
+client = LigandAI(api_key="lgai_basic_...")
 print(f"Tier: {client.tier}, Credits: {client.credits}")
 
 # Generate peptides
-job = client.peptides.generate(gene="EGFR", num_peptides=300)
+job = client.peptides.generate(gene="EGFR", num_peptides=10)
 result = job.wait()
 ```
 
@@ -23,6 +23,7 @@ authentication
 resources
 errors
 jobs
+agents
 api/ligandai/index
 ```
 

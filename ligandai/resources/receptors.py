@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """ReceptorDB endpoints — search, browse, download, classification."""
 
 from __future__ import annotations

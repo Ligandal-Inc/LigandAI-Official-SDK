@@ -1,7 +1,7 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Single source of truth for the SDK version.
 
 Keep in sync with `[project] version` in `pyproject.toml`.
 """
 
-__version__: str = "0.3.2"
+__version__: str = "0.3.6"

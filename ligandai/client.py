@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Top-level :class:`LigandAI` and :class:`AsyncLigandAI` clients.
 
 Construction
@@ -9,7 +9,7 @@ Construction
     client = LigandAI()
 
     # Or pass explicitly
-    client = LigandAI(api_key="lgai_pro_AbC123...")
+    client = LigandAI(api_key="lgai_basic_AbC123...")
 
     # Custom base URL (enterprise, on-prem, dev)
     client = LigandAI(api_key="...", base_url="http://localhost:5050")
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -34,10 +35,12 @@ from ligandai._constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_SECS,
     FEATURE_MIN_TIER,
+    TIER_FOLD_LIMITS,
     TIER_GENERATION_LIMITS,
     TIER_GPU_SLOTS,
     TIER_ORDER,
     TIER_RATE_LIMITS,
+    TIER_TARGET_LIMITS,
     Tier,
 )
 from ligandai._http import AsyncHTTPTransport, HTTPTransport
@@ -51,9 +54,10 @@ from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
-from ligandai.resources.msa import AsyncMSA, MSA
+from ligandai.resources.goals import AsyncGoals, Goals
 from ligandai.resources.jobs import AsyncJobs, Jobs
 from ligandai.resources.memory import AsyncMemory, Memory
+from ligandai.resources.msa import MSA, AsyncMSA
 from ligandai.resources.peptides import AsyncPeptides, Peptides
 from ligandai.resources.programs import AsyncPrograms, Programs
 from ligandai.resources.proteins import AsyncProteins, Proteins
@@ -61,7 +65,8 @@ from ligandai.resources.receptors import AsyncReceptors, Receptors
 from ligandai.resources.reports import AsyncReports, Reports
 from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
-from ligandai.types import Credits, User
+from ligandai.types import ClientSessionUsage, Credits, User
+from ligandai.version_check import emit_update_notice
 
 
 def _resolve_api_key(api_key: str | None) -> str | None:
@@ -134,6 +139,14 @@ class _ClientCommon:
     def max_peptides_per_generation(self) -> int | None:
         return TIER_GENERATION_LIMITS.get(self._tier) if self._tier else None
 
+    @property
+    def max_folds_per_generation(self) -> int | None:
+        return TIER_FOLD_LIMITS.get(self._tier) if self._tier else None
+
+    @property
+    def max_targets_per_generation(self) -> int | None:
+        return TIER_TARGET_LIMITS.get(self._tier) if self._tier else None
+
     def feature_allowed(self, feature: str) -> bool:
         """Check whether the current tier can call a named feature."""
         if self._tier == "superadmin":
@@ -176,7 +189,7 @@ class _ClientCommon:
             # different prefixes); let the server's 402 surface through the
             # error mapper.
             return
-        if self._tier in ("pro", "enterprise", "superadmin"):
+        if self._tier in ("basic", "academia", "pro", "enterprise", "superadmin"):
             return
         raise LigandAIPaidTierRequired(
             (
@@ -185,7 +198,7 @@ class _ClientCommon:
                 "Visit https://ligandai.com/pricing to upgrade."
             ),
             current_tier=self._tier,
-            required_tier="pro",
+            required_tier="basic",
         )
 
     def __repr__(self) -> str:
@@ -211,6 +224,9 @@ class LigandAI(_ClientCommon):
     impersonate_user
         Superadmin-only. Sets ``X-Impersonate-User`` header. Server-gated to
         localhost / VPN subnet 10.200.200.0/24.
+    client_session_id
+        Optional caller-provided run ID sent as
+        ``X-LigandAI-Client-Session-Id`` for usage and credit attribution.
     http_client
         Inject a pre-configured :class:`httpx.Client` (e.g. for custom proxies,
         certificate auth). Optional.
@@ -224,10 +240,12 @@ class LigandAI(_ClientCommon):
         timeout: float = DEFAULT_TIMEOUT_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         impersonate_user: str | None = None,
+        client_session_id: str | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
         resolved_key = _resolve_api_key(api_key)
         super().__init__(resolved_key, base_url)
+        emit_update_notice()
 
         self._transport = HTTPTransport(
             api_key=resolved_key,
@@ -235,6 +253,7 @@ class LigandAI(_ClientCommon):
             timeout=timeout,
             max_retries=max_retries,
             impersonate_user=impersonate_user,
+            client_session_id=client_session_id,
             client=http_client,
         )
 
@@ -245,6 +264,7 @@ class LigandAI(_ClientCommon):
         self.diseases: Diseases = Diseases(self._transport)
         self.discovery: Discovery = Discovery(self._transport, client=self)
         self.jobs: Jobs = Jobs(self._transport)
+        self.goals: Goals = Goals(self._transport, client=self)
         self.memory: Memory = Memory(self._transport)
         self.msa: MSA = MSA(self._transport)
         self.peptides: Peptides = Peptides(self._transport, client=self)
@@ -264,6 +284,19 @@ class LigandAI(_ClientCommon):
         """Underlying HTTP transport — use this to call endpoints not yet
         wrapped by a typed namespace."""
         return self._transport
+
+    @property
+    def client_session_id(self) -> str | None:
+        """Caller-provided SDK run/session ID sent on every request."""
+        return self._transport.client_session_id
+
+    def set_client_session_id(self, client_session_id: str | None) -> str | None:
+        """Set or clear the SDK run/session ID header for subsequent requests."""
+        return self._transport.set_client_session_id(client_session_id)
+
+    def session(self, session_id: str | None = None) -> CreditSession:
+        """Track one local SDK run with a stable session ID and credit delta."""
+        return CreditSession(self, session_id=session_id)
 
     @property
     def user(self) -> User:
@@ -312,10 +345,12 @@ class AsyncLigandAI(_ClientCommon):
         timeout: float = DEFAULT_TIMEOUT_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         impersonate_user: str | None = None,
+        client_session_id: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         resolved_key = _resolve_api_key(api_key)
         super().__init__(resolved_key, base_url)
+        emit_update_notice()
 
         self._transport = AsyncHTTPTransport(
             api_key=resolved_key,
@@ -323,6 +358,7 @@ class AsyncLigandAI(_ClientCommon):
             timeout=timeout,
             max_retries=max_retries,
             impersonate_user=impersonate_user,
+            client_session_id=client_session_id,
             client=http_client,
         )
 
@@ -332,6 +368,7 @@ class AsyncLigandAI(_ClientCommon):
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
+        self.goals: AsyncGoals = AsyncGoals(self._transport, client=self)
         self.memory: AsyncMemory = AsyncMemory(self._transport)
         self.msa: AsyncMSA = AsyncMSA(self._transport)
         self.peptides: AsyncPeptides = AsyncPeptides(self._transport, client=self)
@@ -345,6 +382,16 @@ class AsyncLigandAI(_ClientCommon):
     @property
     def transport(self) -> AsyncHTTPTransport:
         return self._transport
+
+    @property
+    def client_session_id(self) -> str | None:
+        return self._transport.client_session_id
+
+    def set_client_session_id(self, client_session_id: str | None) -> str | None:
+        return self._transport.set_client_session_id(client_session_id)
+
+    def session(self, session_id: str | None = None) -> AsyncCreditSession:
+        return AsyncCreditSession(self, session_id=session_id)
 
     async def close(self) -> None:
         await self._transport.close()
@@ -360,6 +407,80 @@ class AsyncLigandAI(_ClientCommon):
 
     async def me(self) -> User:
         return await self.account.me()
+
+
+def _generated_session_id() -> str:
+    return f"ligandai-sdk-{uuid4().hex[:16]}"
+
+
+class CreditSession:
+    """Synchronous context manager for local-run credit attribution."""
+
+    def __init__(self, client: LigandAI, *, session_id: str | None = None) -> None:
+        self.client = client
+        self.session_id = session_id or _generated_session_id()
+        self.start_credits: int | None = None
+        self.end_credits: int | None = None
+        self.credits_used: int | None = None
+        self.usage: ClientSessionUsage | None = None
+        self._previous_session_id: str | None = None
+
+    def __enter__(self) -> CreditSession:
+        self._previous_session_id = self.client.client_session_id
+        self.client.set_client_session_id(self.session_id)
+        self.start_credits = self.client.account.get_balance().credits
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            try:
+                self.end_credits = self.client.account.get_balance().credits
+                if self.start_credits is not None:
+                    self.credits_used = max(0, self.start_credits - self.end_credits)
+            except Exception:
+                if exc_type is None:
+                    raise
+        finally:
+            self.client.set_client_session_id(self._previous_session_id)
+
+    def refresh_usage(self, period: str = "30d") -> ClientSessionUsage:
+        self.usage = self.client.account.session_usage(self.session_id, period=period)  # type: ignore[arg-type]
+        return self.usage
+
+
+class AsyncCreditSession:
+    """Async context manager for local-run credit attribution."""
+
+    def __init__(self, client: AsyncLigandAI, *, session_id: str | None = None) -> None:
+        self.client = client
+        self.session_id = session_id or _generated_session_id()
+        self.start_credits: int | None = None
+        self.end_credits: int | None = None
+        self.credits_used: int | None = None
+        self.usage: ClientSessionUsage | None = None
+        self._previous_session_id: str | None = None
+
+    async def __aenter__(self) -> AsyncCreditSession:
+        self._previous_session_id = self.client.client_session_id
+        self.client.set_client_session_id(self.session_id)
+        self.start_credits = (await self.client.account.get_balance()).credits
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            try:
+                self.end_credits = (await self.client.account.get_balance()).credits
+                if self.start_credits is not None:
+                    self.credits_used = max(0, self.start_credits - self.end_credits)
+            except Exception:
+                if exc_type is None:
+                    raise
+        finally:
+            self.client.set_client_session_id(self._previous_session_id)
+
+    async def refresh_usage(self, period: str = "30d") -> ClientSessionUsage:
+        self.usage = await self.client.account.session_usage(self.session_id, period=period)  # type: ignore[arg-type]
+        return self.usage
 
 
 def _check_authenticated(client: _ClientCommon) -> None:

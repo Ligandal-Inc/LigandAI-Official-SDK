@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Unit tests for the v0.2.0 paid-only peptides surface (LIGANDAI_ALPHA_V2-afspr).
 
 Covers:
@@ -336,7 +336,7 @@ def test_free_tier_raises_paid_tier_required_on_by_gene(free_client: LigandAI) -
     with pytest.raises(LigandAIPaidTierRequired) as excinfo:
         free_client.peptides.by_gene()
     assert excinfo.value.current_tier == "free"
-    assert excinfo.value.required_tier == "pro"
+    assert excinfo.value.required_tier == "basic"
 
 
 def test_free_tier_raises_paid_tier_required_on_get(free_client: LigandAI) -> None:

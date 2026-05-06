@@ -1,8 +1,8 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Quickstart — auth, tier check, simple search.
 
 Run:
-    LIGANDAI_API_KEY=lgai_pro_... python examples/01_quickstart.py
+    LIGANDAI_API_KEY=lgai_basic_... python examples/01_quickstart.py
 """
 
 from __future__ import annotations

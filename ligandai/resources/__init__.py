@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Resource namespaces for the LIGANDAI client.
 
 Each module exports a sync class (``Foo``) and async class (``AsyncFoo``)

@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Internal HTTP transport: shared sync/async client with retry + backoff.
 
 Both :class:`LigandAI` and :class:`AsyncLigandAI` build resource namespaces
@@ -81,6 +81,7 @@ def _build_headers(
     extra: Mapping[str, str] | None = None,
     *,
     impersonate_user: str | None = None,
+    client_session_id: str | None = None,
 ) -> dict[str, str]:
     headers: dict[str, str] = {
         "User-Agent": _build_user_agent(),
@@ -93,9 +94,25 @@ def _build_headers(
     if impersonate_user:
         # Superadmin-only, server-gated to localhost/VPN.
         headers["X-Impersonate-User"] = impersonate_user
+    if client_session_id:
+        headers["X-LigandAI-Client-Session-Id"] = client_session_id
     if extra:
         headers.update(extra)
     return headers
+
+
+def _normalize_client_session_id(client_session_id: str | None) -> str | None:
+    if client_session_id is None:
+        return None
+    session_id = client_session_id.strip()
+    if not session_id:
+        return None
+    if len(session_id) > 120:
+        raise ValueError("client_session_id must be 120 characters or fewer")
+    allowed = set("._:-")
+    if any(not (char.isalnum() or char in allowed) for char in session_id):
+        raise ValueError("client_session_id may contain only letters, numbers, '.', '_', ':', or '-'")
+    return session_id
 
 
 def _decode_response(resp: httpx.Response) -> dict[str, Any] | None:
@@ -145,6 +162,7 @@ class HTTPTransport:
         timeout: float = DEFAULT_TIMEOUT_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         impersonate_user: str | None = None,
+        client_session_id: str | None = None,
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
@@ -152,12 +170,19 @@ class HTTPTransport:
         self._timeout = timeout
         self._max_retries = max_retries
         self._impersonate_user = impersonate_user
+        self._client_session_id = _normalize_client_session_id(client_session_id)
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=timeout,
             follow_redirects=True,
-            headers=_build_headers(api_key, impersonate_user=impersonate_user),
+            headers=_build_headers(
+                api_key,
+                impersonate_user=impersonate_user,
+                client_session_id=self._client_session_id,
+            ),
         )
+        if client is not None and self._client_session_id:
+            self._client.headers["X-LigandAI-Client-Session-Id"] = self._client_session_id
 
     @property
     def base_url(self) -> str:
@@ -166,6 +191,18 @@ class HTTPTransport:
     @property
     def api_key(self) -> str | None:
         return self._api_key
+
+    @property
+    def client_session_id(self) -> str | None:
+        return self._client_session_id
+
+    def set_client_session_id(self, client_session_id: str | None) -> str | None:
+        self._client_session_id = _normalize_client_session_id(client_session_id)
+        if self._client_session_id:
+            self._client.headers["X-LigandAI-Client-Session-Id"] = self._client_session_id
+        else:
+            self._client.headers.pop("X-LigandAI-Client-Session-Id", None)
+        return self._client_session_id
 
     def close(self) -> None:
         if self._owns_client:
@@ -274,6 +311,7 @@ class AsyncHTTPTransport:
         timeout: float = DEFAULT_TIMEOUT_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         impersonate_user: str | None = None,
+        client_session_id: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
@@ -281,12 +319,19 @@ class AsyncHTTPTransport:
         self._timeout = timeout
         self._max_retries = max_retries
         self._impersonate_user = impersonate_user
+        self._client_session_id = _normalize_client_session_id(client_session_id)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
-            headers=_build_headers(api_key, impersonate_user=impersonate_user),
+            headers=_build_headers(
+                api_key,
+                impersonate_user=impersonate_user,
+                client_session_id=self._client_session_id,
+            ),
         )
+        if client is not None and self._client_session_id:
+            self._client.headers["X-LigandAI-Client-Session-Id"] = self._client_session_id
 
     @property
     def base_url(self) -> str:
@@ -295,6 +340,18 @@ class AsyncHTTPTransport:
     @property
     def api_key(self) -> str | None:
         return self._api_key
+
+    @property
+    def client_session_id(self) -> str | None:
+        return self._client_session_id
+
+    def set_client_session_id(self, client_session_id: str | None) -> str | None:
+        self._client_session_id = _normalize_client_session_id(client_session_id)
+        if self._client_session_id:
+            self._client.headers["X-LigandAI-Client-Session-Id"] = self._client_session_id
+        else:
+            self._client.headers.pop("X-LigandAI-Client-Session-Id", None)
+        return self._client_session_id
 
     async def close(self) -> None:
         if self._owns_client:

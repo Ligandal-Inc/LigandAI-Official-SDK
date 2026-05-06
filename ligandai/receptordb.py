@@ -1,4 +1,4 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Restricted ReceptorDB client.
 
 For receptordb.com users — exposes only the receptor browse / search / download
@@ -40,7 +40,7 @@ class ReceptorDBClient:
     """Synchronous ReceptorDB-restricted client.
 
     Public read endpoints (search, browse, download) work without an API key.
-    Fold and generate require a tier-appropriate API key (basic+).
+    Fold and generate require an authenticated, tier-appropriate API key.
 
     Parameters
     ----------

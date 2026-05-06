@@ -1,10 +1,10 @@
-# Copyright © 2025 Ligandal, Inc. All rights reserved.
+# Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Async parallel peptide design across multiple genes.
 
 Submits N generation jobs in parallel and waits for all to complete.
 
 Run:
-    LIGANDAI_API_KEY=lgai_pro_... python examples/04_async_parallel.py
+    LIGANDAI_API_KEY=lgai_basic_... python examples/04_async_parallel.py
 """
 
 from __future__ import annotations
