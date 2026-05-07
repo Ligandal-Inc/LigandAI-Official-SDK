@@ -23,11 +23,35 @@ client-side whether a feature is available before calling.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from uuid import uuid4
 
 import httpx
+
+_logger = logging.getLogger("ligandai")
+
+
+def _log_client_init(cls_name: str, base_url: str, tier: str | None, api_key: str | None) -> None:
+    """Emit a single INFO line so customers (and their AI agents) can confirm
+    which host the SDK is talking to and which tier the key resolved to.
+
+    Suppressible via standard logging config:
+        logging.getLogger("ligandai").setLevel(logging.WARNING)
+    """
+    if api_key:
+        # Show only the prefix so logs never leak the full secret.
+        key_hint = api_key[:8] + "..."
+    else:
+        key_hint = "<none>"
+    _logger.info(
+        "%s initialized: base_url=%s tier=%s api_key=%s",
+        cls_name,
+        base_url,
+        tier or "anonymous",
+        key_hint,
+    )
 
 from ligandai._constants import (
     API_KEY_PREFIXES,
@@ -215,8 +239,10 @@ class LigandAI(_ClientCommon):
         API key prefixed with ``lgai_<tier>_*``. Defaults to env var
         ``LIGANDAI_API_KEY`` (or ``LIGANDAI_TEST_API_KEY`` for tests).
     base_url
-        Override the default ``https://api.ligandai.com``. Useful for dev
-        (``http://localhost:5050``) or on-prem deployments.
+        Override the default ``https://ligandai.com``. Useful for dev
+        (``http://localhost:5050``) or on-prem deployments. The platform
+        responds on the apex domain — ``api.ligandai.com`` is **not** a
+        published host, so do not point integrations there.
     timeout
         Per-request timeout in seconds (default 60).
     max_retries
@@ -246,6 +272,7 @@ class LigandAI(_ClientCommon):
         resolved_key = _resolve_api_key(api_key)
         super().__init__(resolved_key, base_url)
         emit_update_notice()
+        _log_client_init("LigandAI", base_url, self._tier, resolved_key)
 
         self._transport = HTTPTransport(
             api_key=resolved_key,
@@ -351,6 +378,7 @@ class AsyncLigandAI(_ClientCommon):
         resolved_key = _resolve_api_key(api_key)
         super().__init__(resolved_key, base_url)
         emit_update_notice()
+        _log_client_init("AsyncLigandAI", base_url, self._tier, resolved_key)
 
         self._transport = AsyncHTTPTransport(
             api_key=resolved_key,

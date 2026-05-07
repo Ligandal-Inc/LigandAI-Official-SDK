@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
@@ -40,6 +41,20 @@ from ligandai.errors import (
 )
 
 logger = logging.getLogger("ligandai")
+
+
+def _debug_enabled() -> bool:
+    """Whether request-level debug logging is enabled.
+
+    Customers (and the AI agents they hand the SDK to) need a way to see
+    what URL the client is actually calling. Set ``LIGANDAI_DEBUG=1`` to
+    log every request as ``METHOD URL → STATUS (Xms)`` at DEBUG level on
+    the ``ligandai`` logger. Standard logging config still applies — set
+    ``logging.getLogger("ligandai").setLevel(logging.DEBUG)`` to see them.
+    """
+    val = os.environ.get("LIGANDAI_DEBUG", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
 
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -243,8 +258,10 @@ class HTTPTransport:
             reraise=True,
         )
 
+        debug = _debug_enabled()
         for attempt in retrying:
             with attempt:
+                t0 = time.monotonic() if debug else 0.0
                 resp = self._client.request(
                     method,
                     url,
@@ -255,6 +272,15 @@ class HTTPTransport:
                     headers=merged_headers,
                     timeout=timeout if timeout is not None else self._timeout,
                 )
+                if debug:
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    logger.debug(
+                        "%s %s -> %s (%dms)",
+                        method.upper(),
+                        url,
+                        resp.status_code,
+                        elapsed_ms,
+                    )
                 _raise_for_status(resp)
                 if not expect_json:
                     return resp
@@ -391,8 +417,10 @@ class AsyncHTTPTransport:
             reraise=True,
         )
 
+        debug = _debug_enabled()
         async for attempt in retrying:
             with attempt:
+                t0 = time.monotonic() if debug else 0.0
                 resp = await self._client.request(
                     method,
                     url,
@@ -403,6 +431,15 @@ class AsyncHTTPTransport:
                     headers=merged_headers,
                     timeout=timeout if timeout is not None else self._timeout,
                 )
+                if debug:
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    logger.debug(
+                        "%s %s -> %s (%dms)",
+                        method.upper(),
+                        url,
+                        resp.status_code,
+                        elapsed_ms,
+                    )
                 _raise_for_status(resp)
                 if not expect_json:
                     return resp
