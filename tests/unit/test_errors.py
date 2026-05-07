@@ -9,6 +9,7 @@ from ligandai.errors import (
     LigandAIAuthError,
     LigandAICreditError,
     LigandAIError,
+    LigandAIForbidden,
     LigandAINotFoundError,
     LigandAIRateLimitError,
     LigandAIServerError,
@@ -73,7 +74,10 @@ def test_rate_limit_error_has_retry_after() -> None:
     [
         (401, LigandAIAuthError),
         (402, LigandAICreditError),
-        (403, LigandAITierError),
+        # 403 with no tier indicators in the payload is a generic Forbidden
+        # (pilot allowlist, ownership check, legal acceptance, payment method
+        # required). 0.3.7 stopped lying about tiers on every 403.
+        (403, LigandAIForbidden),
         (404, LigandAINotFoundError),
         (400, LigandAIValidationError),
         (422, LigandAIValidationError),
@@ -87,7 +91,27 @@ def test_rate_limit_error_has_retry_after() -> None:
 def test_error_from_response_maps_status(status: int, expected_class: type) -> None:
     err = error_from_response(status, {"message": "x", "code": "E001"})
     assert isinstance(err, expected_class)
-    assert err.status_code == status
+
+
+def test_error_from_response_403_with_tier_fields_is_tier_error() -> None:
+    """403 with `requiredTier` or `tier_required` is still a tier error."""
+    err = error_from_response(
+        403,
+        {"error": "Subscription required", "requiredTier": "pro", "currentTier": "basic"},
+    )
+    assert isinstance(err, LigandAITierError)
+
+
+def test_error_from_response_403_pilot_restricted_is_forbidden() -> None:
+    """403 with `error_code: pilot_restricted` is Forbidden, not Tier."""
+    err = error_from_response(
+        403,
+        {"error": "AutoResearch is pilot-only", "error_code": "pilot_restricted"},
+    )
+    assert isinstance(err, LigandAIForbidden)
+    assert not isinstance(err, LigandAITierError)
+    assert err.reason == "pilot_restricted"
+    assert err.status_code == 403
 
 
 def test_error_from_response_extracts_tier_fields() -> None:

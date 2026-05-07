@@ -106,17 +106,45 @@ def test_by_gene_empty_response(httpx_mock: HTTPXMock, pro_client: LigandAI) -> 
 
 
 def test_list_returns_peptides(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
+    # v0.5.0: peptides.list now hits /api/v1/peptides/list (richer schema, accepts program_id)
     httpx_mock.add_response(
-        url=f"{BASE}/api/ptf/generated-peptides/by-gene/GRIN1?limit=5&offset=0",
-        json=[
-            {"sequence": "ACDEFG", "targetGene": "GRIN1", "ipsae": 0.91, "foldId": "123"},
-            {"sequence": "HIKLMN", "targetGene": "GRIN1", "ipsae": 0.85, "foldId": "124"},
-        ],
+        url=f"{BASE}/api/v1/peptides/list?limit=5&offset=0&gene=GRIN1",
+        json={
+            "peptides": [
+                {"sequence": "ACDEFG", "targetGene": "GRIN1", "ipsae": 0.91, "foldId": "123"},
+                {"sequence": "HIKLMN", "targetGene": "GRIN1", "ipsae": 0.85, "foldId": "124"},
+            ],
+            "total": 2,
+            "limit": 5,
+            "offset": 0,
+            "_tier": "pro",
+            "_tier_redacted": False,
+        },
     )
     peptides = pro_client.peptides.list("GRIN1", limit=5)
     assert len(peptides) == 2
     assert peptides[0].sequence == "ACDEFG"
     assert peptides[0].fold_id == "123"
+
+
+def test_list_by_program_id_positional(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
+    """v0.5.0: peptides.list(program_id_int) works (Andrew Keene's TypeError fix)."""
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/peptides/list?limit=10&offset=0&program_id=42",
+        json={
+            "peptides": [
+                {"sequence": "ACDEFG", "targetGene": "EGFR", "ipsae": 0.92, "peptide_id": 100, "foldId": "100"},
+            ],
+            "total": 1,
+            "limit": 10,
+            "offset": 0,
+            "_tier": "pro",
+            "_tier_redacted": False,
+        },
+    )
+    peptides = pro_client.peptides.list(42, limit=10)
+    assert len(peptides) == 1
+    assert peptides[0].peptide_id == 100
 
 
 def test_list_rejects_empty_gene(pro_client: LigandAI) -> None:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Literal
 
 from ligandai.resources._base import AsyncResource, Resource
@@ -18,6 +19,33 @@ from ligandai.types import (
     User,
 )
 
+# Implausibly large balance — almost certainly a server-side sentinel
+# (Number.MAX_SAFE_INTEGER = 9_007_199_254_740_991, or 1e16) returned for
+# superadmin / unlimited accounts, OR a tier-resolution bug routing a normal
+# user to the wrong account.
+UNLIMITED_BALANCE_THRESHOLD = 10_000_000_000  # 1e10
+_BALANCE_WARNED = False  # one-shot warning per process
+
+
+def _warn_if_sentinel_balance(c: Credits) -> Credits:
+    """Emit a one-shot stderr warning when a sentinel balance is detected.
+
+    Normalization (balance/credits aliasing, is_unlimited flag) is handled
+    inside :class:`Credits` itself via a model validator. This function
+    layers the user-visible warning so callers notice tier-resolution
+    bugs the first time they hit them in a process.
+    """
+    global _BALANCE_WARNED
+    if c.is_unlimited and not _BALANCE_WARNED:
+        print(
+            f"[ligandai] WARNING: implausible credits balance ({c.balance:,}) "
+            "— likely tier resolution bug or superadmin sentinel. "
+            "Contact support@ligandai.com if you are not a superadmin.",
+            file=sys.stderr,
+        )
+        _BALANCE_WARNED = True
+    return c
+
 
 class Account(Resource):
     """User profile, credits, and tier limit endpoints."""
@@ -29,10 +57,15 @@ class Account(Resource):
         )
 
     def credits(self) -> Credits:
-        """``GET /api/user-credits`` — current credit balance."""
-        return Credits.model_validate(
-            self._transport.request("GET", "/api/user-credits") or {}
-        )
+        """``GET /api/user-credits`` — current credit balance.
+
+        Sentinel-sized balances (``>= 1e10``) are flagged as unlimited and
+        emit a one-shot stderr warning — these usually indicate the server
+        returned a superadmin sentinel or misrouted the tier resolution.
+        Inspect :attr:`Credits.is_unlimited` to distinguish.
+        """
+        payload = self._transport.request("GET", "/api/user-credits") or {}
+        return _warn_if_sentinel_balance(Credits.model_validate(payload or {}))
 
     def credit_history(self, limit: int = 50) -> list[CreditTransaction]:
         """``GET /api/user-credits/history``."""
@@ -186,9 +219,9 @@ class AsyncAccount(AsyncResource):
         )
 
     async def credits(self) -> Credits:
-        return Credits.model_validate(
-            await self._transport.request("GET", "/api/user-credits") or {}
-        )
+        """Async variant of :meth:`Account.credits`."""
+        payload = await self._transport.request("GET", "/api/user-credits") or {}
+        return _warn_if_sentinel_balance(Credits.model_validate(payload or {}))
 
     async def credit_history(self, limit: int = 50) -> list[CreditTransaction]:
         payload = await self._transport.request(

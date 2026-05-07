@@ -78,6 +78,7 @@ from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
+from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
 from ligandai.resources.jobs import AsyncJobs, Jobs
 from ligandai.resources.memory import AsyncMemory, Memory
@@ -290,6 +291,7 @@ class LigandAI(_ClientCommon):
         self.charts: Charts = Charts(self._transport)
         self.diseases: Diseases = Diseases(self._transport)
         self.discovery: Discovery = Discovery(self._transport, client=self)
+        self.folds: Folds = Folds(self._transport)
         self.jobs: Jobs = Jobs(self._transport)
         self.goals: Goals = Goals(self._transport, client=self)
         self.memory: Memory = Memory(self._transport)
@@ -334,7 +336,14 @@ class LigandAI(_ClientCommon):
 
     @property
     def credits(self) -> int:
-        """Current credit balance. Lightweight refresh on each access."""
+        """Current credit balance. Lightweight refresh on each access.
+
+        For unlimited / superadmin accounts the server may return a sentinel
+        value; in that case :class:`~ligandai.types.Credits.is_unlimited`
+        will be True and the integer returned here will be the raw sentinel.
+        Use ``client.account.credits()`` and inspect ``.is_unlimited`` for a
+        clean check.
+        """
         c = self.account.credits()
         self._credits = c
         return c.balance
@@ -395,6 +404,7 @@ class AsyncLigandAI(_ClientCommon):
         self.charts: AsyncCharts = AsyncCharts(self._transport)
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
+        self.folds: AsyncFolds = AsyncFolds(self._transport)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
         self.goals: AsyncGoals = AsyncGoals(self._transport, client=self)
         self.memory: AsyncMemory = AsyncMemory(self._transport)

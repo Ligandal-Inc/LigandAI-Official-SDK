@@ -122,15 +122,34 @@ class Proteins(Resource):
         gene: str,
         custom_name: str | None = None,
     ) -> UserProtein:
+        """Upload a custom PDB / CIF / mmCIF / ENT file to your private
+        protein library and return the registered :class:`UserProtein`.
+
+        Available to all authenticated tiers (free included). Pass the
+        returned ``protein.id`` (or ``protein.variant_id`` if exposed) as
+        ``variant_id=`` to :meth:`Peptides.generate` to design against the
+        uploaded structure.
+        """
         path = Path(file)
+        ext = path.suffix.lower()
+        mime = "chemical/x-mmcif" if ext in (".cif", ".mmcif") else "chemical/x-pdb"
         with path.open("rb") as f:
-            files = {"file": (path.name, f, "chemical/x-pdb")}
+            # Server uses multer.any() — field name "files" (plural) is the
+            # canonical name on the platform UI; the server accepts "file"
+            # too, but we stick with "files" to match the UI contract and
+            # avoid confusion in network logs.
+            files = {"files": (path.name, f, mime)}
             data = {"gene": gene}
             if custom_name is not None:
                 data["customName"] = custom_name
             payload = self._transport.request(
-                "POST", "/api/user-proteins/upload", data=data, files=files
+                "POST", "/api/user/proteins/upload", data=data, files=files
             ) or {}
+        # Server returns {"created": N, "proteins": [UserProtein, ...], "errors": [...]}.
+        # Unwrap the first protein when present; fall back to validating the raw
+        # payload for older server builds that returned a flat object.
+        if isinstance(payload, dict) and isinstance(payload.get("proteins"), list) and payload["proteins"]:
+            return UserProtein.model_validate(payload["proteins"][0])
         return UserProtein.model_validate(payload)
 
 
@@ -236,13 +255,20 @@ class AsyncProteins(AsyncResource):
         gene: str,
         custom_name: str | None = None,
     ) -> UserProtein:
+        """Async variant of :meth:`Proteins.upload_pdb`. Available to all
+        authenticated tiers.
+        """
         path = Path(file)
+        ext = path.suffix.lower()
+        mime = "chemical/x-mmcif" if ext in (".cif", ".mmcif") else "chemical/x-pdb"
         with path.open("rb") as f:
-            files = {"file": (path.name, f, "chemical/x-pdb")}
+            files = {"files": (path.name, f, mime)}
             data = {"gene": gene}
             if custom_name is not None:
                 data["customName"] = custom_name
             payload = await self._transport.request(
-                "POST", "/api/user-proteins/upload", data=data, files=files
+                "POST", "/api/user/proteins/upload", data=data, files=files
             ) or {}
+        if isinstance(payload, dict) and isinstance(payload.get("proteins"), list) and payload["proteins"]:
+            return UserProtein.model_validate(payload["proteins"][0])
         return UserProtein.model_validate(payload)

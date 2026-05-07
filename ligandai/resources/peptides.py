@@ -218,6 +218,20 @@ _HalflifeTarget = Literal["extended", "rapid", "moderate"]
 # cleavable, used for prodrugs / pro-peptides).
 _StabilityMode = Literal["resist", "target"]
 
+# Fold partner expansion mode. Controls which receptor chains are included in
+# the peptide co-fold complex.
+#
+#   "target_only"     — fold peptide + ONLY the chain(s) listed in target_chains.
+#                       Smallest, fastest fold; clearest single-target interface.
+#   "native_complex"  — fold peptide + target chain(s) + their known native
+#                       interaction partners from the input structure (e.g.,
+#                       BMPR1A + RGMB). Lets the user compare the peptide's
+#                       inhibitory effect against the native partner interface.
+#   "all_conformations" — fold against every conformation/chain set the platform
+#                       has on file for the gene (apo, bound, alternate states).
+#                       Most expensive; useful for ensemble validation.
+_FoldPartnerMode = Literal["target_only", "native_complex", "all_conformations"]
+
 
 def _generation_target(
     gene: str,
@@ -243,7 +257,10 @@ def _generation_body(
     num_peptides: int | None,
     length_range: tuple[int, int],
     target_residues: list[ResidueRange] | None,
-    targeting_strategy: _TargetingStrategy,
+    target_chains: list[str] | None,
+    fold_partners: _FoldPartnerMode | list[str] | None,
+    targeting_strategy: _TargetingStrategy | None,
+    pocket_expansion_radius_a: float | None,
     auto_fold: bool,
     top_n_fold: int | None,
     ec_domain_trimming: bool,
@@ -292,8 +309,19 @@ def _generation_body(
     ec_trimming_config: EcTrimmingConfig | dict | None,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    # Auto-resolve targeting_strategy when not explicitly set:
+    #   * target_residues present → "pocket_targeted" (treat residues as a real pocket)
+    #   * otherwise → "full_surface"
+    # This prevents the silent "I gave you a hotspot but you used full_surface
+    # and ignored it" footgun that pre-2026-05-07 jobs hit.
+    effective_strategy: _TargetingStrategy = (
+        targeting_strategy
+        if targeting_strategy is not None
+        else ("pocket_targeted" if target_residues else "full_surface")
+    )
+
     body: dict[str, Any] = {
-        "targets": [_generation_target(gene, target_residues, targeting_strategy, variant_id)],
+        "targets": [_generation_target(gene, target_residues, effective_strategy, variant_id)],
         "lengthRange": list(length_range),
         "autoFoldEnabled": auto_fold,
         "ecDomainTrimming": ec_domain_trimming,
@@ -396,6 +424,56 @@ def _generation_body(
             else ec_trimming_config
         )
         body["ecTrimming"] = cfg
+    # Hotspot → pocket expansion. When the user passes a single residue
+    # (or a small set), the server should include every residue within
+    # ``pocket_expansion_radius_a`` Å of any hotspot atom so the design
+    # pocket has enough surface area for a real binding interface.
+    # Passed only when there are residues to expand; default 6.0 Å mirrors
+    # the platform's "shell of contacts" pocket convention.
+    if target_residues and pocket_expansion_radius_a and pocket_expansion_radius_a > 0:
+        body["pocketExpansionRadiusA"] = float(pocket_expansion_radius_a)
+        body["expandHotspotPocket"] = True
+
+    # Restrict generation to specific receptor chains (multimer support).
+    # Server reads ``config.targetChains`` and filters conformations / restricts
+    # the binding surface to only the listed chain IDs.
+    if target_chains is not None:
+        normalized_chains = [str(c).upper() for c in target_chains if c]
+        if normalized_chains:
+            body["targetChains"] = normalized_chains
+
+    # Fold partner expansion mode. Three explicit user intents map to the
+    # underlying server flags:
+    #
+    #   "target_only"       -> foldingConformations="generation",
+    #                          autoConformationExpansion=false
+    #                          (peptide + selected target chain only)
+    #   "native_complex"    -> foldingConformations="native",
+    #                          autoConformationExpansion=false
+    #                          (peptide + target + native interaction partners)
+    #   "all_conformations" -> foldingConformations="all",
+    #                          autoConformationExpansion=true
+    #                          (full ensemble across receptor conformations)
+    #   list[str]           -> foldingConformations=<list of conformation names>
+    #                          (explicit conformation set)
+    if fold_partners is not None:
+        if isinstance(fold_partners, list):
+            body["foldingConformations"] = fold_partners
+        elif fold_partners == "target_only":
+            body["foldingConformations"] = "generation"
+            body["autoConformationExpansion"] = False
+            body["enableExpansion"] = False
+            body["foldPartnerMode"] = "target_only"
+        elif fold_partners == "native_complex":
+            body["foldingConformations"] = "native"
+            body["autoConformationExpansion"] = False
+            body["foldPartnerMode"] = "native_complex"
+        elif fold_partners == "all_conformations":
+            body["foldingConformations"] = "all"
+            body["autoConformationExpansion"] = True
+            body["enableExpansion"] = True
+            body["foldPartnerMode"] = "all_conformations"
+
     if extra:
         body.update(extra)
     return body
@@ -729,7 +807,19 @@ class Peptides(Resource):
         num_peptides: int | None = None,
         length_range: tuple[int, int] = (20, 70),
         target_residues: list[ResidueRange] | None = None,
-        targeting_strategy: _TargetingStrategy = "full_surface",
+        target_chains: list[str] | None = None,
+        fold_partners: _FoldPartnerMode | list[str] | None = None,
+        # When target_residues are supplied, the SDK auto-switches the strategy
+        # to "pocket_targeted" unless you override here. Pass "full_surface"
+        # explicitly to keep the residues as soft hints only.
+        targeting_strategy: _TargetingStrategy | None = None,
+        # Hotspot pocket expansion radius in Angstroms. When target_residues
+        # are provided, the server includes every residue within this radius
+        # of any listed hotspot atom in the design pocket. This is the right
+        # default for "design against residue X" — the peptide needs the
+        # surrounding shell to make contacts, not just X itself. Set to 0 to
+        # use the literal residues only.
+        pocket_expansion_radius_a: float | None = 6.0,
         auto_fold: bool = True,
         top_n_fold: int | None = None,
         ec_domain_trimming: bool = True,
@@ -768,7 +858,12 @@ class Peptides(Resource):
         strict_recombinant: bool = True,
         dual_fold_viz: bool = False,
         folding_mode: str | None = None,
-        fold_strategy: str | None = None,
+        # Default fold strategy: rank candidates by composite (LigandIQ × predicted
+        # iPTM) before folding. The top peptides by this score get fold GPUs first
+        # so credits go to the most promising designs. Override to ``"distributed"``
+        # for round-robin across targets, ``"consolidated"`` for sequential
+        # single-target folding, or pass ``fold_strategy=None`` to defer to server.
+        fold_strategy: str | None = "quality_ranked",
         folding_conformations: str | list[str] | None = None,
         max_folds_per_target: int | None = None,
         enable_expansion: bool | None = None,
@@ -794,6 +889,11 @@ class Peptides(Resource):
                 Multiple ranges may target one or more receptor chains. Use
                 ``ResidueRange.from_residues([32, 33, 34], chain="A")`` to
                 compress selected residues into continuous chain-local ranges.
+            target_chains: Optional list of chain IDs (e.g. ``["C"]``) to
+                restrict design to. Use this when a multimer (e.g. PDB
+                ``9MIR``) has chains A/B/C/D and you only want peptides
+                designed against chain C. The server filters conformations
+                and the binding surface to only those chains.
             targeting_strategy: ``"full_surface"`` or ``"pocket_targeted"``.
             auto_fold: Run Boltz-2 folding automatically after generation.
             top_n_fold: Cap on how many peptides to fold per target.
@@ -883,7 +983,10 @@ class Peptides(Resource):
             num_peptides=num_peptides,
             length_range=length_range,
             target_residues=target_residues,
+            target_chains=target_chains,
+            fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
+            pocket_expansion_radius_a=pocket_expansion_radius_a,
             auto_fold=auto_fold,
             top_n_fold=top_n_fold,
             ec_domain_trimming=ec_domain_trimming,
@@ -1205,21 +1308,52 @@ class Peptides(Resource):
         self,
         gene: str | None = None,
         classification: str | None = None,
-        min_ipsae: float | None = None,
+        ipsae_min: float | None = None,
+        iptm_min: float | None = None,
+        kd_max: float | None = None,
+        program_id: int | None = None,
+        min_ipsae: float | None = None,  # alias for ipsae_min (back-compat)
         limit: int = 20,
+        offset: int = 0,
     ) -> list[Peptide]:
-        """Search existing peptides by gene/classification/score."""
-        if gene is None:
-            raise ValueError("Pass gene= for now (search by classification-only is not supported yet)")
-        params: dict[str, Any] = {"limit": limit}
+        """``GET /api/v1/peptides/search`` — cross-program peptide search.
+
+        v0.5.0 backs this with the new `/v1/peptides/search` endpoint. You can
+        now search across all your programs by score thresholds without
+        specifying a gene first.
+
+        Args:
+            gene: Optional gene symbol filter.
+            classification: Reserved (server-side classification filter; not
+                yet wired to the new endpoint — passes through anyway).
+            ipsae_min: Minimum iPSAE score (e.g. 0.8 for high-confidence).
+            iptm_min: Minimum ipTM score.
+            kd_max: Maximum predicted Kd in Molar (e.g. ``1e-8`` = 10nM).
+            program_id: Optional program scope (omit to search across all).
+            min_ipsae: Legacy alias for ``ipsae_min``.
+            limit: Page size (max 200).
+            offset: Pagination offset.
+        """
+        if min_ipsae is not None and ipsae_min is None:
+            ipsae_min = min_ipsae
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if gene is not None:
+            params["gene"] = gene.upper()
         if classification is not None:
             params["classification"] = classification
-        if min_ipsae is not None:
-            params["min_ipsae"] = min_ipsae
+        if ipsae_min is not None:
+            params["ipsae_min"] = ipsae_min
+        if iptm_min is not None:
+            params["iptm_min"] = iptm_min
+        if kd_max is not None:
+            params["kd_max"] = kd_max
+        if program_id is not None:
+            params["program_id"] = program_id
+
         payload = self._transport.request(
-            "GET", f"/api/ptf/generated-peptides/by-gene/{gene}", params=params
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+            "GET", "/api/v1/peptides/search", params=params
+        ) or {}
+        items = payload.get("peptides", []) if isinstance(payload, dict) else (payload or [])
         return [Peptide.model_validate(p) for p in items]
 
     def search_by_pocket(
@@ -1321,38 +1455,124 @@ class Peptides(Resource):
 
     def list(
         self,
-        gene: str,
+        gene_or_program_id: str | int | None = None,
+        *,
+        gene: str | None = None,
+        program_id: int | None = None,
         min_ipsae: float | None = None,
+        min_iptm: float | None = None,
+        max_kd: float | None = None,
         include_unfolded: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Peptide]:
-        """List the actual peptide rows for a gene (peptides, not just counts).
+        """List peptide rows. v0.5.0: now supports both ``gene`` and ``program_id``.
 
-        Wraps ``GET /api/ptf/generated-peptides/by-gene/:gene``. Returns the
-        peptide sequences with their predicted/folded scores. Use this after
-        :meth:`by_gene` when you've identified a gene worth drilling into.
+        Backwards-compatible:
+          * ``client.peptides.list("EGFR")`` — gene mode (legacy)
+          * ``client.peptides.list(gene="EGFR")`` — explicit gene (legacy)
+          * ``client.peptides.list(42)`` — program_id mode (NEW)
+          * ``client.peptides.list(program_id=42, min_ipsae=0.8)`` — explicit (NEW)
+          * ``client.peptides.list(program_id=42, gene="EGFR")`` — both (NEW)
+
+        Andrew Keene's #1 bug: ``client.peptides.list(program_id)`` raised
+        ``TypeError`` because the signature only took ``gene``. v0.5.0 accepts
+        either by detecting the positional arg's type (str → gene, int →
+        program_id) and exposes both as keyword args.
 
         Args:
+            gene_or_program_id: Positional shortcut. ``str`` = gene symbol;
+                ``int`` = program DB id. Pass ``None`` (the default) to scope
+                across all programs (paid tier only — free keys must scope to
+                a program or gene to limit response size).
             gene: Gene symbol (case-insensitive; upper-cased server-side).
+            program_id: Restrict to one program (Layer-4 program DB id).
             min_ipsae: Filter to folds with iPSAE ≥ this threshold.
-            include_unfolded: When True, include pre-fold rows (predicted
-                scores only); default False keeps the response post-fold.
-            limit: Page size.
+            min_iptm: Filter to folds with ipTM ≥ this threshold.
+            max_kd: Filter to folds with predicted Kd ≤ this value (M).
+            include_unfolded: Reserved for legacy compatibility. Has no effect
+                on the new ``/v1/peptides/list`` endpoint (folded only).
+            limit: Page size (max 200).
             offset: Pagination offset.
+
+        Returns:
+            List of :class:`~ligandai.types.Peptide` rows. When the caller is
+            on the free tier, ``sequence`` is truncated to the first 10 amino
+            acids + ``********``; check the response's ``_tier_redacted``
+            metadata (or :class:`~ligandai.errors.LigandAIUpgradeRequired`).
         """
-        if not gene or not gene.strip():
-            raise ValueError("gene must be a non-empty string")
+        # Reconcile positional arg with explicit keywords
+        if gene_or_program_id is not None:
+            if isinstance(gene_or_program_id, str):
+                if gene is not None and gene != gene_or_program_id:
+                    raise ValueError("conflicting gene values: pass either positionally or by keyword, not both")
+                gene = gene_or_program_id
+            elif isinstance(gene_or_program_id, int):
+                if program_id is not None and program_id != gene_or_program_id:
+                    raise ValueError("conflicting program_id values: pass either positionally or by keyword, not both")
+                program_id = gene_or_program_id
+            else:
+                raise TypeError(
+                    f"list() positional arg must be a gene symbol (str) or program_id (int); "
+                    f"got {type(gene_or_program_id).__name__}"
+                )
+
+        # New /v1/peptides/list endpoint when program_id, min_iptm, or max_kd is supplied
+        # OR when gene is supplied (always preferred — returns the richer schema)
         params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if program_id is not None:
+            params["program_id"] = program_id
+        if gene is not None:
+            if not gene.strip():
+                raise ValueError("gene must be a non-empty string")
+            params["gene"] = gene.upper()
         if min_ipsae is not None:
             params["min_ipsae"] = min_ipsae
-        if include_unfolded:
-            params["include_unfolded"] = "true"
+        if min_iptm is not None:
+            params["min_iptm"] = min_iptm
+        if max_kd is not None:
+            params["max_kd"] = max_kd
+
         payload = self._transport.request(
-            "GET", f"/api/ptf/generated-peptides/by-gene/{gene}", params=params
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+            "GET", "/api/v1/peptides/list", params=params
+        ) or {}
+        items = payload.get("peptides", []) if isinstance(payload, dict) else (payload or [])
         return [Peptide.model_validate(p) for p in items]
+
+    def list_by_program(
+        self,
+        program_id: int,
+        *,
+        min_ipsae: float | None = None,
+        min_iptm: float | None = None,
+        max_kd: float | None = None,
+        gene: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Peptide]:
+        """``GET /api/v1/peptides/list?program_id=X`` — list peptides in a program.
+
+        Convenience method for the common Andrew-Keene-style query: "give me
+        all peptides in program 42, optionally filtered by score thresholds."
+
+        Args:
+            program_id: Program DB id.
+            min_ipsae: Filter to folds with iPSAE ≥ this threshold.
+            min_iptm: Filter to folds with ipTM ≥ this threshold.
+            max_kd: Filter to folds with predicted Kd ≤ this value (M).
+            gene: Optional gene filter within the program.
+            limit: Page size (max 200).
+            offset: Pagination offset.
+        """
+        return self.list(
+            program_id=program_id,
+            gene=gene,
+            min_ipsae=min_ipsae,
+            min_iptm=min_iptm,
+            max_kd=max_kd,
+            limit=limit,
+            offset=offset,
+        )
 
     def get(
         self,
@@ -1453,7 +1673,19 @@ class AsyncPeptides(AsyncResource):
         num_peptides: int | None = None,
         length_range: tuple[int, int] = (20, 70),
         target_residues: list[ResidueRange] | None = None,
-        targeting_strategy: _TargetingStrategy = "full_surface",
+        target_chains: list[str] | None = None,
+        fold_partners: _FoldPartnerMode | list[str] | None = None,
+        # When target_residues are supplied, the SDK auto-switches the strategy
+        # to "pocket_targeted" unless you override here. Pass "full_surface"
+        # explicitly to keep the residues as soft hints only.
+        targeting_strategy: _TargetingStrategy | None = None,
+        # Hotspot pocket expansion radius in Angstroms. When target_residues
+        # are provided, the server includes every residue within this radius
+        # of any listed hotspot atom in the design pocket. This is the right
+        # default for "design against residue X" — the peptide needs the
+        # surrounding shell to make contacts, not just X itself. Set to 0 to
+        # use the literal residues only.
+        pocket_expansion_radius_a: float | None = 6.0,
         auto_fold: bool = True,
         top_n_fold: int | None = None,
         ec_domain_trimming: bool = True,
@@ -1484,7 +1716,12 @@ class AsyncPeptides(AsyncResource):
         strict_recombinant: bool = True,
         dual_fold_viz: bool = False,
         folding_mode: str | None = None,
-        fold_strategy: str | None = None,
+        # Default fold strategy: rank candidates by composite (LigandIQ × predicted
+        # iPTM) before folding. The top peptides by this score get fold GPUs first
+        # so credits go to the most promising designs. Override to ``"distributed"``
+        # for round-robin across targets, ``"consolidated"`` for sequential
+        # single-target folding, or pass ``fold_strategy=None`` to defer to server.
+        fold_strategy: str | None = "quality_ranked",
         folding_conformations: str | list[str] | None = None,
         max_folds_per_target: int | None = None,
         enable_expansion: bool | None = None,
@@ -1520,7 +1757,10 @@ class AsyncPeptides(AsyncResource):
             num_peptides=num_peptides,
             length_range=length_range,
             target_residues=target_residues,
+            target_chains=target_chains,
+            fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
+            pocket_expansion_radius_a=pocket_expansion_radius_a,
             auto_fold=auto_fold,
             top_n_fold=top_n_fold,
             ec_domain_trimming=ec_domain_trimming,
@@ -1823,20 +2063,34 @@ class AsyncPeptides(AsyncResource):
         self,
         gene: str | None = None,
         classification: str | None = None,
-        min_ipsae: float | None = None,
+        ipsae_min: float | None = None,
+        iptm_min: float | None = None,
+        kd_max: float | None = None,
+        program_id: int | None = None,
+        min_ipsae: float | None = None,  # alias for ipsae_min
         limit: int = 20,
+        offset: int = 0,
     ) -> list[Peptide]:
-        if gene is None:
-            raise ValueError("Pass gene=")
-        params: dict[str, Any] = {"limit": limit}
+        """Async variant of :meth:`Peptides.search`."""
+        if min_ipsae is not None and ipsae_min is None:
+            ipsae_min = min_ipsae
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if gene is not None:
+            params["gene"] = gene.upper()
         if classification is not None:
             params["classification"] = classification
-        if min_ipsae is not None:
-            params["min_ipsae"] = min_ipsae
+        if ipsae_min is not None:
+            params["ipsae_min"] = ipsae_min
+        if iptm_min is not None:
+            params["iptm_min"] = iptm_min
+        if kd_max is not None:
+            params["kd_max"] = kd_max
+        if program_id is not None:
+            params["program_id"] = program_id
         payload = await self._transport.request(
-            "GET", f"/api/ptf/generated-peptides/by-gene/{gene}", params=params
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+            "GET", "/api/v1/peptides/search", params=params
+        ) or {}
+        items = payload.get("peptides", []) if isinstance(payload, dict) else (payload or [])
         return [Peptide.model_validate(p) for p in items]
 
     async def search_by_pocket(
@@ -1908,25 +2162,74 @@ class AsyncPeptides(AsyncResource):
 
     async def list(
         self,
-        gene: str,
+        gene_or_program_id: str | int | None = None,
+        *,
+        gene: str | None = None,
+        program_id: int | None = None,
         min_ipsae: float | None = None,
+        min_iptm: float | None = None,
+        max_kd: float | None = None,
         include_unfolded: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Peptide]:
         """Async variant of :meth:`Peptides.list`."""
-        if not gene or not gene.strip():
-            raise ValueError("gene must be a non-empty string")
+        if gene_or_program_id is not None:
+            if isinstance(gene_or_program_id, str):
+                if gene is not None and gene != gene_or_program_id:
+                    raise ValueError("conflicting gene values: pass either positionally or by keyword, not both")
+                gene = gene_or_program_id
+            elif isinstance(gene_or_program_id, int):
+                if program_id is not None and program_id != gene_or_program_id:
+                    raise ValueError("conflicting program_id values: pass either positionally or by keyword, not both")
+                program_id = gene_or_program_id
+            else:
+                raise TypeError(
+                    f"list() positional arg must be a gene symbol (str) or program_id (int); "
+                    f"got {type(gene_or_program_id).__name__}"
+                )
+
         params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if program_id is not None:
+            params["program_id"] = program_id
+        if gene is not None:
+            if not gene.strip():
+                raise ValueError("gene must be a non-empty string")
+            params["gene"] = gene.upper()
         if min_ipsae is not None:
             params["min_ipsae"] = min_ipsae
-        if include_unfolded:
-            params["include_unfolded"] = "true"
+        if min_iptm is not None:
+            params["min_iptm"] = min_iptm
+        if max_kd is not None:
+            params["max_kd"] = max_kd
+
         payload = await self._transport.request(
-            "GET", f"/api/ptf/generated-peptides/by-gene/{gene}", params=params
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+            "GET", "/api/v1/peptides/list", params=params
+        ) or {}
+        items = payload.get("peptides", []) if isinstance(payload, dict) else (payload or [])
         return [Peptide.model_validate(p) for p in items]
+
+    async def list_by_program(
+        self,
+        program_id: int,
+        *,
+        min_ipsae: float | None = None,
+        min_iptm: float | None = None,
+        max_kd: float | None = None,
+        gene: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Peptide]:
+        """Async variant of :meth:`Peptides.list_by_program`."""
+        return await self.list(
+            program_id=program_id,
+            gene=gene,
+            min_ipsae=min_ipsae,
+            min_iptm=min_iptm,
+            max_kd=max_kd,
+            limit=limit,
+            offset=offset,
+        )
 
     async def get(
         self,

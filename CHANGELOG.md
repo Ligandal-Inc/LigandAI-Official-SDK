@@ -5,6 +5,188 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-05-07
+
+### Added — Andrew Keene SDK gaps (`peptides.list(program_id)` and friends)
+
+The SDK now exposes the program-scoped peptide and structure listings that
+SDK users have been asking for. Every new method handles 402 (paid-tier
+required) by raising the new `LigandAIUpgradeRequired` exception.
+
+- **`peptides.list()` accepts `program_id`** — fixes the long-standing
+  `TypeError` when calling `client.peptides.list(42)`. The first positional
+  arg now accepts either a gene symbol (str) or program DB id (int), and
+  both are also exposed as keyword args. Passing both `gene` and
+  `program_id` filters within the program. Backed by the new
+  `GET /api/v1/peptides/list` endpoint, which returns a richer schema
+  (peptide_id, fold_id, predicted_kd, isElite) than the legacy
+  `/api/ptf/generated-peptides/by-gene/...` shape.
+- **`peptides.list_by_program(program_id, ...)`** — convenience wrapper
+  around the new endpoint with score thresholds (`min_ipsae`, `min_iptm`,
+  `max_kd`).
+- **`peptides.search(...)`** — now backed by `GET /api/v1/peptides/search`.
+  Cross-program search by score thresholds (`ipsae_min`, `iptm_min`,
+  `kd_max`); `gene` is now optional. The legacy `min_ipsae` kwarg is
+  retained as an alias for `ipsae_min`.
+- **`structures.list(program_id=...)`** — `GET /api/v1/structures/list`
+  returns fold-structure metadata (gene, scores, `pdb_url`) for a program.
+  Use `structures.get_pdb(structure_id)` to fetch the PDB content.
+- **`structures.get_pdb(structure_id)`** — `GET /api/v1/structures/:id/pdb`.
+  Returns the raw PDB text. Free-tier callers receive polyalanine
+  (sidechains stripped, `REMARK   1` redaction header inserted at top);
+  paid-tier callers receive full atomic detail.
+
+### Added — `LigandAIUpgradeRequired` (alias for `LigandAIPaidTierRequired`)
+
+`LigandAIUpgradeRequired` is the public-API name for the 402 case. Old
+code catching `LigandAIPaidTierRequired` continues to work because the
+new class inherits from it. The dispatcher now also surfaces the
+server's `upgrade_url` field on the exception (defaults to
+`https://ligandai.com/pricing`).
+
+### Added — tier-redaction signaling on responses
+
+All new endpoints include `_tier`, `_tier_redacted`, and `_upgrade_url`
+in their JSON responses. The SDK `Peptide` model now has a `peptide_id`,
+`length`, `predicted_kd`, `is_elite`, and `_masked` field so callers can
+detect when free-tier sequence redaction has been applied.
+
+### Fixed — `peptide_count` on `client.programs` was always 0
+
+`GET /api/ptf/programs` (used by `client.programs.list()`) and
+`GET /api/ptf/programs/:id` now compute `peptide_count`, `folded_count`,
+and `elite_count` live via JOIN over `ptf_generated_peptides` and
+`ptf_fold_results`. The legacy denormalized columns
+`total_peptides_generated` / `total_peptides_folded` /
+`elite_peptide_count` were never wired to the actual generation pipelines
+and have been bypassed in the API response.
+
+### Fixed — Free-tier API leaks closed (`/api/v1/*`)
+
+The `/api/v1/peptides/list`, `/v1/peptides/search`, `/v1/structures/list`,
+and `/v1/structures/:id/pdb` endpoints accept free-tier API keys but mask
+sequences (first 10 AA + `********`) and scramble PDBs to polyalanine.
+The CSV export endpoints (`/api/user/results/export`,
+`/api/design-studio/download/csv`, `/api/design/projects/:id/export`)
+have been updated to honor tier — free-tier users now see masked
+sequences in CSV output and a `tier_visibility` column. The
+`/api/ptf/generated-peptides/by-gene/:gene` endpoint, which was missing
+its `hasPaymentMethod` check, now correctly masks sequences for
+trial-without-card users.
+
+## [0.4.1] - 2026-05-07
+
+### Fixed — `proteins.upload_pdb` rejected partial server responses
+- `UserProtein` and `ProteinVariant` pydantic models loosened: every
+  non-`id` field is now Optional. Previously, an upload that succeeded
+  server-side but came back with a degraded body (CIF parser returning
+  `residueCount: 0`, `chainInfo: []`, `geneSymbol: null`) would raise a
+  pydantic validation error and force users to bypass the SDK with raw
+  multipart. Both models continue to inherit `extra="allow"` from
+  `_LGModel` so additive server fields are preserved.
+- Added explicit fields the server actually emits: `gene_symbol`,
+  `user_id`, `chain_count`, `residue_count`, `chain_info`, `status`. They
+  default to `None` so partial payloads validate cleanly.
+
+### Fixed — `client.credits` returned superadmin sentinel for normal users
+- Added sentinel detection: when the server returns a balance
+  ≥ `1e10` (e.g. `Number.MAX_SAFE_INTEGER` 9_007_199_254_740_991, or the
+  `1e16` superadmin marker), the SDK now sets
+  `Credits.is_unlimited = True` and emits a one-shot stderr warning
+  ("implausible credits balance — likely tier resolution bug, contact
+  support@ligandai.com"). Use `client.account.credits().is_unlimited`
+  to distinguish a true unlimited account from a server-side bug.
+- `Credits` model now also accepts `credits` as an alias for `balance`
+  (server has historically returned both shapes) and both attributes
+  are populated on validation.
+
+## [0.4.0] - 2026-05-07
+
+### Added — chain / pocket / fold-partner control
+- `peptides.generate(target_chains=["C"])` — restrict design AND folding to
+  specific chain IDs of a multimer target. Maps to ``config.targetChains``.
+  Use this for "design against chain C only" of a multi-chain PDB.
+- `peptides.generate(fold_partners=...)` — three explicit modes for what
+  receptor chains end up in the peptide co-fold:
+  * ``"target_only"`` — peptide + only the listed target chain(s)
+  * ``"native_complex"`` — peptide + target + its native interaction partners
+    (e.g., BMPR1A + RGMB) so users can compare inhibitory effect against the
+    native interface
+  * ``"all_conformations"`` — full ensemble across all conformations
+  * ``list[str]`` — explicit conformation names
+- `peptides.generate(pocket_expansion_radius_a=6.0)` — when ``target_residues``
+  are passed, the server now auto-includes every residue within this radius
+  of any hotspot atom in the design pocket. Defaults to 6.0 Å. Pass 0 to use
+  the literal residues only. Fixes "I gave you a hotspot but the peptide
+  bound to the opposite face" (issue dre-2026-05-07-hotspots).
+- Auto-strategy: when ``target_residues`` are non-empty and
+  ``targeting_strategy`` is not explicitly set, the SDK now sends
+  ``targeting_strategy="pocket_targeted"`` instead of the previous silent
+  ``"full_surface"`` default that ignored the residues.
+- Default ``fold_strategy="quality_ranked"`` — server pre-ranks generated
+  peptides by composite (LigandIQ × predicted iPTM) and folds the top
+  candidates first so credits go to the most promising designs.
+
+### Added — local downloads
+- `GenerationResult.save_to(directory)` — write ``peptides.csv`` (sequence +
+  scores), ``folds/{rank}_{seq}.pdb`` (folded structures), and
+  ``summary.json`` (full metadata) to a local directory. Parallel batched
+  PDB fetch (8 concurrent requests).
+- `Job.wait(save_to=...)` — auto-save run artifacts when the job completes.
+  Pass empty string to use ``./ligandai_runs/{session_id}/`` default.
+- `GenerationResult.view_url` — direct URL to the run on ligandai.com.
+- `GenerationResult.csv_url` — authenticated CSV export endpoint.
+
+### Added — custom PDB upload (now works for ALL tiers)
+- `proteins.upload_pdb()` now hits the canonical ``/api/user/proteins/upload``
+  endpoint (was 404'ing on the hyphenated path). Field name is ``files``
+  (server tolerant of both ``file`` and ``files`` going forward), and the
+  response is unwrapped to the first registered ``UserProtein``. CIF files
+  send the correct ``chemical/x-mmcif`` MIME type.
+- Upload is available to **all authenticated tiers** (free, basic, academia,
+  pro, enterprise) — no tier gate. Uploads land in the user's "My PDBs"
+  library at ``https://ligandai.com/account/billing?tab=my-pdbs``.
+
+### Added — agent discoverability
+- `AGENTS.md` and `CLAUDE.md` at the SDK package root so Claude Code, Codex,
+  Cursor, and Aider auto-discover the four canonical workflows (gene,
+  PDB-ID + chain, custom CIF/PDB upload, pocket-targeted) without grepping
+  for method signatures.
+- `examples/07_pdb_id_chain_design.py` — runnable demo of the PDB-ID +
+  chain selection workflow.
+- AGENTS.md now also documents tier GPU caps (academia=16, pro=25,
+  enterprise=50) and instructs agents to pass ``fold_gpus=`` matching the
+  user's tier so jobs finish in minutes instead of 30+.
+
+### Server-side aliases (deployed alongside this release)
+- ``/api/v1/user-proteins/*``, ``/api/user-proteins/*``, ``/api/v1/user/proteins/*``
+  all rewrite to the canonical ``/api/user/proteins/*`` handlers.
+- ``/api/v1/protein-variants*`` and ``/api/protein-variants*`` rewrite to
+  ``/api/ptf/protein-variants*``.
+- ``POST /api/user/proteins/upload`` now reads ``gene`` / ``customName``
+  overrides from multipart form fields and accepts the file under either
+  ``file`` (singular) or ``files`` (plural) field name.
+
+## [0.3.9] - 2026-05-07
+
+### Added
+- `peptides.generate(target_chains=["C"])` — restrict design to specific chain
+  IDs of a multimer target (e.g. design only against chain C of PDB ``9MIR``
+  while keeping chains A/B/D as binding context). Maps to ``config.targetChains``
+  on the server. Both sync and async clients support this.
+- `AGENTS.md` and `CLAUDE.md` at the SDK package root so Claude Code, Codex,
+  Cursor, and Aider auto-discover the four canonical workflows (gene,
+  PDB-ID + chain, custom CIF/PDB upload, pocket-targeted) without grepping
+  for method signatures. Includes API key URL, tier caps, error handling,
+  job lifecycle, and platform URLs.
+- `examples/07_pdb_id_chain_design.py` — runnable demo of the PDB-ID +
+  chain selection workflow.
+
+### Documentation
+- `README.md` now includes "Designing against a specific PDB ID + chain" and
+  "Designing against a custom CIF/PDB on disk" examples up-front, since these
+  are the two flows agents most often need to reconstruct from scratch.
+
 ## [0.3.8] - 2026-05-07
 
 ### Fixed
