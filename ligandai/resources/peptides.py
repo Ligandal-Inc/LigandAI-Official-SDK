@@ -495,6 +495,7 @@ def _fold_body(
     num_trajectories: int | None = None,
     step_scale: float | None = None,
     contribute_to_receptordb: bool | None = None,
+    n_parallel_gpus: int | None = None,
 ) -> dict[str, Any]:
     """Build the body for ``POST /api/folding/predict``.
 
@@ -519,6 +520,13 @@ def _fold_body(
     if contribute_to_receptordb is not None:
         body["contributeToReceptordb"] = contribute_to_receptordb
         body["submitToCommunity"] = contribute_to_receptordb
+    # Task J — explicit parallel-GPU cap (tier-validated server-side via USER_GPU_LIMITS).
+    # When None, the server picks a tier-appropriate default. When set above the
+    # caller's tier cap the server returns 400 with the cap value in the error body.
+    if n_parallel_gpus is not None:
+        body["nParallelGpus"] = int(n_parallel_gpus)
+        # Mirror snake_case for FastAPI consumers
+        body["n_parallel_gpus"] = int(n_parallel_gpus)
     if target_gene is not None:
         body["targetGeneName"] = target_gene
     if msa_enabled is not None:
@@ -1072,8 +1080,18 @@ class Peptides(Resource):
         num_trajectories: int | None = None,
         step_scale: float | None = None,
         contribute_to_receptordb: bool | None = None,
+        n_parallel_gpus: int | None = None,
     ) -> Job[FoldResult]:
-        """Submit a Boltz-2 folding job (monomer or multimer)."""
+        """Submit a Boltz-2 folding job (monomer or multimer).
+
+        Args:
+            n_parallel_gpus: Concurrent fold-worker GPUs (Task J). When None
+                (default), the server uses the tier-default (free=1, basic=4,
+                academia=16, pro=25, enterprise=50). When set above the
+                caller's USER_GPU_LIMITS cap, the server returns HTTP 400 with
+                the cap value in the response body. Use estimate_fold_time() to
+                pre-compute the wall-clock impact.
+        """
         if self._client is not None:
             self._client._require_feature("predict_structure")
         body = _fold_body(
@@ -1091,6 +1109,7 @@ class Peptides(Resource):
             num_trajectories=num_trajectories,
             step_scale=step_scale,
             contribute_to_receptordb=contribute_to_receptordb,
+            n_parallel_gpus=n_parallel_gpus,
         )
         payload = self._transport.request("POST", "/api/folding/predict", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""
@@ -1843,7 +1862,9 @@ class AsyncPeptides(AsyncResource):
         num_trajectories: int | None = None,
         step_scale: float | None = None,
         contribute_to_receptordb: bool | None = None,
+        n_parallel_gpus: int | None = None,
     ) -> AsyncJob[FoldResult]:
+        """Async sibling of :meth:`Peptides.fold`. See :meth:`Peptides.fold` for ``n_parallel_gpus`` semantics."""
         if self._client is not None:
             self._client._require_feature("predict_structure")
         body = _fold_body(
@@ -1861,6 +1882,7 @@ class AsyncPeptides(AsyncResource):
             num_trajectories=num_trajectories,
             step_scale=step_scale,
             contribute_to_receptordb=contribute_to_receptordb,
+            n_parallel_gpus=n_parallel_gpus,
         )
         payload = await self._transport.request("POST", "/api/folding/predict", json=body) or {}
         job_id = payload.get("jobId") or payload.get("id") or ""
