@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # -- Base ---------------------------------------------------------------------
 
@@ -51,9 +52,48 @@ class User(_LGModel):
 
 
 class Credits(_LGModel):
-    balance: int
+    """Credit balance payload from ``GET /api/user-credits``.
+
+    Notes
+    -----
+    The server may return a sentinel value (e.g. ``Number.MAX_SAFE_INTEGER``
+    = 9_007_199_254_740_991, or 1e16) for superadmin / unlimited accounts.
+    When the raw ``balance`` exceeds :data:`UNLIMITED_BALANCE_THRESHOLD`
+    (1e10), the SDK treats it as unlimited and surfaces
+    :attr:`is_unlimited` as ``True`` rather than exposing a giant int.
+
+    Either ``balance`` or ``credits`` may appear depending on endpoint —
+    they're aliased to the same field. Validators may also see a top-level
+    ``isUnlimited`` flag from the server in future revisions.
+    """
+
+    balance: int = 0
+    credits: int | None = None
+    is_unlimited: bool | None = Field(default=None, alias="isUnlimited")
     monthly_allocation: int | None = Field(default=None, alias="monthlyAllocation")
     next_refill_at: datetime | None = Field(default=None, alias="nextRefillAt")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_balance_and_flag_unlimited(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        # Accept either 'balance' or 'credits' key; mirror to both attrs.
+        raw = d.get("balance")
+        if raw is None:
+            raw = d.get("credits")
+        try:
+            bal = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            bal = 0
+        d["balance"] = bal
+        if "credits" not in d or d.get("credits") is None:
+            d["credits"] = bal
+        # Sentinel detection — superadmin / unlimited / tier-bug accounts.
+        if bal >= 10_000_000_000 and d.get("isUnlimited") is None and d.get("is_unlimited") is None:
+            d["isUnlimited"] = True
+        return d
 
 
 class CreditTransaction(_LGModel):
@@ -362,7 +402,11 @@ class GoalRunEvent(_LGModel):
 
 
 class ReceptorComplex(_LGModel):
-    id: str | int
+    # Server's canonical identifier is `complexId` (string). The SDK historically
+    # required `id` which the server never sends — this caused validation failures
+    # for every basic-tier caller of receptors.list(). Both fields are now optional;
+    # callers should prefer `complex_id`.
+    id: str | int | None = None
     complex_id: str | None = Field(default=None, alias="complexId")
     complex_name: str | None = Field(default=None, alias="complexName")
     gene: str | None = None
@@ -372,6 +416,16 @@ class ReceptorComplex(_LGModel):
     pdb_code: str | None = Field(default=None, alias="pdbCode")
     chain_count: int | None = Field(default=None, alias="chainCount")
     has_pdb: bool | None = Field(default=None, alias="hasPdb")
+    stoichiometry: str | None = None
+    complex_type: str | None = Field(default=None, alias="complexType")
+    receptor_class: str | None = Field(default=None, alias="receptorClass")
+    confidence: str | None = None
+    iptm: float | None = None
+    ipsae: float | None = None
+    plddt: float | None = None
+    ptm: float | None = None
+    has_experimental_pdb: bool | None = Field(default=None, alias="hasExperimentalPDB")
+    pdb_ids: list[str] | None = Field(default=None, alias="pdbIds")
 
 
 class ReceptorListResponse(_LGModel):
@@ -684,6 +738,27 @@ class Peptide(_LGModel):
         default=None, alias="cyclicMode",
         description="Cyclic constraint active during generation: 'none'|'lactam'|'disulfide'|'head_tail_contact'.",
     )
+    # v0.5.0 — fields returned by /api/v1/peptides/list and /api/v1/peptides/search
+    peptide_id: int | None = Field(
+        default=None, alias="peptide_id",
+        description="ptf_fold_results.id — pass to client.peptides.get(peptide_id).",
+    )
+    length: int | None = Field(
+        default=None,
+        description="True peptide length (always reported, even when sequence is masked for free tier).",
+    )
+    predicted_kd: float | None = Field(
+        default=None, alias="predictedKd",
+        description="Predicted dissociation constant (M) from DeltaForge.",
+    )
+    is_elite: bool | None = Field(
+        default=None, alias="isElite",
+        description="Server-side elite classification (typically iPSAE >= 0.85).",
+    )
+    masked: bool | None = Field(
+        default=None, alias="_masked",
+        description="True when sequence has been truncated due to tier (free = first 10 AA + '********').",
+    )
 
 
 class GeneSummary(_LGModel):
@@ -847,6 +922,165 @@ class GenerationResult(_LGModel):
     total_generated: int | None = Field(default=None, alias="totalGenerated")
     parameters: dict[str, Any] | None = None
 
+    @property
+    def view_url(self) -> str:
+        """Public URL where this run's peptides + folds + scores live on
+        ligandai.com. Tell the user to open this in their browser to see
+        results, export CSV, view 3D structures, and request synthesis."""
+        sid = self.session_id or self.job_id
+        return f"https://ligandai.com/workspace?session={sid}"
+
+    @property
+    def csv_url(self) -> str:
+        """Public CSV-export URL for this run (sequence, scores, fold metrics).
+        Authenticated download — same API key as the SDK client."""
+        sid = self.session_id or self.job_id
+        return f"https://ligandai.com/api/ptf/sessions/{sid}/export.csv"
+
+    def save_to(
+        self,
+        directory: str | Path,
+        *,
+        write_pdbs: bool = True,
+        write_csv: bool = True,
+        write_summary: bool = True,
+        transport: Any | None = None,
+    ) -> dict[str, Any]:
+        """Download this run's artifacts to a local directory.
+
+        Writes:
+            * ``peptides.csv``  — every peptide with sequence + scores + ranks
+            * ``folds/{rank:03d}_{seq}.pdb`` — folded PDB per peptide
+              (only when the peptide has a ``pdb_url`` or ``fold_id`` and a
+              ``transport=`` is provided)
+            * ``summary.json`` — full :class:`GenerationResult` (for replay)
+
+        Args:
+            directory: Output directory (created if missing).
+            write_pdbs: When True and a transport is provided, fetch each
+                peptide's PDB content and save it. Skipped silently when no
+                transport is available — the platform UI is still the
+                source of truth in that case.
+            write_csv: Write peptides.csv with sequence, predicted scores,
+                fold scores (when present), and rank.
+            write_summary: Write a summary.json + view_url + csv_url.
+            transport: Optional :class:`HTTPTransport` for fetching PDBs;
+                pass ``client.transport`` when calling.
+
+        Returns:
+            Dict with keys ``directory``, ``peptide_count``, ``pdb_count``,
+            ``view_url``, ``csv_url``.
+        """
+        import csv
+        import json
+        from pathlib import Path as _Path
+
+        out = _Path(directory).expanduser()
+        out.mkdir(parents=True, exist_ok=True)
+
+        if write_csv:
+            csv_path = out / "peptides.csv"
+            with csv_path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "rank", "name", "sequence", "target_gene",
+                    "ipsae", "iptm", "ptm", "plddt",
+                    "predicted_ipsae", "binder_prob", "ligandiq",
+                    "deltaforge_dg", "deltaforge_kd",
+                    "stability_grade", "immunogenicity_score", "cyclic_mode",
+                ])
+                for i, p in enumerate(self.peptides, start=1):
+                    writer.writerow([
+                        p.rank if p.rank is not None else i,
+                        p.name or "",
+                        p.sequence,
+                        p.target_gene or self.gene,
+                        p.ipsae, p.iptm, p.ptm, p.plddt,
+                        p.predicted_ipsae, p.binder_prob, p.ligandiq,
+                        p.deltaforge_dg, p.deltaforge_kd,
+                        p.stability_grade, p.immunogenicity_score, p.cyclic_mode,
+                    ])
+
+        pdb_count = 0
+        if write_pdbs and transport is not None:
+            folds_dir = out / "folds"
+            folds_dir.mkdir(parents=True, exist_ok=True)
+
+            def _fetch_pdb(idx: int, p: "Peptide") -> tuple[int, "Peptide", str | None]:
+                pdb_text: str | None = None
+                # Path 1 — direct URL on the peptide
+                if p.pdb_url:
+                    try:
+                        resp = transport.request("GET", p.pdb_url, expect_json=False)
+                        if isinstance(resp, (str, bytes)):
+                            pdb_text = resp.decode() if isinstance(resp, bytes) else resp
+                    except Exception:
+                        pdb_text = None
+                # Path 2 — fold-id fetch via /api/v1/peptides/:id?include=pdb
+                if pdb_text is None and p.fold_id:
+                    try:
+                        resp = transport.request(
+                            "GET", f"/api/v1/peptides/{p.fold_id}",
+                            params={"include": "pdb"},
+                        ) or {}
+                        pdb_text = resp.get("pdbContent") or resp.get("pdb_content")
+                    except Exception:
+                        pdb_text = None
+                # Path 3 — session+sequence endpoint (canonical fallback for
+                # post-fold sessions where pdb_url / fold_id aren't echoed back).
+                if pdb_text is None and self.session_id and p.sequence:
+                    try:
+                        resp = transport.request(
+                            "GET",
+                            f"/api/ptf/sessions/{self.session_id}/pdb/{p.sequence}",
+                        ) or {}
+                        if isinstance(resp, dict):
+                            pdb_text = resp.get("pdb_content") or resp.get("pdbContent") or resp.get("pdb")
+                        elif isinstance(resp, (str, bytes)):
+                            pdb_text = resp.decode() if isinstance(resp, bytes) else resp
+                    except Exception:
+                        pdb_text = None
+                return idx, p, pdb_text
+
+            # Parallel batch fetch — 8 concurrent requests is comfortable under
+            # academia/pro rate limits (30/60 req/min). Per-peptide GETs are the
+            # only fallback today since the platform doesn't expose a single
+            # zip-of-PDBs endpoint yet.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            futures = []
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for i, p in enumerate(self.peptides, start=1):
+                    futures.append(pool.submit(_fetch_pdb, i, p))
+                for fut in as_completed(futures):
+                    idx, p, pdb_text = fut.result()
+                    if not pdb_text:
+                        continue
+                    rank = p.rank if p.rank is not None else idx
+                    fname = f"{rank:03d}_{p.sequence[:20]}.pdb"
+                    (folds_dir / fname).write_text(pdb_text)
+                    pdb_count += 1
+
+        if write_summary:
+            summary = {
+                "job_id": self.job_id,
+                "session_id": self.session_id,
+                "gene": self.gene,
+                "view_url": self.view_url,
+                "csv_url": self.csv_url,
+                "peptide_count": len(self.peptides),
+                "pdb_count": pdb_count,
+                "parameters": self.parameters,
+            }
+            (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+
+        return {
+            "directory": str(out),
+            "peptide_count": len(self.peptides),
+            "pdb_count": pdb_count,
+            "view_url": self.view_url,
+            "csv_url": self.csv_url,
+        }
+
 
 class FoldResult(_LGModel):
     job_id: str = Field(alias="jobId")
@@ -1004,20 +1238,49 @@ class GlycosylationData(_LGModel):
 
 
 class ProteinVariant(_LGModel):
+    """Server-registered protein variant.
+
+    All non-id fields are Optional so partial server responses (e.g. when the
+    upstream CIF/PDB parser fails to extract gene symbol or chain metadata)
+    don't reject the SDK call. Inherits ``extra="allow"`` so additive server
+    fields are preserved as-is.
+    """
+
     id: int
-    gene: str
+    gene: str | None = None
+    gene_symbol: str | None = Field(default=None, alias="geneSymbol")
     alias: str | None = None
+    custom_name: str | None = Field(default=None, alias="customName")
+    user_id: str | None = Field(default=None, alias="userId")
     mutations: list[str] | None = None
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
+    chain_count: int | None = Field(default=None, alias="chainCount")
+    residue_count: int | None = Field(default=None, alias="residueCount")
+    chain_info: list[Any] | None = Field(default=None, alias="chainInfo")
+    status: str | None = None
     is_shared: bool | None = Field(default=None, alias="isShared")
     created_at: datetime | None = Field(default=None, alias="createdAt")
 
 
 class UserProtein(_LGModel):
+    """User-uploaded protein record from ``/api/user/proteins/upload``.
+
+    All structural/metadata fields are Optional so the SDK tolerates degraded
+    server responses (e.g. CIF parser returning ``residueCount=0``,
+    ``chainInfo=[]``, ``geneSymbol=null``). Inherits ``extra="allow"`` from
+    :class:`_LGModel` so future server fields are preserved.
+    """
+
     id: int
-    gene: str
+    gene: str | None = None
+    gene_symbol: str | None = Field(default=None, alias="geneSymbol")
+    user_id: str | None = Field(default=None, alias="userId")
     custom_name: str | None = Field(default=None, alias="customName")
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
+    chain_count: int | None = Field(default=None, alias="chainCount")
+    residue_count: int | None = Field(default=None, alias="residueCount")
+    chain_info: list[Any] | None = Field(default=None, alias="chainInfo")
+    status: str | None = None
     uploaded_at: datetime | None = Field(default=None, alias="uploadedAt")
 
 
@@ -1288,11 +1551,25 @@ class RecentActivity(_LGModel):
 
 
 class Program(_LGModel):
-    id: int
-    name: str
+    # Server returns either numeric `id` (DB programs from /api/ptf/programs/:id)
+    # or stringly `programId` (in-memory programs from /api/ptf/programs list).
+    # Make both optional and accept either as the canonical identifier.
+    id: int | None = None
+    program_id: str | None = Field(default=None, alias="programId")
+    name: str | None = None
     description: str | None = None
     color: str | None = None
+    status: str | None = None
+    gene_count: int | None = Field(default=None, alias="geneCount")
+    completed_count: int | None = Field(default=None, alias="completedCount")
+    in_progress_count: int | None = Field(default=None, alias="inProgressCount")
+    queued_count: int | None = Field(default=None, alias="queuedCount")
+    failed_count: int | None = Field(default=None, alias="failedCount")
+    total_elites: int | None = Field(default=None, alias="totalElites")
+    best_ipsae: float | None = Field(default=None, alias="bestIpsae")
+    genes: list[dict[str, Any]] | None = None
     created_at: datetime | None = Field(default=None, alias="createdAt")
+    updated_at: datetime | None = Field(default=None, alias="updatedAt")
 
 
 class Workstream(_LGModel):
@@ -1354,14 +1631,23 @@ class Report(_LGModel):
 
 
 class JobInfo(_LGModel):
-    id: str
-    type: Literal["generation", "folding", "scoring"] | str
-    status: Literal["queued", "running", "complete", "failed", "cancelled"] | str
+    # /api/jobs/history merges peptide / GPU / folding jobs from heterogeneous
+    # tables. Some columns (type, status, progress) aren't always populated for
+    # legacy rows. Required-only fields here would fail validation on basic-tier
+    # users with old jobs in their history. All fields are optional.
+    id: str | None = None
+    type: Literal["generation", "folding", "scoring"] | str | None = None
+    status: Literal["queued", "running", "complete", "failed", "cancelled"] | str | None = None
+    job_source: str | None = Field(default=None, alias="jobSource")
     progress: float | None = None
     estimated_credits: int | None = Field(default=None, alias="estimatedCredits")
     created_at: datetime | None = Field(default=None, alias="createdAt")
     completed_at: datetime | None = Field(default=None, alias="completedAt")
     error_message: str | None = Field(default=None, alias="errorMessage")
+    result_count: int | None = Field(default=None, alias="resultCount")
+    target_protein: dict[str, Any] | None = Field(default=None, alias="targetProtein")
+    workspace_session: dict[str, Any] | None = Field(default=None, alias="workspaceSession")
+    metrics: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
 
 

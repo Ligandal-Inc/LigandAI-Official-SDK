@@ -415,8 +415,14 @@ def test_configure_auto_topup_last_charged_at(httpx_mock: HTTPXMock, client: Lig
 
 
 def test_top_up_server_403_free_tier(httpx_mock: HTTPXMock, free_client: LigandAI) -> None:
-    """Server returns 403 when free-tier user tries to top up without card — raises LigandAITierError."""
-    from ligandai.errors import LigandAITierError
+    """Server returns 403 when free-tier user tries to top up without card — raises LigandAIForbidden.
+
+    `payment_method_required` is NOT a tier upgrade issue — adding a credit card
+    fixes it without changing tier. Pre-0.3.7 the SDK lied and said this was a
+    tier error; 0.3.7 raises LigandAIForbidden carrying the server's actual
+    `error` code as `reason`.
+    """
+    from ligandai.errors import LigandAIForbidden
 
     httpx_mock.add_response(
         url=f"{BASE}/api/billing/topup",
@@ -424,8 +430,9 @@ def test_top_up_server_403_free_tier(httpx_mock: HTTPXMock, free_client: LigandA
         status_code=403,
         json={"error": "payment_method_required"},
     )
-    with pytest.raises(LigandAITierError):
+    with pytest.raises(LigandAIForbidden) as ei:
         free_client.account.top_up(amount_usd=50)
+    assert ei.value.reason == "payment_method_required"
 
 
 def test_configure_auto_topup_server_403_free_tier(httpx_mock: HTTPXMock, free_client: LigandAI) -> None:

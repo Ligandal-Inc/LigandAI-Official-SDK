@@ -203,8 +203,18 @@ class Job(Generic[T]):
         timeout: float = DEFAULT_JOB_TIMEOUT_SECS,
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECS,
         on_progress: Callable[[JobInfo], None] | None = None,
+        save_to: str | None = None,
     ) -> T:
-        """Block until the job completes (or raises) and return the parsed result."""
+        """Block until the job completes (or raises) and return the parsed result.
+
+        Args:
+            save_to: Optional local directory. When provided AND the result
+                exposes a ``save_to(...)`` method (i.e. ``GenerationResult``),
+                automatically writes ``peptides.csv``, ``folds/*.pdb``, and
+                ``summary.json`` to that directory. Prints a one-line confirmation.
+                Pass an empty string to use the SDK default
+                ``./ligandai_runs/<session_id>/``.
+        """
         deadline = time.monotonic() + timeout
         while not self.is_terminal:
             if time.monotonic() > deadline:
@@ -224,7 +234,19 @@ class Job(Generic[T]):
                 job_id=self._job_id,
                 job_status=self.status,
             )
-        return self.results
+        result = self.results
+        if save_to is not None and hasattr(result, "save_to"):
+            try:
+                target_dir = save_to or f"./ligandai_runs/{self._job_id}"
+                info = result.save_to(target_dir, transport=self._transport)
+                print(
+                    f"[ligandai] saved {info['peptide_count']} peptides "
+                    f"({info['pdb_count']} PDBs) to {info['directory']}"
+                )
+                print(f"[ligandai] view on platform: {info['view_url']}")
+            except Exception as exc:
+                print(f"[ligandai] save_to skipped: {exc}")
+        return result
 
     def stream(self) -> Iterator[JobEvent]:
         """Stream live progress events via SSE.

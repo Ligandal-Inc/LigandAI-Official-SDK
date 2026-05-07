@@ -3,6 +3,13 @@
 Official Python SDK for the [LIGANDAI](https://ligandai.com) platform — peptide
 design, structure prediction, scoring, and discovery.
 
+> **v0.5.0** — `peptides.list(program_id)` now works (no more `TypeError`),
+> plus new `peptides.search(...)`, `structures.list(program_id)`, and
+> `structures.get_pdb(id)`. See
+> [`docs/api_reference.md`](docs/api_reference.md),
+> [`docs/workflows.md`](docs/workflows.md), and
+> [`docs/error_codes.md`](docs/error_codes.md), or [CHANGELOG.md](CHANGELOG.md).
+
 > **License & Terms** — By installing or using this SDK you agree to the
 > [LigandAI Terms of Service](https://ligandai.com/terms) and
 > [End User License Agreement](https://ligandai.com/eula). API usage is logged
@@ -55,6 +62,46 @@ job = client.peptides.generate(
 result = job.wait(timeout=1800)
 print(f"Got {len(result.peptides)} peptides, top iPSAE: {result.peptides[0].ipsae}")
 ```
+
+### Designing against a specific PDB ID + chain
+
+For a multimer like PDB ``9MIR`` (chains A/B/C/D) where you only want to
+design against chain C, fetch the structure by PDB ID and pass
+``target_chains``:
+
+```python
+client = LigandAI()
+struct = client.structures.from_pdb("9MIR")     # confirms the PDB resolves
+job = client.peptides.generate(
+    gene="9MIR",                                 # PDB ID accepted as identifier
+    target_chains=["C"],                         # restrict design to chain C
+    num_peptides=50,
+    auto_fold=True,
+    top_n_fold=10,
+)
+```
+
+### Designing against a custom CIF/PDB on disk
+
+```python
+from pathlib import Path
+
+client = LigandAI()
+up = client.proteins.upload_pdb(
+    file=Path("/path/to/relaxed.cif"),
+    gene="MY_TARGET",
+    custom_name="my_relaxed_2026_05_07",
+)
+job = client.peptides.generate(
+    gene="MY_TARGET",
+    variant_id=up.id,
+    target_chains=["A"],          # optional chain restriction on the upload
+    num_peptides=25,
+    auto_fold=True,
+)
+```
+
+### Pocket-targeted generation
 
 Selected pockets can span one or more chains. The helper below compresses
 arbitrary selected residues into the continuous chain ranges expected by the
@@ -413,23 +460,28 @@ results = asyncio.run(design_for_genes(["EGFR", "HER2", "KIT"]))
 
 ```python
 from ligandai import (
-    LigandAIError,           # base
-    LigandAIAuthError,       # 401 — invalid/expired/revoked key
-    LigandAITierError,       # 403 — feature requires higher tier
-    LigandAIRateLimitError,  # 429 — rate limit
-    LigandAICreditError,     # 402 — insufficient credits
-    LigandAINotFoundError,   # 404
-    LigandAIServerError,     # 5xx (auto-retried)
-    LigandAIValidationError, # 400/422
+    LigandAIError,             # base
+    LigandAIAuthError,         # 401 — invalid/expired/revoked key
+    LigandAIUpgradeRequired,   # 402 — caller's tier doesn't include the surface
+    LigandAICreditError,       # 402 — insufficient credits for operation
+    LigandAITierError,         # 403 — tier escalation needed
+    LigandAIForbidden,         # 403 — pilot allowlist, EULA, ownership
+    LigandAINotFoundError,     # 404
+    LigandAIRateLimitError,    # 429 — rate limit
+    LigandAIServerError,       # 5xx (auto-retried)
+    LigandAIValidationError,   # 400/422
 )
 
 try:
-    job = client.peptides.generate(gene="EGFR", num_peptides=10000)
-except LigandAITierError as e:
-    print(f"Need {e.required_tier}, you have {e.current_tier}")
+    detail = client.peptides.get(12345)
+except LigandAIUpgradeRequired as e:
+    print(f"Upgrade: {e.current_tier} → {e.required_tier} ({e.upgrade_url})")
 except LigandAICreditError as e:
     print(f"Need {e.required} credits, have {e.available}")
 ```
+
+See [docs/error_codes.md](docs/error_codes.md) for the full table of
+HTTP status codes, server `code` strings, and matching SDK exceptions.
 
 ## Retry & Rate Limiting
 

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
@@ -75,6 +75,71 @@ class Structures(Resource):
             return self.get(gene)
         raise ValueError("Pass one of gene=, pdb_id=, or uniprot_id=")
 
+    # ------------------------------------------------------------------
+    # v0.5.0 — fold-structure listing endpoints
+    # (LIGANDAI_ALPHA_V2-vzkei.3 / Andrew Keene SDK gaps)
+    # ------------------------------------------------------------------
+    def list(
+        self,
+        program_id: int | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """``GET /api/v1/structures/list`` — list folded structures.
+
+        Returns metadata only (gene, scores, ``pdb_url``); use
+        :meth:`get_pdb` to fetch the actual PDB content.
+
+        **Auth:** Free tier sees their own structures. Paid tier sees full
+        atomic data; free tier downloads polyalanine PDBs.
+
+        Args:
+            program_id: Optional program scope.
+            limit: Page size (max 200).
+            offset: Pagination offset.
+
+        Returns:
+            List of structure metadata dicts. Each row includes
+            ``structure_id``, ``fold_id``, ``gene``, ``ipsae``, ``ptm``,
+            ``iptm``, ``plddt``, ``isElite``, ``createdAt``, and ``pdb_url``.
+        """
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if program_id is not None:
+            params["program_id"] = program_id
+        payload = self._transport.request(
+            "GET", "/api/v1/structures/list", params=params
+        ) or {}
+        items = payload.get("structures", []) if isinstance(payload, dict) else (payload or [])
+        return list(items)
+
+    def get_pdb(self, structure_id: int | str) -> str:
+        """``GET /api/v1/structures/:id/pdb`` — fetch PDB content for a fold.
+
+        Returns the raw PDB text. Free tier receives polyalanine (sidechains
+        stripped, ``REMARK 1`` redaction header inserted at top); paid tier
+        receives full atomic detail.
+
+        Args:
+            structure_id: ``ptf_fold_results.id`` (positive integer).
+
+        Returns:
+            PDB content as a string.
+        """
+        try:
+            id_int = int(structure_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"structure_id must be a positive integer (got {structure_id!r})"
+            ) from exc
+        if id_int <= 0:
+            raise ValueError(f"structure_id must be > 0 (got {id_int})")
+        resp = self._transport.request(
+            "GET", f"/api/v1/structures/{id_int}/pdb", expect_json=False
+        )
+        # resp is an httpx.Response when expect_json=False
+        return resp.text if hasattr(resp, "text") else str(resp)
+
 
 class AsyncStructures(AsyncResource):
     async def get(self, gene: str) -> Structure:
@@ -136,3 +201,38 @@ class AsyncStructures(AsyncResource):
         if gene is not None:
             return await self.get(gene)
         raise ValueError("Pass one of gene=, pdb_id=, or uniprot_id=")
+
+    # ------------------------------------------------------------------
+    # v0.5.0 async fold-structure listing endpoints
+    # ------------------------------------------------------------------
+    async def list(
+        self,
+        program_id: int | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Async variant of :meth:`Structures.list`."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if program_id is not None:
+            params["program_id"] = program_id
+        payload = await self._transport.request(
+            "GET", "/api/v1/structures/list", params=params
+        ) or {}
+        items = payload.get("structures", []) if isinstance(payload, dict) else (payload or [])
+        return list(items)
+
+    async def get_pdb(self, structure_id: int | str) -> str:
+        """Async variant of :meth:`Structures.get_pdb`."""
+        try:
+            id_int = int(structure_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"structure_id must be a positive integer (got {structure_id!r})"
+            ) from exc
+        if id_int <= 0:
+            raise ValueError(f"structure_id must be > 0 (got {id_int})")
+        resp = await self._transport.request(
+            "GET", f"/api/v1/structures/{id_int}/pdb", expect_json=False
+        )
+        return resp.text if hasattr(resp, "text") else str(resp)

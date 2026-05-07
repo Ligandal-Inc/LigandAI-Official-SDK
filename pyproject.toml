@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ligandai"
-version = "0.3.8"
+version = "0.5.0"
 description = "Official Python SDK for the LIGANDAI (TM) platform — peptide design, structure prediction, scoring, and discovery."
 readme = "README.md"
 license = { text = "Proprietary. Use of this SDK constitutes acceptance of https://ligandai.com/terms and https://ligandai.com/eula." }

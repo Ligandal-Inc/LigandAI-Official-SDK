@@ -51,6 +51,9 @@ what host an AI agent is actually talking to.
 quickstart
 authentication
 resources
+api_reference
+workflows
+error_codes
 errors
 jobs
 agents
