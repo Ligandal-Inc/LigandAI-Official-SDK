@@ -23,6 +23,7 @@ from ligandai._constants import (
     DEFAULT_JOB_TIMEOUT_SECS,
     DEFAULT_POLL_INTERVAL_SECS,
 )
+from ligandai._fold_time_model import estimate_fold_time, format_eta
 from ligandai._http import AsyncHTTPTransport, HTTPTransport, parse_sse_data
 from ligandai.errors import (
     LigandAIError,
@@ -173,6 +174,39 @@ class Job(Generic[T]):
             return payload
         return _merge_result_payload(payload, loaded)
 
+    def _compute_eta_seconds(self) -> float | None:
+        """Task I — best-effort fold ETA from the job info.
+
+        Returns None when the necessary fields aren't present (e.g. generation
+        jobs, where the fit doesn't apply). For fold jobs, falls back to
+        reasonable defaults if extras are missing — better an approximate ETA
+        than no signal at all.
+        """
+        if self._job_type != "folding":
+            return None
+        extras = (getattr(self._info, "model_extra", None) or {})
+        result = self._info.result or {}
+
+        def _get(*keys: str, default: float | int | None = None):
+            for src in (extras, result):
+                for k in keys:
+                    if isinstance(src, dict) and src.get(k) is not None:
+                        return src[k]
+            return default
+
+        L = int(_get("protein_length", "L", "n_residues", default=300) or 300)
+        n_traj = int(_get("num_trajectories", "diffusion_samples", default=1) or 1)
+        n_gpu = int(_get("n_parallel_gpus", "fold_gpu_count", default=1) or 1)
+        sampling = int(_get("sampling_steps", default=15) or 15)
+        recycling = int(_get("recycling_steps", default=3) or 3)
+        return estimate_fold_time(
+            protein_length=L,
+            num_trajectories=n_traj,
+            n_parallel_gpus=n_gpu,
+            sampling_steps=sampling,
+            recycling_steps=recycling,
+        )
+
     def refresh(self) -> Job[T]:
         """Re-fetch the job status from the server."""
         path = self._status_path.format(job_id=self._job_id)
@@ -216,6 +250,11 @@ class Job(Generic[T]):
                 ``./ligandai_runs/<session_id>/``.
         """
         deadline = time.monotonic() + timeout
+        # Task I — compute one-shot fold ETA up front so on_progress can report it.
+        # We probe the job info for protein_length / num_trajectories / n_parallel_gpus;
+        # missing fields fall back to typical defaults (L=300, traj=1, gpus=1).
+        eta_seconds = self._compute_eta_seconds() if self._job_type == "folding" else None
+        wait_start = time.monotonic()
         while not self.is_terminal:
             if time.monotonic() > deadline:
                 raise LigandAITimeoutError(
@@ -224,6 +263,17 @@ class Job(Generic[T]):
                 )
             self.refresh()
             if on_progress:
+                # Annotate the JobInfo extras with ETA (non-destructive — UI consumers
+                # can read it; legacy callbacks see no shape change).
+                if eta_seconds is not None:
+                    elapsed = time.monotonic() - wait_start
+                    remaining = max(eta_seconds - elapsed, 0)
+                    try:
+                        self._info.__dict__.setdefault("eta_seconds", remaining)
+                        self._info.__dict__["eta_seconds"] = remaining
+                        self._info.__dict__["eta_human"] = format_eta(remaining)
+                    except Exception:
+                        pass
                 on_progress(self._info)
             if self.is_terminal:
                 break
