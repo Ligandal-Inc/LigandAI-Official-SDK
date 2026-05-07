@@ -42,6 +42,12 @@ from ligandai.errors import (
     LigandAIValidationError,
     NotSupportedOnReceptorDB,
 )
+from ligandai._fold_time_model import (
+    estimate_fold_time,
+    format_eta,
+    get_fold_time_model,
+    update_fold_time_model,
+)
 from ligandai.jobs import AsyncJob, Job
 from ligandai.peptide_viewer import (
     PROTEINVIEW_ATTRIBUTION,
@@ -183,9 +189,13 @@ __all__ = [
     "align_candidates_to_receptor",
     "align_pdb_to_receptor",
     "emit_update_notice",
+    "estimate_fold_time",
+    "format_eta",
+    "get_fold_time_model",
     "get_latest_pypi_version",
     "get_update_notice",
     "is_outdated",
+    "update_fold_time_model",
     "launch_proteinview",
     "load_peptide_results",
     "rank_peptides",
