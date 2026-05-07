@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.8] - 2026-05-07
+
+### Fixed
+- Docstring on `LigandAI(base_url=...)` now correctly documents the default
+  as `https://ligandai.com`. The previous text claimed `https://api.ligandai.com`,
+  which is **not** a published host (NXDOMAIN). Customers reading the docs and
+  passing `base_url="https://api.ligandai.com"` got connection refused on every
+  call; this lie is now removed and the docstring explicitly warns against
+  pointing integrations at that subdomain.
+
+### Added
+- Startup INFO log on every `LigandAI()` / `AsyncLigandAI()` construction:
+  `"LigandAI initialized: base_url=<url> tier=<tier> api_key=<first 8 chars>..."`.
+  Suppressible via standard `logging` config. Designed for customers (and the
+  AI agents they hand the SDK to) to confirm what host they're actually hitting
+  and which tier their key resolved to without round-tripping the server.
+- `LIGANDAI_DEBUG=1` environment variable enables per-request DEBUG logging on
+  the `ligandai` logger. Format: `METHOD URL -> STATUS (Xms)`. Both sync and
+  async transports honor it. Set `logging.getLogger("ligandai").setLevel(
+  logging.DEBUG)` to surface the lines.
+- Server now exposes `/api/v1/*` as a public versioned alias for the `/api/ptf/*`
+  surface (programs, sessions, workstreams, projects, targets, settings,
+  parallel/*). Resources still target `/api/ptf/*` internally for backwards
+  compatibility, but customers and integrators following the documented "v1"
+  convention can call either path.
+
+## [0.3.7] - 2026-05-06
+
+### Fixed
+- `programs.list()`, `jobs.list()`, and `receptors.list()` no longer raise
+  Pydantic validation errors against the live server. Required fields on
+  `Program`, `JobInfo`, and `ReceptorComplex` are now optional and additional
+  server-canonical fields (`programId`, `complexId`, enrichment metadata) are
+  documented as aliases. Real-world server responses lack `id` (programs use
+  `programId`, complexes use `complexId`); requiring `id` made every basic-tier
+  caller fail.
+- 403 responses are no longer blanket-classified as tier errors. The 403 mapper
+  now inspects the response payload — if the server includes `requiredTier`,
+  `tier_required`, `currentTier`, `upgrade_required`, or a `*_TIER_REQUIRED`
+  code, the SDK still raises `LigandAITierError`. Otherwise (pilot allowlists,
+  ownership checks) it raises the new `LigandAIForbidden` carrying the server's
+  actual `error_code` (e.g. `pilot_restricted`) and message. This stops the
+  SDK from telling Andrew Keene (basic tier) that "Pro tier required, you're on
+  free" when he hits an internal-only AutoResearch pilot endpoint.
+
+### Added
+- `LigandAIForbidden` exception for honest 403 reporting (exposes `reason` from
+  server `error_code`). Exported from the package root.
+
 ## [0.3.6] - 2026-05-06
 
 - Adds `ResidueRange.from_residues()` so Studio-style pocket selections can be
