@@ -360,11 +360,13 @@ asyncio.run(screen(["EGFR", "HER2", "KIT"]))
 - `docs/resources.md` — every namespace, every method
 - `docs/jobs.md` — Job class, streaming, cancellation
 - `examples/` — runnable scripts (01..22 covering every public namespace)
-- `skills/` — drop-in skill packages for the four major agent platforms:
-  - `skills/claude-code/ligandai/SKILL.md` (Claude Code CLI)
-  - `skills/claude-agent-sdk/ligandai-skill.ts` (Anthropic Agent SDK)
-  - `skills/openai-codex/{tools.json, agent_example.py}` (OpenAI tool-calling)
-  - `skills/cursor/.cursorrules` (Cursor IDE)
+- Drop-in agent skills (each lives at the location its host platform discovers automatically — copy into your own project to use):
+  - `.claude/skills/ligandai/SKILL.md` + `{generate,fold,synthesis,program}.md` — **Claude Code CLI** (auto-discovered under `.claude/skills/`)
+  - `AGENTS.md` (this file) — **OpenAI Codex agent** (the canonical location it reads)
+  - `.github/copilot-instructions.md` — **GitHub Copilot Chat / Copilot Workspace**
+  - `skills/cursor/.cursorrules` — **Cursor IDE** (legacy `.cursorrules`)
+  - `skills/claude-agent-sdk/ligandai-skill.ts` — **Anthropic Agent SDK** (programmatic)
+  - `skills/openai-tool-calling/{tools.json, agent_example.py}` — **OpenAI function-calling** integration (NOT the Codex agent — that uses AGENTS.md)
 
 ## Support
 
