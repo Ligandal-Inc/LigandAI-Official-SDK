@@ -75,6 +75,8 @@ Error codes: `E001`, `404` (program not found).
 | `/api/v1/peptides/list` | GET | All (free = masked) | `client.peptides.list(...)` |
 | `/api/v1/peptides/list_by_program` (alias of list) | GET | All (free = masked) | `client.peptides.list_by_program(...)` |
 | `/api/v1/peptides/search` | GET | All (free = masked) | `client.peptides.search(...)` |
+| `/api/v1/peptides/auto-generate-until` | POST | All (free = masked) | `client.peptides.fill_until(...)` |
+| `/api/v1/structures/:pdbId/pocket` | GET | All | `client.peptides.pocket_for_hotspots(...)` |
 | `/api/v1/peptides/:id` | GET | Paid | `client.peptides.get(id, ...)` |
 
 ### `GET /api/v1/peptides/list`
@@ -125,14 +127,132 @@ Error codes: `E001` (auth), `E429` (rate limit).
 
 ### `GET /api/v1/peptides/search`
 
-Same response shape as `/peptides/list` but tuned for cross-program
-filtering. `program_id` is optional; omit to search all your programs.
+Cross-program peptide search with the full filter set the workspace UI
+exposes. `program_id` is optional; omit to search all your programs.
+All criteria AND-combine. v0.5.1+.
+
+**Score thresholds** (any subset, optional):
+- `ipsae_min`, `iptm_min`, `pldd_min` _(float, 0..1)_
+- `kd_max` _(float, M, e.g. `1e-7` for ≤ 100 nM)_
+- `dg_max` _(float, kcal/mol — negative is better; pass `-8.0` for ≤ -8)_
+- `binder_pct_min` _(float, 0..1 — DeltaForge binder probability)_
+- `length_min`, `length_max` _(int, residues)_
+
+**Combined gates**:
+- `is_elite=true` — server-flagged elite (default iPSAE ≥ 0.80)
+- `super_elite=true` — iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND Kd < 100nM
+  AND pLDDT ≥ 0.88 (when present)
+
+**Hotspot/pocket coverage** (uses migration 085 `peptide_residue_contacts`):
+- `hotspot_residues=A:60,A:62` — chain:resi list (PDB numbering, comma-sep)
+- `pocket_residues=A:55,A:56,A:67`
+- `hotspot_hit=true` — require contact with ANY listed hotspot residue
+- `pocket_hit=true` — require contact with hotspot OR pocket
+- `contact_distance_a=5.0` — heavy-atom cutoff for "hit" (default 5.0 Å)
+
+**Categorical**:
+- `gene=KIT` — exact gene match
+- `conformation=monomer_C` — exact conformation match
+- `stability_grade=A,B` — pipe/comma list of acceptable grades
+- `immuno_grade=A,B` — same
+
+**Scope**:
+- `program_id=42` — restrict to one program's sessions
+- `session_id=session_parallel_…` — single session
+- `pdb_id=9MIR` — pdbId-scoped (matches `pocket_metadata.pdb_id`)
+
+**Pagination + sort**:
+- `limit` _(int, max 200)_, `offset` _(int)_
+- `sort=ipsae|iptm|plddt|kd|dg|length|created_at` — default `ipsae`
+- `order=asc|desc` — default `desc`
+
+Each returned peptide additionally exposes:
+- `hotspot_contacts: [{chain, residue, distance_a}]` — when
+  `hotspot_residues` was specified
+- `pocket_contacts: [{chain, residue, distance_a}]` — when
+  `pocket_residues` was specified
+- `binder_pct`, `stability_grade`, `immuno_grade` — passthrough
+
+The response also echoes back the resolved criteria in `criteria: {...}`
+so the SDK can cache key the response.
+
+### `POST /api/v1/peptides/auto-generate-until`
+
+Plan (or kick off) a generate-and-fold loop until N peptides match
+arbitrary criteria. v0.5.1+.
+
+Body (JSON):
+```json
+{
+  "gene": "BMPR1A",
+  "target_count": 25,
+  "criteria": {
+    "super_elite": true,
+    "hotspot_residues": ["A:60", "A:62"],
+    "hotspot_hit": true
+  },
+  "batch_size": 100,
+  "max_iterations": 5,
+  "budget_credits_max": 50000,
+  "mode": "plan"
+}
+```
+
+`mode: "plan"` (default) returns:
+```json
+{
+  "current_passing_count": 12,
+  "target_count": 25,
+  "remaining": 13,
+  "plan": {
+    "batches_recommended": 3,
+    "batch_size": 100,
+    "total_peptides_to_generate": 300,
+    "est_credits": 30000,
+    "est_minutes": 21,
+    "pass_rate_assumed": 0.05,
+    "strict_criteria": true,
+    "budget_ok": true
+  },
+  "criteria": { ... },
+  "gene": "BMPR1A"
+}
+```
+
+`mode: "start"` validates against `budget_credits_max` and returns
+`next_action` with the exact `/api/ptf/parallel/generate` calls to
+make. The client iterates and re-checks via `peptides.search()`.
+Empirical pass-rate guess: 5% for strict criteria (super_elite OR
+hotspot_hit OR explicit residue list), 25% otherwise.
+
+### `GET /api/v1/structures/:pdbId/pocket`
+
+Compute the pocket residues within `radius_a` Å of one or more
+hotspots. v0.5.1+.
 
 Query params:
-- `ipsae_min` _(float)_, `iptm_min` _(float)_, `kd_max` _(float, M)_.
-- `gene` _(string, optional)_ — filter by gene.
-- `program_id` _(int, optional)_ — scope to one program.
-- `limit` _(int, max 200)_, `offset` _(int)_.
+- `hotspots=A:60,A:62` _(required, chain:resi PDB numbering)_
+- `radius_a=8.0` _(float, default 8.0, range 2.0–20.0)_
+- `session_id=session_parallel_…` _(optional — compute against the
+  session's fold structure instead of canonical PDB)_
+
+Returns:
+```json
+{
+  "pdb_id": "9MIR",
+  "session_id": null,
+  "hotspots": [{"chain":"A","residue":60}, {"chain":"A","residue":62}],
+  "radius_a": 8.0,
+  "pocket_residues": [
+    {"chain":"A","residue":55,"resname":"VAL","distance_a":4.1},
+    {"chain":"A","residue":56,"resname":"LYS","distance_a":5.7}
+  ],
+  "n_pocket_residues": 12
+}
+```
+
+Multi-hotspot input is unioned with closest-distance preference per
+residue.
 
 ### `GET /api/v1/peptides/:id`
 

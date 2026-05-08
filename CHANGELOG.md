@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-05-07
+
+### Added — rich peptide search criteria + generate-loop planner + pocket lookup
+
+The SDK can now express every workspace filter directly via `peptides.search(...)`,
+plan a generate-and-fold loop until N peptides match arbitrary criteria, and
+compute the pocket residues around one or more hotspots without leaving Python.
+Pairs with platform commit `e516f36a9` on the server side.
+
+#### `peptides.search(...)` — full criterion set
+
+`peptides.search()` now accepts every score / coverage / scope filter the
+ligandai.com workspace UI exposes. All criteria AND-combine.
+
+```python
+results = client.peptides.search(
+    gene="BMPR1A",
+    ipsae_min=0.80, iptm_min=0.85, plddt_min=0.85,
+    kd_max=1e-7, dg_max=-8.0, binder_pct_min=0.7,
+    length_min=20, length_max=40,
+    super_elite=True,                          # combined gate
+    hotspot_residues=["A:60", "A:62"],         # PDB numbering, chain:resi
+    hotspot_hit=True,                          # require contact
+    pocket_residues=["A:55","A:56","A:67"],
+    pocket_hit=True,                           # hotspot OR pocket
+    contact_distance_a=5.0,
+    stability_grade=["A", "B"],
+    immuno_grade=["A", "B"],
+    conformation="monomer_C",
+    pdb_id="9MIR",                             # PDB-scoped filter
+    sort="ipsae", order="desc",
+    limit=25,
+)
+```
+
+Each returned peptide includes `hotspot_contacts` and/or `pocket_contacts`
+arrays with per-residue heavy-atom distances when residue criteria were
+specified. New optional kwargs (all backward-compatible):
+
+- **Score thresholds**: `plddt_min`, `dg_max`, `binder_pct_min`
+- **Length range**: `length_min`, `length_max`
+- **Combined gates**: `is_elite`, `super_elite`
+- **Hotspot/pocket coverage**: `hotspot_residues`, `pocket_residues`,
+  `hotspot_hit`, `pocket_hit`, `contact_distance_a`
+- **Categorical**: `stability_grade`, `immuno_grade`, `conformation`
+- **Scope**: `session_id`, `pdb_id`
+- **Sort**: `sort` (`ipsae|iptm|plddt|kd|dg|length|created_at`), `order`
+  (`asc|desc`)
+
+#### `peptides.fill_until(...)` — generate-and-fold loop planner
+
+Plan or kick off a generate-and-fold loop until `target_count` peptides
+match `criteria`. Two-phase contract avoids surprise spend:
+
+```python
+crit = {
+    "super_elite": True,
+    "hotspot_residues": ["A:60", "A:62"],
+    "hotspot_hit": True,
+}
+
+# Phase 1 — see how many already match + estimated cost to fill
+plan = client.peptides.fill_until(
+    "BMPR1A", target_count=25, criteria=crit, mode="plan"
+)
+# plan["current_passing_count"], plan["remaining"],
+# plan["plan"]["batches_recommended"], plan["plan"]["est_credits"]
+
+# Phase 2 — client-side iteration so you can checkpoint progress
+for _ in range(plan["plan"]["batches_recommended"]):
+    client.peptides.generate(gene="BMPR1A",
+                             num_peptides=plan["plan"]["batch_size"])
+    # ... wait for fold ...
+    next_plan = client.peptides.fill_until("BMPR1A", target_count=25,
+                                           criteria=crit, mode="plan")
+    if next_plan["remaining"] == 0:
+        break
+
+results = client.peptides.search(gene="BMPR1A", **crit, limit=25)
+```
+
+Empirical pass-rate guess (5% strict / 25% loose) sizes the plan; the
+loop honors `budget_credits_max` and bails before exceeding it.
+
+#### `peptides.pocket_for_hotspots(...)` — hotspot → pocket residue lookup
+
+Given a PDB id (or fold session) and one or more hotspots, returns the
+pocket residues within `radius_a` Å with per-residue heavy-atom distances.
+
+```python
+pocket = client.peptides.pocket_for_hotspots(
+    pdb_id="9MIR",
+    hotspots=["A:60", "A:62"],
+    radius_a=8.0,
+)
+# pocket["pocket_residues"] -> [{chain, residue, resname, distance_a}, ...]
+# Multi-hotspot input is unioned with closest-distance preference.
+```
+
+Wraps `GET /api/v1/structures/{pdb_id}/pocket`. Supports both canonical
+PDB and fold-session sources (`session_id=`).
+
+### Internal
+
+- Bumped `__version__` and `pyproject.toml` to 0.5.1.
+- All new methods are additive; no breaking changes from 0.5.0.
+- `peptides.search()` legacy kwargs (`min_ipsae`) remain aliased.
+
+---
+
 ## [0.5.0] - 2026-05-07
 
 ### Added — Andrew Keene SDK gaps (`peptides.list(program_id)` and friends)
