@@ -44,10 +44,36 @@ API keys are available at **all tiers including free**. Free keys have prefix
 |---|---:|---:|---|
 | free | 10 | 1 | quality only |
 | basic | 100 | 4 | quality only |
-| academia | 300 | 16 | quality + immuno + stability + cyclic |
-| pro | 300 | 25 | all |
-| pro_commercial | 300 | 25 | all |
-| enterprise | 1000 | 50 | all + batch + priority |
+| academia | **1000** | 16 | quality + immuno + stability + cyclic |
+| pro | 1000 | 25 | all |
+| pro_commercial | 1000 | 25 | all |
+| enterprise | 5000 | 50 | all + batch + priority |
+
+## Quality tiers (used by `peptides.search()` and partition reporting)
+
+These thresholds are CANONICAL — every doc/UI/agent must use the same values.
+
+| Quality tier | Gate (composite — ALL must pass) | Use case |
+|---|---|---|
+| **super-elite (structural)** | iPSAE ≥ 0.67 · iPTM ≥ 0.80 · pLDDT ≥ 88 (Proteina-Complexa structural-confidence, bioRxiv v27) | Use as headline "super-elite" count |
+| **super-elite (thermo)** | structural gate AND predicted Kd < 100 nM (DeltaForge) | Synthesis-priority subset |
+| **elite** | iPSAE ≥ 0.85 (single metric) | Strong single-metric filter |
+| **great+** | iPSAE ≥ 0.66 | **Primary hit-rate reporting metric** — typical 8–15% of generations land here |
+| **good** | iPSAE ≥ 0.50 | Decent binders worth keeping in pool |
+
+`peptides.search(super_elite=True)` applies the structural Proteina-Complexa
+gate. `peptides.search(super_elite_thermo=True)` applies the structural
+gate AND the DeltaForge Kd < 100 nM constraint — the synthesis-priority
+subset. The two are reported as SEPARATE buckets, not collapsed.
+`peptides.search(min_ipsae=0.66)` is the great+ filter.
+**Do not** report only "elite" or only iPSAE-based numbers when the user
+asks "how many quality binders do I have?" — use great+ as the headline,
+super-elite (structural) as the publication-quality subset, super-elite
+(thermo) as the synthesis-ready subset.
+
+pLDDT scale: this column is 0–100 (per-residue confidence × 100), so the
+super-elite gate uses 88 not 0.88. iPSAE/iPTM are 0–1. predicted_kd is
+stored in NANOMOLAR (nM); the thermo gate compares to 100 nM, not 1e-7 M.
 
 If a user asks for `num_peptides=500` on academia, **don't auto-clamp** —
 report the cap and ask them to upgrade or reduce. The server returns 403

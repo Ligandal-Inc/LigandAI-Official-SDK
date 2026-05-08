@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.4] - 2026-05-07
+
+### Changed — two-tier super-elite (structural + thermo)
+
+Super-elite is now reported as TWO separate buckets, never collapsed:
+
+- **Structural** (`super_elite=True`) — the Proteina-Complexa
+  structural-confidence gate from LigandForge bioRxiv v27:
+  `iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND pLDDT ≥ 88` (0–100 scale; null
+  passes). The 3-metric structural gate. Use for the headline
+  "super-elite" count.
+- **Thermo** (`super_elite_thermo=True`, NEW) — structural gate AND
+  predicted Kd < 100 nM (DeltaForge). The synthesis-priority subset
+  for users who care about predicted affinity.
+
+Fixes the prior `super_elite` gate which was effectively a no-op due
+to two server-side bugs:
+
+1. The Kd constraint compared `predicted_kd <= 100e-9` (Molar), but
+   the column is stored in nanomolar — live values are 119.5, 127.2,
+   100.0 nM, none of which would ever satisfy `≤ 1e-7 M`. Result:
+   the structural gate never returned its true population.
+2. The pLDDT constraint compared `plddt >= 0.88`, but the column is
+   on the 0–100 scale (per-residue confidence × 100). Result: every
+   non-null pLDDT row trivially passed `≥ 0.88`.
+
+Both bugs are fixed server-side. The structural gate now uses
+`pLDDT ≥ 88` (no Kd term); the thermo gate adds `predicted_kd ≤ 100`
+in nM. Counts will increase substantially for sessions where pLDDT
+was previously masking everything.
+
 ## [0.5.3] - 2026-05-07
 
 ### Changed — open `/v1/peptides/by-gene` + `/v1/peptides/:id` to ALL tiers (free included)
