@@ -209,20 +209,23 @@ job = client.peptides.generate(
 ## Resource Map (all `client.*` namespaces)
 
 ```python
-client.account       # tier, credits, billing, top-ups, session_usage
-client.structures    # gene → PDB, .from_pdb(pdb_id), .from_alphafold(uniprot_id)
-client.proteins      # info, variants, .upload_pdb(file, gene, custom_name=)
-client.discovery     # tissue markers, scRNA, GEO import
-client.diseases      # disease search, mutations
-client.goals         # autoresearch / persistent goal runs (pilot)
-client.peptides      # generate, fold, score_complex, score_pdb, search
-client.bivalent      # bispecific design (pro+)
-client.synthesis     # quote / cart / Adaptyv BLI orders
-client.programs      # programs, projects, sessions
-client.memory        # episodic memory
-client.charts        # matplotlib chart generation
-client.reports       # PDF reports
-client.jobs          # list, cancel, stream
+client.account       # tier, credits, billing, top-ups, session_usage   → examples/09, 18
+client.structures    # gene → PDB, .from_pdb, .from_alphafold, .resolve  → examples/07, 13
+client.proteins      # info, variants, .upload_pdb(file, gene, custom_name=) → examples/05, 15
+client.receptors     # ReceptorDB search/get/by_gene/chain_classification → examples/01, 10
+client.discovery     # tissue markers, scRNA, GEO import                → examples/02
+client.diseases      # disease search, mutations                        → examples/19
+client.goals         # autoresearch / persistent goal runs (pilot)      → examples/22
+client.peptides      # generate, fold, score, search, list, by_gene...  → examples/02, 04, 06, 11, 12, 20
+client.folds         # hotspot partition + pocket expansion (Stream D)  → examples/14
+client.bivalent      # bispecific design (pro+)                         → examples/03, 03b
+client.synthesis     # quote / cart / Adaptyv BLI / linker_options...   → examples/02, 17
+client.programs      # programs, projects, sessions, workstreams        → examples/08, 16
+client.memory        # episodic memory                                  → examples/19
+client.msa           # MSA generation for receptor chains               → examples/19
+client.charts        # matplotlib chart generation                      → examples/21
+client.reports       # PDF reports                                      → examples/19
+client.jobs          # list, get, cancel, stream, stop_all              → examples/16
 ```
 
 ## Error handling
@@ -356,7 +359,12 @@ asyncio.run(screen(["EGFR", "HER2", "KIT"]))
 - `docs/quickstart.md` — first 10 minutes
 - `docs/resources.md` — every namespace, every method
 - `docs/jobs.md` — Job class, streaming, cancellation
-- `examples/` — runnable scripts (01_quickstart through 06_streaming)
+- `examples/` — runnable scripts (01..22 covering every public namespace)
+- `skills/` — drop-in skill packages for the four major agent platforms:
+  - `skills/claude-code/ligandai/SKILL.md` (Claude Code CLI)
+  - `skills/claude-agent-sdk/ligandai-skill.ts` (Anthropic Agent SDK)
+  - `skills/openai-codex/{tools.json, agent_example.py}` (OpenAI tool-calling)
+  - `skills/cursor/.cursorrules` (Cursor IDE)
 
 ## Support
 

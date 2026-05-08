@@ -1,15 +1,20 @@
 // Copyright © 2026 Ligandal, Inc. All rights reserved.
 /**
- * LigandAI Codex Skill — Claude Agent SDK
+ * LigandAI Skill — Claude Agent SDK (`@anthropic-ai/agent-sdk`)
  *
- * Provides structured peptide design capabilities to Codex agents via the
+ * Provides structured peptide design capabilities to Claude agents via the
  * LigandAI Python SDK. Handles generation, folding, BLI synthesis prep, and
  * billing through typed tool interfaces. Requires LIGANDAI_API_KEY; users can
  * create keys from Settings > Developer/API Keys after logging in.
  *
  * Usage (Claude Agent SDK):
- *   import { ligandaiSkill } from "./ligandai-codex-skill";
+ *   import { ligandaiSkill } from "./ligandai-skill";
  *   const agent = new Agent({ skills: [ligandaiSkill] });
+ *
+ * Sibling skill packages for other agent platforms:
+ *   ../claude-code/    — Markdown SKILL.md manifest for Claude Code CLI
+ *   ../openai-codex/   — OpenAI tool-call schema (tools.json) + Python loop
+ *   ../cursor/         — .cursorrules for Cursor IDE
  */
 
 import type { Skill, ToolDefinition } from "@anthropic-ai/agent-sdk";

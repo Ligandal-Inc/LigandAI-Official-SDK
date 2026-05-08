@@ -1,0 +1,175 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_design_peptide",
+      "description": "Generate peptide binders against a target gene or PDB ID using LigandForge v6.5 + Boltz-2. Server-enforced tier caps: free=10, basic=100, academia=300, pro=300, enterprise=1000. Returns a session_id you must poll with ligandai_get_job.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gene": {"type": "string", "description": "Gene symbol (EGFR) OR PDB ID (9MIR)"},
+          "num_peptides": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 10},
+          "length_min": {"type": "integer", "default": 20},
+          "length_max": {"type": "integer", "default": 70},
+          "auto_fold": {"type": "boolean", "default": true},
+          "max_folds": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 5},
+          "num_trajectories": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+          "sampling_steps": {"type": "integer", "minimum": 15, "maximum": 1000, "default": 50},
+          "fold_strategy": {"type": "string", "enum": ["consolidated", "distributed", "quality_ranked"], "default": "quality_ranked"},
+          "target_chains": {"type": "array", "items": {"type": "string"}, "description": "Restrict design+fold to specific chain(s) of the receptor"},
+          "variant_id": {"type": "integer", "description": "Use a previously-uploaded custom PDB/CIF as the receptor"},
+          "quality_guided": {"type": "boolean", "default": false},
+          "immunogenicity": {"type": "boolean", "default": false, "description": "Academia+ tier: avoid MHC-binding motifs"},
+          "serum_stability": {"type": "boolean", "default": false},
+          "cyclic_mode": {"type": "string", "enum": ["disulfide", "lactam", "head_tail_contact"]},
+          "program_id": {"type": "integer"}
+        },
+        "required": ["gene"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_get_job",
+      "description": "Poll a generation or fold session for status and top-N results. Returns iPSAE / iPTM / predicted Kd per peptide.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": {"type": "string"},
+          "top_n": {"type": "integer", "default": 10}
+        },
+        "required": ["session_id"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_estimate_cost",
+      "description": "Estimate credits + USD before submitting a generation/fold run.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gene": {"type": "string"},
+          "num_peptides": {"type": "integer", "default": 10},
+          "max_folds": {"type": "integer", "default": 5},
+          "include_bli": {"type": "boolean", "default": false},
+          "include_deltaforge": {"type": "boolean", "default": true}
+        },
+        "required": ["gene"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_get_credits",
+      "description": "Return current credit balance, tier, and 30-day burn rate.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_resolve_pdb",
+      "description": "Resolve a PDB ID or gene to chain layout / source / canonical structure. Use this BEFORE submitting design when the user gave a PDB id, not a gene name.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pdb_id": {"type": "string"},
+          "gene": {"type": "string"},
+          "uniprot_id": {"type": "string"}
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_upload_pdb",
+      "description": "Upload a custom PDB/CIF on disk so it can be used as the receptor in subsequent generation calls. Returns variant_id.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {"type": "string", "description": "Absolute path to .pdb or .cif on the agent's filesystem"},
+          "gene": {"type": "string", "description": "Symbolic name to attach to the uploaded structure"},
+          "custom_name": {"type": "string"}
+        },
+        "required": ["file_path", "gene"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_search_peptides",
+      "description": "Cross-program peptide search by score thresholds. ALL filters AND-combine. Free tier: sequences are masked, polyalanine PDBs only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "program_id": {"type": "integer"},
+          "session_id": {"type": "string"},
+          "gene": {"type": "string"},
+          "ipsae_min": {"type": "number"},
+          "iptm_min": {"type": "number"},
+          "kd_max_nm": {"type": "number"},
+          "is_elite": {"type": "boolean"},
+          "super_elite": {"type": "boolean", "description": "iPSAE>=0.67 AND iPTM>=0.8 AND Kd<100nM AND pLDDT>=0.88"},
+          "hotspot_residues": {"type": "string", "description": "Comma list e.g. 'A:60,A:62'"},
+          "limit": {"type": "integer", "default": 50, "maximum": 200}
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_recommend_linker",
+      "description": "Get BLI biotinylation linker recommendation for a candidate peptide. Pass pdb_job_id for contact-map-aware orientation analysis.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sequence": {"type": "string"},
+          "gene": {"type": "string"},
+          "pdb_job_id": {"type": "string"},
+          "intended_application": {"type": "string", "enum": ["bli_validation", "therapeutic", "conjugation", "research"], "default": "bli_validation"}
+        },
+        "required": ["sequence"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ligandai_adaptyv_submit",
+      "description": "Submit top peptide candidates to Adaptyv Foundry for SPPS synthesis + BLI affinity validation. Run ligandai_recommend_linker first to confirm biotin placement.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "experiment_name": {"type": "string"},
+          "gene": {"type": "string", "description": "Target gene to look up in the Adaptyv catalogue"},
+          "sequences": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 96,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string"},
+                "sequence": {"type": "string"}
+              },
+              "required": ["name", "sequence"]
+            }
+          },
+          "include_bli": {"type": "boolean", "default": true}
+        },
+        "required": ["experiment_name", "gene", "sequences"]
+      }
+    }
+  }
+]
