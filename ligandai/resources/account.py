@@ -57,20 +57,27 @@ class Account(Resource):
         )
 
     def credits(self) -> Credits:
-        """``GET /api/user-credits`` — current credit balance.
+        """``GET /api/credits`` — current credit balance.
 
-        Sentinel-sized balances (``>= 1e10``) are flagged as unlimited and
-        emit a one-shot stderr warning — these usually indicate the server
-        returned a superadmin sentinel or misrouted the tier resolution.
-        Inspect :attr:`Credits.is_unlimited` to distinguish.
+        Historical note: the SDK previously called ``/api/user-credits`` (the
+        sdk-alias path). That alias was leaking the superadmin sentinel
+        balance to every API-key caller because the upstream localhost
+        auto-login fires BEFORE the alias's API-key resolution. Until the
+        server-side fix is deployed (sdk-alias-routes.ts:745-791), the SDK
+        calls the canonical ``/api/credits`` route directly — that one
+        validates the API key correctly and returns per-user balance + tier.
+
+        Sentinel-sized balances (``>= 1e10``) still get a one-shot stderr
+        warning so genuine superadmins know they're hitting the unlimited
+        sentinel and not a tier-leak bug.
         """
-        payload = self._transport.request("GET", "/api/user-credits") or {}
+        payload = self._transport.request("GET", "/api/credits") or {}
         return _warn_if_sentinel_balance(Credits.model_validate(payload or {}))
 
     def credit_history(self, limit: int = 50) -> list[CreditTransaction]:
-        """``GET /api/user-credits/history``."""
+        """``GET /api/credits/transactions`` — credit transaction history."""
         payload = self._transport.request(
-            "GET", "/api/user-credits/history", params={"limit": limit}
+            "GET", "/api/credits/transactions", params={"limit": limit}
         )
         items = payload if isinstance(payload, list) else (payload or {}).get("transactions", [])
         return [CreditTransaction.model_validate(it) for it in items]
@@ -219,13 +226,13 @@ class AsyncAccount(AsyncResource):
         )
 
     async def credits(self) -> Credits:
-        """Async variant of :meth:`Account.credits`."""
-        payload = await self._transport.request("GET", "/api/user-credits") or {}
+        """Async variant of :meth:`Account.credits` — calls ``/api/credits``."""
+        payload = await self._transport.request("GET", "/api/credits") or {}
         return _warn_if_sentinel_balance(Credits.model_validate(payload or {}))
 
     async def credit_history(self, limit: int = 50) -> list[CreditTransaction]:
         payload = await self._transport.request(
-            "GET", "/api/user-credits/history", params={"limit": limit}
+            "GET", "/api/credits/transactions", params={"limit": limit}
         )
         items = payload if isinstance(payload, list) else (payload or {}).get("transactions", [])
         return [CreditTransaction.model_validate(it) for it in items]
