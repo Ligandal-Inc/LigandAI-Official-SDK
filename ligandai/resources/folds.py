@@ -1,7 +1,8 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Fold-result filtering and pocket-expansion endpoints.
 
-Stream D / W4 (dre-twv8o). Wraps:
+Stream D / W4 (dre-twv8o) + Stream Q (LIGANDAI_ALPHA_V2-7dat3, native PPI bucket).
+Wraps:
 
 - :meth:`Folds.partition_by_hotspot` → ``POST /api/folds/partition-by-hotspot``
 - :meth:`Folds.expand_hotspot`       → ``GET  /api/folds/expand-hotspot``
@@ -20,8 +21,9 @@ Example workflow::
         radius_a=8.0,
     )
 
-    # 2. Partition the session's folds by direct contact with CYS148 (5 Å)
-    #    and proximity to the auto-expanded pocket.
+    # 2. Partition the session's folds by direct contact with CYS148 (5 Å),
+    #    proximity to the auto-expanded pocket, and the native PPI interface
+    #    (e.g. BMPR1A↔RGMB chain interface for BMPR1A+RGMB folds).
     result = client.folds.partition_by_hotspot(
         session_id="ptf_abc123",
         hotspots=[{"chain": "C", "residue": 148, "numbering": "pdb"}],
@@ -34,7 +36,26 @@ Example workflow::
 
     print(f"{result['stats']['passes_hotspot']} of {result['stats']['total']} "
           f"peptides hit CYS148; "
-          f"{result['stats']['passes_pocket']} more landed in the pocket.")
+          f"{result['stats']['passes_pocket']} more landed in the pocket; "
+          f"{result['stats']['passes_native_ppi']} more landed on the "
+          f"native multi-chain receptor interface.")
+
+The four buckets are mutually exclusive — each fold lands in exactly one.
+Order of precedence (highest to lowest):
+
+    1. ``passes_hotspot``     — direct contact with a user hotspot
+    2. ``passes_pocket``      — contact with a user-supplied pocket residue
+    3. ``passes_native_ppi``  — contact with the native multi-chain receptor
+                                 interface (auto-detected from the fold PDB
+                                 by inter-chain Cα ≤ 8 Å contacts among
+                                 receptor chains)
+    4. ``wrong_interface``    — fold contacted something else (or had no
+                                 contact data)
+
+``passes_native_ppi`` requires a multi-chain receptor — single-chain receptors
+will have an empty ``passes_native_ppi`` list. Folds in this bucket carry an
+``interface_match_residues`` array describing which receptor residues from
+the native interface the peptide contacted.
 """
 
 from __future__ import annotations
@@ -67,7 +88,7 @@ class Folds(Resource):
         pocket_residues: list[HotspotSpec] | None = None,
         distance_threshold_a: float = 5.0,
     ) -> dict[str, Any]:
-        """Partition a session's fold results by hotspot/pocket contact.
+        """Partition a session's fold results into four mutually exclusive buckets.
 
         :param session_id:           PTF session ID.
         :param hotspots:             Residues the peptide MUST directly contact
@@ -78,9 +99,19 @@ class Folds(Resource):
                                      placed here — hotspot match takes priority.
         :param distance_threshold_a: Heavy-atom min-distance cutoff in Å.
 
-        :returns: Dict with ``passes_hotspot``, ``passes_pocket``,
-                  ``wrong_interface``, and ``stats`` keys. See docstring for
-                  the example workflow.
+        :returns: Dict with the four bucket arrays plus ``stats``:
+
+                  - ``passes_hotspot``     — fold contacted a user hotspot
+                  - ``passes_pocket``      — fold contacted a pocket residue
+                  - ``passes_native_ppi``  — fold contacted the native
+                    multi-chain receptor interface (e.g. BMPR1A↔RGMB).
+                    Each entry includes ``interface_match_residues`` listing
+                    which native interface residues the peptide touched.
+                    Empty for single-chain receptors. Added in SDK 0.5.2.
+                  - ``wrong_interface``    — fold contacted something else,
+                    or had no contact data (``reason='no_contact_data'``).
+
+                  Order of precedence: hotspot > pocket > native_ppi > wrong.
         """
         body: dict[str, Any] = {
             "session_id": session_id,

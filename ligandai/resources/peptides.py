@@ -1818,6 +1818,58 @@ class Peptides(Resource):
         )
         return CostEstimate.model_validate(payload)
 
+    def download_pdb(
+        self,
+        peptide_id: int | str,
+        save_to: str | None = None,
+    ) -> bytes:
+        """``GET /api/v1/structures/{id}/pdb`` — download raw PDB content.
+
+        Convenience helper that uses the ``pdb_url`` returned on every peptide
+        in :meth:`list`, :meth:`search`, and :meth:`get`. Resolves to the same
+        endpoint as ``client.structures.get_pdb(peptide_id)``.
+
+        Args:
+            peptide_id: ``ptf_fold_results.id`` (positive integer). Strings
+                are accepted and parsed.
+            save_to: Optional file path; when provided, writes the PDB bytes
+                to disk and returns them. Parent directory must already
+                exist.
+
+        Returns:
+            Raw PDB content as bytes.
+
+        Tier behavior: free-tier keys receive a side-chain-scrambled PDB
+        with a ``LIGANDAI FREE TIER — SIDE CHAIN IDENTITY REDACTED`` REMARK
+        header. Paid tiers receive the original. The peptide row's
+        ``_pdb_masked: True`` flag indicates when the response will be
+        scrambled.
+        """
+        try:
+            id_int = int(peptide_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"peptide_id must be a positive integer (got {peptide_id!r})"
+            ) from exc
+        path = f"/api/v1/structures/{id_int}/pdb"
+        # Transport returns the raw bytes when the response is non-JSON.
+        body = self._transport.request("GET", path)
+        if isinstance(body, dict) and "pdb_content" in body:
+            content = body.get("pdb_content") or ""
+            data = content.encode("utf-8") if isinstance(content, str) else content
+        elif isinstance(body, (bytes, bytearray)):
+            data = bytes(body)
+        elif isinstance(body, str):
+            data = body.encode("utf-8")
+        else:
+            raise RuntimeError(f"Unexpected /v1/structures/{id_int}/pdb response shape: {type(body).__name__}")
+        if save_to:
+            import os
+            os.makedirs(os.path.dirname(os.path.abspath(save_to)) or ".", exist_ok=True)
+            with open(save_to, "wb") as f:
+                f.write(data)
+        return data
+
 
 # -- Async resource ---------------------------------------------------------
 
