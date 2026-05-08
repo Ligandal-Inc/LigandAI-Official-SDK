@@ -1329,51 +1329,188 @@ class Peptides(Resource):
         classification: str | None = None,
         ipsae_min: float | None = None,
         iptm_min: float | None = None,
+        plddt_min: float | None = None,
         kd_max: float | None = None,
+        dg_max: float | None = None,
+        binder_pct_min: float | None = None,
+        length_min: int | None = None,
+        length_max: int | None = None,
+        is_elite: bool | None = None,
+        super_elite: bool | None = None,
+        hotspot_residues: list[str] | None = None,
+        pocket_residues: list[str] | None = None,
+        hotspot_hit: bool | None = None,
+        pocket_hit: bool | None = None,
+        contact_distance_a: float | None = None,
+        stability_grade: list[str] | None = None,
+        immuno_grade: list[str] | None = None,
+        conformation: str | None = None,
         program_id: int | None = None,
-        min_ipsae: float | None = None,  # alias for ipsae_min (back-compat)
+        session_id: str | None = None,
+        pdb_id: str | None = None,
+        sort: str = "ipsae",
+        order: str = "desc",
+        min_ipsae: float | None = None,  # legacy alias
         limit: int = 20,
         offset: int = 0,
     ) -> list[Peptide]:
-        """``GET /api/v1/peptides/search`` — cross-program peptide search.
+        """``GET /api/v1/peptides/search`` — rich cross-program peptide search.
 
-        v0.5.0 backs this with the new `/v1/peptides/search` endpoint. You can
-        now search across all your programs by score thresholds without
-        specifying a gene first.
+        Supports every criterion the workspace UI exposes plus a few extras
+        for SDK-driven workflows. All filters AND-combine.
 
         Args:
-            gene: Optional gene symbol filter.
-            classification: Reserved (server-side classification filter; not
-                yet wired to the new endpoint — passes through anyway).
-            ipsae_min: Minimum iPSAE score (e.g. 0.8 for high-confidence).
-            iptm_min: Minimum ipTM score.
-            kd_max: Maximum predicted Kd in Molar (e.g. ``1e-8`` = 10nM).
-            program_id: Optional program scope (omit to search across all).
-            min_ipsae: Legacy alias for ``ipsae_min``.
+            gene: Gene symbol filter (uppercased server-side).
+            ipsae_min / iptm_min / plddt_min: Minimum Boltz-2 quality scores.
+            kd_max: Maximum predicted Kd in Molar (e.g. ``1e-8`` = 10 nM).
+            dg_max: Maximum predicted ΔG in kcal/mol (negative is better; pass
+                ``-8.0`` for "ΔG ≤ -8 kcal/mol").
+            binder_pct_min: Minimum DeltaForge binder probability (0..1).
+            length_min / length_max: Peptide length range in residues.
+            is_elite: Server-flagged elite (iPSAE ≥ 0.80 by default).
+            super_elite: Combined gate — iPSAE ≥ 0.67, iPTM ≥ 0.80,
+                Kd < 100 nM, pLDDT ≥ 0.88 (when present).
+            hotspot_residues: List of ``"chain:resi"`` strings (PDB
+                numbering) for the residues you wanted the peptide to
+                contact, e.g. ``["A:60", "A:62"]``.
+            pocket_residues: Same shape, for the surrounding pocket.
+            hotspot_hit: Require the peptide's fold to contact AT LEAST one
+                listed hotspot residue within ``contact_distance_a`` Å.
+            pocket_hit: Require contact with the hotspot OR pocket set.
+            contact_distance_a: Heavy-atom cutoff for "hit" (default 5.0 Å).
+            stability_grade / immuno_grade: List of acceptable grades
+                (e.g. ``["A", "B"]``).
+            conformation: Exact conformation string filter.
+            program_id / session_id / pdb_id: Scope filters.
+            sort: Sort key — one of ``ipsae`` | ``iptm`` | ``plddt`` |
+                ``kd`` | ``dg`` | ``length`` | ``created_at``.
+            order: ``"asc"`` or ``"desc"`` (default ``"desc"``).
             limit: Page size (max 200).
             offset: Pagination offset.
+
+        Returns:
+            List of peptides matching all criteria, sorted by ``sort``/``order``.
+            Each peptide includes ``hotspot_contacts`` / ``pocket_contacts``
+            arrays when residue criteria were specified, with per-residue
+            heavy-atom distances.
         """
         if min_ipsae is not None and ipsae_min is None:
             ipsae_min = min_ipsae
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if gene is not None:
-            params["gene"] = gene.upper()
-        if classification is not None:
-            params["classification"] = classification
-        if ipsae_min is not None:
-            params["ipsae_min"] = ipsae_min
-        if iptm_min is not None:
-            params["iptm_min"] = iptm_min
-        if kd_max is not None:
-            params["kd_max"] = kd_max
-        if program_id is not None:
-            params["program_id"] = program_id
+        params: dict[str, Any] = {"limit": limit, "offset": offset, "sort": sort, "order": order}
+        if gene is not None: params["gene"] = gene.upper()
+        if classification is not None: params["classification"] = classification
+        if ipsae_min is not None: params["ipsae_min"] = ipsae_min
+        if iptm_min is not None: params["iptm_min"] = iptm_min
+        if plddt_min is not None: params["pldd_min"] = plddt_min
+        if kd_max is not None: params["kd_max"] = kd_max
+        if dg_max is not None: params["dg_max"] = dg_max
+        if binder_pct_min is not None: params["binder_pct_min"] = binder_pct_min
+        if length_min is not None: params["length_min"] = length_min
+        if length_max is not None: params["length_max"] = length_max
+        if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
+        if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
+        if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
+        if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
+        if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)
+        if pocket_residues: params["pocket_residues"] = ",".join(pocket_residues)
+        if contact_distance_a is not None: params["contact_distance_a"] = contact_distance_a
+        if stability_grade: params["stability_grade"] = ",".join(stability_grade)
+        if immuno_grade: params["immuno_grade"] = ",".join(immuno_grade)
+        if conformation is not None: params["conformation"] = conformation
+        if program_id is not None: params["program_id"] = program_id
+        if session_id is not None: params["session_id"] = session_id
+        if pdb_id is not None: params["pdb_id"] = pdb_id.upper()
 
         payload = self._transport.request(
             "GET", "/api/v1/peptides/search", params=params
         ) or {}
         items = payload.get("peptides", []) if isinstance(payload, dict) else (payload or [])
         return [Peptide.model_validate(p) for p in items]
+
+    def fill_until(
+        self,
+        gene: str,
+        target_count: int = 10,
+        criteria: dict[str, Any] | None = None,
+        batch_size: int = 100,
+        max_iterations: int = 3,
+        budget_credits_max: int = 50000,
+        mode: str = "plan",
+    ) -> dict[str, Any]:
+        """``POST /api/v1/peptides/auto-generate-until`` — generate-and-fold loop.
+
+        Plan or kick off a generate-and-fold loop until ``target_count``
+        peptides match ``criteria``. ``criteria`` accepts the same keys as
+        :meth:`search` (e.g. ``ipsae_min``, ``kd_max``, ``hotspot_residues``,
+        ``hotspot_hit``, ``super_elite``).
+
+        With ``mode="plan"`` (default) the server returns:
+            * ``current_passing_count`` — peptides already in the DB that match
+            * ``remaining`` — how many more you need
+            * ``plan.batches_recommended`` / ``est_credits`` / ``est_minutes``
+
+        With ``mode="start"`` the server validates the plan against your
+        ``budget_credits_max`` and returns a ``next_action`` describing the
+        exact /api/ptf/parallel/generate calls to make. The SDK does NOT
+        currently spawn the loop server-side — you wrap it in your own
+        ``while`` so you can checkpoint progress and inspect intermediate
+        peptides.
+
+        Example (loop client-side until 25 super-elite peptides found):
+
+            crit = {"super_elite": True, "hotspot_residues": ["A:60","A:62"], "hotspot_hit": True}
+            for _ in range(5):
+                plan = client.peptides.fill_until("BMPR1A", target_count=25, criteria=crit, mode="plan")
+                if plan["remaining"] == 0:
+                    break
+                client.peptides.generate(gene="BMPR1A", num_peptides=plan["plan"]["batch_size"])
+                client.peptides.wait_for_session(...)  # poll generation status
+            results = client.peptides.search(gene="BMPR1A", **crit, limit=25)
+        """
+        body = {
+            "gene": gene.upper() if gene else None,
+            "target_count": target_count,
+            "criteria": criteria or {},
+            "batch_size": batch_size,
+            "max_iterations": max_iterations,
+            "budget_credits_max": budget_credits_max,
+            "mode": mode,
+        }
+        return self._transport.request(
+            "POST", "/api/v1/peptides/auto-generate-until", json=body
+        ) or {}
+
+    def pocket_for_hotspots(
+        self,
+        pdb_id: str | None = None,
+        hotspots: list[str] | None = None,
+        radius_a: float = 8.0,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """``GET /api/v1/structures/{pdb_id}/pocket`` — pocket residues
+        within ``radius_a`` Å of one or more hotspots.
+
+        Args:
+            pdb_id: RCSB PDB code (e.g. ``"9MIR"``). Required unless
+                ``session_id`` is provided.
+            hotspots: ``["A:60", "A:62"]`` — chain:residue PDB numbering.
+            radius_a: Heavy-atom radius for pocket inclusion (default 8.0).
+            session_id: Compute the pocket from a fold session's structure
+                instead of the canonical PDB.
+
+        Returns:
+            ``{ pdb_id, hotspots, radius_a, pocket_residues, n_pocket_residues }``.
+            Each pocket residue is ``{ chain, residue (PDB), resname, distance_a }``.
+        """
+        if not pdb_id and not session_id:
+            raise ValueError("pocket_for_hotspots requires either pdb_id or session_id")
+        if not hotspots:
+            raise ValueError("pocket_for_hotspots requires hotspots, e.g. ['A:60','A:62']")
+        params: dict[str, Any] = {"hotspots": ",".join(hotspots), "radius_a": radius_a}
+        if session_id:
+            params["session_id"] = session_id
+        path = f"/api/v1/structures/{(pdb_id or '').upper()}/pocket"
+        return self._transport.request("GET", path, params=params) or {}
 
     def search_by_pocket(
         self,
