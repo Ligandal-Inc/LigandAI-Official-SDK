@@ -1401,7 +1401,7 @@ class Peptides(Resource):
         if classification is not None: params["classification"] = classification
         if ipsae_min is not None: params["ipsae_min"] = ipsae_min
         if iptm_min is not None: params["iptm_min"] = iptm_min
-        if plddt_min is not None: params["pldd_min"] = plddt_min
+        if plddt_min is not None: params["plddt_min"] = plddt_min
         if kd_max is not None: params["kd_max"] = kd_max
         if dg_max is not None: params["dg_max"] = dg_max
         if binder_pct_min is not None: params["binder_pct_min"] = binder_pct_min
@@ -1571,9 +1571,10 @@ class Peptides(Resource):
         program/session coverage. Follow up with :meth:`list` for the
         actual peptide rows.
 
-        **Auth:** Paid tiers only (basic/academia/pro/enterprise/superadmin).
-        Free keys raise :class:`~ligandai.errors.LigandAIPaidTierRequired` from the
-        server's 402 response.
+        **Auth (changed v0.5.3):** Open to ALL tiers including free. Free
+        users see aggregate counts only — sequences and structures from
+        downstream :meth:`list` / :meth:`get` are masked (first 4 AA +
+        ``********``) and PDBs are returned as polyalanine.
 
         Args:
             genes: Optional whitelist (case-insensitive). When omitted, all
@@ -1592,8 +1593,6 @@ class Peptides(Resource):
             the server's ``total`` (in the raw response, not exposed here)
             by your ``limit``.
         """
-        if self._client is not None:
-            self._client._require_paid_tier()
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if genes:
             params["genes"] = ",".join(g.upper() for g in genes if g)
@@ -1608,6 +1607,58 @@ class Peptides(Resource):
         payload = self._transport.request("GET", "/api/v1/peptides/by-gene", params=params) or {}
         rows = payload.get("rows", []) if isinstance(payload, dict) else []
         return [GeneSummary.model_validate(r) for r in rows]
+
+    def by_pdb(
+        self,
+        pdb: str | list[str],
+        min_ipsae: float | None = None,
+        since: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """``GET /api/v1/peptides/by-pdb`` — peptide aggregation pivoted by target PDB code.
+
+        Mirror of :meth:`by_gene` for users whose generation requests
+        targeted a specific PDB ID instead of a gene symbol (common for
+        custom-uploaded structures or multi-chain complexes — e.g.
+        ``"9MIR"`` for the BMPR1A–RGMB heteromer). Returns one row per
+        ``(pdb_code, gene)`` combination with session count + total
+        peptides generated + activity timestamps.
+
+        **Auth:** Open to ALL tiers (free included). Aggregate counts only;
+        sequences and structures still tier-gated through
+        :meth:`list` / :meth:`get` / :meth:`download_pdb`.
+
+        Args:
+            pdb: One PDB code or a list of codes (case-insensitive).
+            min_ipsae: Server-side iPSAE threshold (currently informational
+                only — the per-row endpoints carry the real iPSAE filter).
+            since: Only sessions newer than this timestamp.
+            limit: Page size (max 200).
+            offset: Pagination offset.
+
+        Returns:
+            List of dicts with ``pdbCode``, ``gene``, ``sessions``,
+            ``peptidesGenerated``, ``firstActivityAt``, ``lastActivityAt``.
+
+        Example:
+            >>> rows = client.peptides.by_pdb("9MIR")
+            >>> for r in rows:
+            ...     print(r["pdbCode"], r["gene"], r["sessions"], r["peptidesGenerated"])
+            9MIR BMPR1A 3 150
+        """
+        codes = [pdb] if isinstance(pdb, str) else list(pdb)
+        params: dict[str, Any] = {
+            "pdb": ",".join(c.upper() for c in codes if c),
+            "limit": limit,
+            "offset": offset,
+        }
+        if min_ipsae is not None:
+            params["min_ipsae"] = min_ipsae
+        if since is not None:
+            params["since"] = since.isoformat()
+        payload = self._transport.request("GET", "/api/v1/peptides/by-pdb", params=params) or {}
+        return payload.get("rows", []) if isinstance(payload, dict) else []
 
     def list(
         self,
@@ -2276,28 +2327,64 @@ class AsyncPeptides(AsyncResource):
         classification: str | None = None,
         ipsae_min: float | None = None,
         iptm_min: float | None = None,
+        plddt_min: float | None = None,
         kd_max: float | None = None,
+        dg_max: float | None = None,
+        binder_pct_min: float | None = None,
+        length_min: int | None = None,
+        length_max: int | None = None,
+        is_elite: bool | None = None,
+        super_elite: bool | None = None,
+        hotspot_residues: list[str] | None = None,
+        pocket_residues: list[str] | None = None,
+        hotspot_hit: bool | None = None,
+        pocket_hit: bool | None = None,
+        contact_distance_a: float | None = None,
+        stability_grade: list[str] | None = None,
+        immuno_grade: list[str] | None = None,
+        conformation: str | None = None,
         program_id: int | None = None,
-        min_ipsae: float | None = None,  # alias for ipsae_min
+        session_id: str | None = None,
+        pdb_id: str | None = None,
+        sort: str = "ipsae",
+        order: str = "desc",
+        min_ipsae: float | None = None,  # legacy alias
         limit: int = 20,
         offset: int = 0,
     ) -> list[Peptide]:
-        """Async variant of :meth:`Peptides.search`."""
+        """Async variant of :meth:`Peptides.search`.
+
+        Mirrors the full sync signature — every score/coverage/scope filter
+        the workspace UI exposes. See :meth:`Peptides.search` for argument
+        documentation. All criteria AND-combine.
+        """
         if min_ipsae is not None and ipsae_min is None:
             ipsae_min = min_ipsae
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if gene is not None:
-            params["gene"] = gene.upper()
-        if classification is not None:
-            params["classification"] = classification
-        if ipsae_min is not None:
-            params["ipsae_min"] = ipsae_min
-        if iptm_min is not None:
-            params["iptm_min"] = iptm_min
-        if kd_max is not None:
-            params["kd_max"] = kd_max
-        if program_id is not None:
-            params["program_id"] = program_id
+        params: dict[str, Any] = {"limit": limit, "offset": offset, "sort": sort, "order": order}
+        if gene is not None: params["gene"] = gene.upper()
+        if classification is not None: params["classification"] = classification
+        if ipsae_min is not None: params["ipsae_min"] = ipsae_min
+        if iptm_min is not None: params["iptm_min"] = iptm_min
+        if plddt_min is not None: params["plddt_min"] = plddt_min
+        if kd_max is not None: params["kd_max"] = kd_max
+        if dg_max is not None: params["dg_max"] = dg_max
+        if binder_pct_min is not None: params["binder_pct_min"] = binder_pct_min
+        if length_min is not None: params["length_min"] = length_min
+        if length_max is not None: params["length_max"] = length_max
+        if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
+        if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
+        if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
+        if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
+        if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)
+        if pocket_residues: params["pocket_residues"] = ",".join(pocket_residues)
+        if contact_distance_a is not None: params["contact_distance_a"] = contact_distance_a
+        if stability_grade: params["stability_grade"] = ",".join(stability_grade)
+        if immuno_grade: params["immuno_grade"] = ",".join(immuno_grade)
+        if conformation is not None: params["conformation"] = conformation
+        if program_id is not None: params["program_id"] = program_id
+        if session_id is not None: params["session_id"] = session_id
+        if pdb_id is not None: params["pdb_id"] = pdb_id.upper()
+
         payload = await self._transport.request(
             "GET", "/api/v1/peptides/search", params=params
         ) or {}
@@ -2352,8 +2439,6 @@ class AsyncPeptides(AsyncResource):
         offset: int = 0,
     ) -> list[GeneSummary]:
         """Async variant of :meth:`Peptides.by_gene`."""
-        if self._client is not None:
-            self._client._require_paid_tier()
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if genes:
             params["genes"] = ",".join(g.upper() for g in genes if g)
@@ -2370,6 +2455,29 @@ class AsyncPeptides(AsyncResource):
         ) or {}
         rows = payload.get("rows", []) if isinstance(payload, dict) else []
         return [GeneSummary.model_validate(r) for r in rows]
+
+    async def by_pdb(
+        self,
+        pdb: str | list[str],
+        min_ipsae: float | None = None,
+        since: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Async variant of :meth:`Peptides.by_pdb`."""
+        codes = [pdb] if isinstance(pdb, str) else list(pdb)
+        params: dict[str, Any] = {
+            "pdb": ",".join(c.upper() for c in codes if c),
+            "limit": limit, "offset": offset,
+        }
+        if min_ipsae is not None:
+            params["min_ipsae"] = min_ipsae
+        if since is not None:
+            params["since"] = since.isoformat()
+        payload = await self._transport.request(
+            "GET", "/api/v1/peptides/by-pdb", params=params
+        ) or {}
+        return payload.get("rows", []) if isinstance(payload, dict) else []
 
     async def list(
         self,
