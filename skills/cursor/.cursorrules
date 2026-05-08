@@ -1,0 +1,104 @@
+# LigandAI / LigandForge / Ligandal — Cursor workspace rules
+
+When the user works with peptide design, structure prediction, ReceptorDB, or
+Adaptyv synthesis in this workspace, use the `ligandai` Python SDK at
+`https://github.com/ligandal/ligandai-python-sdk` (PyPI: `pip install ligandai`).
+
+## Global rules
+
+1. ALWAYS load `LIGANDAI_API_KEY` from env. NEVER hardcode keys in source.
+   - Free key prefix: `lgai_free_`
+   - Paid prefixes: `lgai_basic_`, `lgai_edu_`, `lgai_pro_`, `lgai_ent_`
+2. ALWAYS pass `fold_gpus=` matching the user's tier:
+   - free=1, basic=4, academia=16, pro=25, enterprise=50
+3. NEVER clamp `num_peptides` client-side. Let the server reject and surface
+   the `LigandAITierError.required_tier` to the user.
+4. NEVER pass a CIF file path as `gene=` — call `client.proteins.upload_pdb()`
+   first and pass `variant_id=`.
+5. NEVER pass a PDB ID as `gene=` blindly — call `client.structures.from_pdb()`
+   first to confirm chain layout, then pass `target_chains=`.
+6. NEVER use `mock_data` / fake outputs. Use real API calls or fail honestly.
+
+## Reference paths in this repo
+
+- `ligandai/resources/` — every public namespace (account, peptides, folds,
+  structures, programs, proteins, receptors, jobs, synthesis, charts, goals,
+  memory, msa, reports, diseases, discovery, bivalent).
+- `examples/` — runnable scripts numbered 01..22 covering every namespace.
+  Read these before writing new code.
+- `AGENTS.md` — the canonical primer for LLM agents using this SDK.
+- `skills/claude-code/ligandai/SKILL.md` — capability map by namespace.
+- `skills/openai-codex/tools.json` — OpenAI tool schema (also valid as a
+  reference for any function-calling LLM).
+
+## Workflow templates
+
+When the user asks "generate binders for GENE":
+
+```python
+from ligandai import LigandAI
+
+client = LigandAI()
+caps = {"free": 1, "basic": 4, "academia": 16, "pro": 25, "pro_commercial": 25, "enterprise": 50}
+job = client.peptides.generate(
+    gene="<GENE>",
+    num_peptides=50,
+    auto_fold=True,
+    top_n_fold=10,
+    fold_gpus=caps.get(client.tier, 1),
+)
+result = job.wait(timeout=1800)
+```
+
+When the user gives a PDB ID + chain:
+
+```python
+struct = client.structures.from_pdb("<PDB_ID>")
+job = client.peptides.generate(
+    gene="<PDB_ID>", target_chains=["<CHAIN>"], num_peptides=50, auto_fold=True,
+)
+```
+
+When the user has a custom CIF on disk:
+
+```python
+from pathlib import Path
+up = client.proteins.upload_pdb(file=Path("<PATH>"), gene="<NAME>")
+job = client.peptides.generate(gene="<NAME>", variant_id=up.id, auto_fold=True)
+```
+
+## Error handling (always wrap in try/except)
+
+```python
+from ligandai.errors import (
+    LigandAIError, LigandAIAuthError, LigandAITierError, LigandAICreditError,
+    LigandAIRateLimitError, LigandAIValidationError, LigandAINotFoundError,
+    LigandAIServerError, LigandAIPaidTierRequired,
+)
+```
+
+On 402 → tell the user to upgrade (the response includes the upgrade URL).
+On 403 → report `current_tier` and `required_tier` and ask them to upgrade or reduce the job.
+On 401 → tell them to mint a key at https://ligandai.com/cli-onboard?cli=cli.
+
+## Cost discipline
+
+ALWAYS preview cost before big jobs:
+
+```python
+est = client.peptides.estimate_cost(gene="EGFR", num_peptides=1000, auto_fold=True, fold_top_n=100)
+bal = client.account.get_balance()
+if bal.credits < est.credits:
+    print(f"Need {est.credits} credits; have {bal.credits}.")
+```
+
+## Async equivalents
+
+`AsyncLigandAI` mirrors every method:
+
+```python
+from ligandai import AsyncLigandAI
+async with AsyncLigandAI() as client:
+    job = await client.peptides.generate(gene="EGFR", num_peptides=10)
+    result = await job.wait()
+```
