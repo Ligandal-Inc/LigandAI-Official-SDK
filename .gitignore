@@ -56,3 +56,6 @@ secrets.json
 
 # Build artifacts
 *.log
+
+# Snapshot backups (local archive only)
+backups/
