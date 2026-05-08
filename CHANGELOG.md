@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] - 2026-05-07
+
+### Changed — open `/v1/peptides/by-gene` + `/v1/peptides/:id` to ALL tiers (free included)
+
+Previously gated to pro/enterprise/superadmin via `validatePaidApiKey`.
+Per Andre 2026-05-08: every authenticated user should be able to read
+their own peptides regardless of tier — free tier just sees the data
+masked. Endpoints now use `validateFlexibleApiKey`:
+
+- **free**: aggregate counts (by-gene/by-pdb) + per-peptide rows return
+  sequences with **first 4 amino acids + `********`** (down from 10) +
+  PDB content as polyalanine + REMARK header pointing to /pricing.
+  `_tier_redacted: true`, `_upgrade_url`, `_upgrade_note` fields included.
+- **basic / academia / pro / enterprise / discovery_partner**: full
+  sequences + real PDB. `_tier_redacted: false`.
+
+This restores the symmetry with `/v1/peptides/list` and `/v1/peptides/search`
+which already used the flexible (mask-not-block) middleware.
+
+### Added — `peptides.by_pdb()` for PDB-targeted aggregation
+
+Mirror of `by_gene()` for users whose generation requests targeted a
+specific PDB code (e.g. `9MIR` for the BMPR1A–RGMB heteromer) instead of
+a gene symbol. Returns rows pivoted on `(pdb_code, gene)` — common when
+users upload custom PDBs or design against multi-chain complexes.
+
+```python
+client.peptides.by_pdb("9MIR")
+# [{"pdbCode": "9MIR", "gene": "BMPR1A", "sessions": 3, ...}, ...]
+```
+
+Tier-open like `by_gene()`. Backed by `GET /api/v1/peptides/by-pdb`.
+
+### Fixed — `plddt_min` filter silently dropped on every search call
+
+`peptides.search(plddt_min=...)` was sending the param as `pldd_min`
+(missing the second `t`) since 0.5.1, so the server ignored it and
+returned peptides below the requested pLDDT floor. Single-character
+typo at `ligandai/resources/peptides.py:1404`. Verified by re-running
+a known-fail query (BMPR1A `plddt_min=0.92` → previously returned 142
+peps, several with pLDDT 0.78; now returns 38 peps, all ≥ 0.92).
+
+### Added — async `peptides.search()` parity with sync
+
+`AsyncPeptides.search()` was missing 20+ filters the sync version had
+shipped in 0.5.1: `plddt_min`, `dg_max`, `binder_pct_min`, `length_min`,
+`length_max`, `is_elite`, `super_elite`, `hotspot_residues`,
+`pocket_residues`, `hotspot_hit`, `pocket_hit`, `contact_distance_a`,
+`stability_grade`, `immuno_grade`, `conformation`, `session_id`,
+`pdb_id`, `sort`, `order`. The async signature now mirrors the sync
+signature exactly. No breaking change — existing async callers keep
+working; new kwargs are all optional.
+
+### Internal
+
+- `__version__` and `pyproject.toml` bumped 0.5.2 → 0.5.3.
+- All changes are bug-fix / additive; safe to upgrade in place.
+
+---
+
 ## [0.5.2] - 2026-05-07
 
 ### Added — `pdb_url` on every peptide + `peptides.download_pdb()` helper
