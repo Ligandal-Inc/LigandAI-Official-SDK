@@ -1337,6 +1337,7 @@ class Peptides(Resource):
         length_max: int | None = None,
         is_elite: bool | None = None,
         super_elite: bool | None = None,
+        super_elite_thermo: bool | None = None,
         hotspot_residues: list[str] | None = None,
         pocket_residues: list[str] | None = None,
         hotspot_hit: bool | None = None,
@@ -1368,8 +1369,15 @@ class Peptides(Resource):
             binder_pct_min: Minimum DeltaForge binder probability (0..1).
             length_min / length_max: Peptide length range in residues.
             is_elite: Server-flagged elite (iPSAE ≥ 0.80 by default).
-            super_elite: Combined gate — iPSAE ≥ 0.67, iPTM ≥ 0.80,
-                Kd < 100 nM, pLDDT ≥ 0.88 (when present).
+            super_elite: Proteina-Complexa structural-confidence gate
+                (bioRxiv v27): iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND
+                pLDDT ≥ 88 (0–100 scale; null passes). The 3-metric
+                structural gate. Use this for the headline
+                "super-elite" count.
+            super_elite_thermo: Thermo super-elite — structural gate
+                above PLUS predicted Kd < 100 nM (DeltaForge). The
+                synthesis-priority subset. Reported as a SEPARATE
+                bucket from the structural gate.
             hotspot_residues: List of ``"chain:resi"`` strings (PDB
                 numbering) for the residues you wanted the peptide to
                 contact, e.g. ``["A:60", "A:62"]``.
@@ -1409,6 +1417,7 @@ class Peptides(Resource):
         if length_max is not None: params["length_max"] = length_max
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
+        if super_elite_thermo is not None: params["super_elite_thermo"] = "true" if super_elite_thermo else "false"
         if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
         if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
         if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)
@@ -2335,6 +2344,7 @@ class AsyncPeptides(AsyncResource):
         length_max: int | None = None,
         is_elite: bool | None = None,
         super_elite: bool | None = None,
+        super_elite_thermo: bool | None = None,
         hotspot_residues: list[str] | None = None,
         pocket_residues: list[str] | None = None,
         hotspot_hit: bool | None = None,
@@ -2373,6 +2383,7 @@ class AsyncPeptides(AsyncResource):
         if length_max is not None: params["length_max"] = length_max
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
+        if super_elite_thermo is not None: params["super_elite_thermo"] = "true" if super_elite_thermo else "false"
         if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
         if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
         if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)

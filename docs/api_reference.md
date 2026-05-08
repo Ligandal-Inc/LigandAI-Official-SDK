@@ -135,13 +135,22 @@ All criteria AND-combine. v0.5.1+.
 - `ipsae_min`, `iptm_min`, `pldd_min` _(float, 0..1)_
 - `kd_max` _(float, M, e.g. `1e-7` for ≤ 100 nM)_
 - `dg_max` _(float, kcal/mol — negative is better; pass `-8.0` for ≤ -8)_
-- `binder_pct_min` _(float, 0..1 — DeltaForge binder probability)_
+- `binder_pct_min` _(float, 0..1 — legacy DeltaForge binder probability when present)_
 - `length_min`, `length_max` _(int, residues)_
 
 **Combined gates**:
 - `is_elite=true` — server-flagged elite (default iPSAE ≥ 0.80)
-- `super_elite=true` — iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND Kd < 100nM
-  AND pLDDT ≥ 0.88 (when present)
+- `super_elite=true` — **STRUCTURAL** Proteina-Complexa gate
+  (bioRxiv v27): iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND pLDDT ≥ 88
+  (0–100 scale; null passes). The 3-metric structural-confidence gate.
+- `super_elite_thermo=true` — **THERMO** super-elite: structural gate
+  AND predicted Kd < 100 nM (DeltaForge). Synthesis-priority subset.
+  Reported as a SEPARATE bucket from the structural gate.
+
+DeltaForge scoring returns affinity (`dg`, `kd_nm`) separately from the
+structure/energy binder call (`predicted_binder`, `predicted_binder_call`,
+`predicted_non_binder_reasons`). A complex can therefore retain a predicted Kd
+while still being called `not_binder` by the joint structural gate.
 
 **Hotspot/pocket coverage** (uses migration 085 `peptide_residue_contacts`):
 - `hotspot_residues=A:60,A:62` — chain:resi list (PDB numbering, comma-sep)
