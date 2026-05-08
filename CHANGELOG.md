@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-05-07
+
+### Added — `pdb_url` on every peptide + `peptides.download_pdb()` helper
+
+Server now returns `pdb_url` on every peptide row from `/v1/peptides/list`,
+`/v1/peptides/search`, and `/v1/peptides/:id`. The SDK uses this to expose
+a one-step download:
+
+```python
+peps = client.peptides.search(gene="BMPR1A", super_elite=True, limit=5)
+for p in peps:
+    print(p.pdb_url)                            # "/api/v1/structures/12345/pdb"
+    pdb_bytes = client.peptides.download_pdb(   # raw bytes
+        p.peptide_id, save_to=f"{p.peptide_id}.pdb"
+    )
+```
+
+The new `peptides.download_pdb(peptide_id, save_to=None)` convenience
+method resolves to the same endpoint as `client.structures.get_pdb()`
+but is callable directly off the search result objects.
+
+Tier behavior: free-tier keys get a side-chain-scrambled PDB; paid tiers
+get the original. The peptide response includes `_pdb_masked: True` when
+the next download will be scrambled.
+
+### Fixed — academia tier mask leak (#13) + credits sentinel leak (#10)
+
+- **#13** — `validateFlexibleApiKey` was bucketing academia paid users as
+  free for masking because it relied on the API-key-prefix tier and
+  ignored the user's DB `subscriptionTier`. Now takes the broader of
+  (key tier, DB tier). Defense-in-depth in `_maskRow`. Server commit
+  `def59779d`.
+- **#10** — `client.account.credits()` was returning the superadmin
+  sentinel for every user. Root cause: the `/api/user-credits` alias
+  forwarded via `fetch('http://127.0.0.1:...')`, which triggered the
+  VPN/localhost auto-login and rewrote `req.user` to superadmin BEFORE
+  the API-key middleware ran. Fix: inlined the credit lookup in the
+  alias handler and validated the inbound `X-API-Key` directly. Server
+  commit `def59779d`.
+
+### Internal
+
+- `__version__` and `pyproject.toml` bumped 0.5.1 → 0.5.2.
+- All new behaviors are additive — no breaking changes from 0.5.1.
+
+---
+
 ## [0.5.1] - 2026-05-07
 
 ### Added — rich peptide search criteria + generate-loop planner + pocket lookup
