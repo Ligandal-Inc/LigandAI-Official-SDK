@@ -56,6 +56,10 @@ FEATURE_MIN_TIER: dict[str, Tier] = {
     # Academia tier
     "advanced_guidance": "academia",
     "logits_output": "academia",
+    # PAE (Predicted Aligned Error) — academia+
+    "pae_download": "academia",
+    "pae_viewer": "academia",
+    # pae_summary is open to all tiers (no gate)
     # Pro tier
     "analyze_binding": "pro",
     "bivalent_design": "pro",

@@ -60,9 +60,18 @@ the native interface the peptide contacted.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+import io
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from ligandai.resources._base import AsyncResource, Resource
+
+if TYPE_CHECKING:
+    import numpy as np  # noqa: F401  (used in type hints only)
+
+
+# Default scale used when the server omits the X-Pae-Scale-Angstrom header.
+# Encodes the [0, 32] Å PAE range into a uint8 (32 / 255).
+_DEFAULT_PAE_SCALE_ANGSTROM = 32.0 / 255.0
 
 
 class HotspotSpec(TypedDict, total=False):
@@ -149,6 +158,63 @@ class Folds(Resource):
             "GET", "/api/folds/expand-hotspot", params=params,
         ) or {}
 
+    def download_pae(
+        self,
+        fold_id: int | str,
+        *,
+        decode: bool = True,
+    ) -> "np.ndarray | bytes":
+        """Download the PAE (Predicted Aligned Error) matrix for a folded structure.
+
+        Tier-gated: academia, pro, or enterprise. Free/basic tiers raise
+        :class:`LigandAITierError` client-side before the request is sent.
+
+        :param fold_id: ``ptf_fold_results.id`` (integer PK).
+        :param decode:  If ``True`` (default), return an NxN ``float32`` numpy
+                        array in Ångströms. If ``False``, return raw uint8 bytes
+                        (the on-wire ``.npy`` payload).
+        :returns:       ``np.ndarray`` (NxN ``float32``) when ``decode=True``,
+                        else ``bytes`` (raw uint8 ``.npy`` payload).
+        :raises LigandAITierError:    caller's tier < academia.
+        :raises LigandAINotFoundError: ``fold_id`` not found or PAE not yet computed.
+        """
+        if self._client is not None:
+            self._client._require_feature("pae_download")
+        resp = self._transport.request(
+            "GET",
+            f"/api/v1/folds/{fold_id}/pae",
+            headers={"Accept": "application/octet-stream"},
+            expect_json=False,
+        )
+        raw = resp.content
+        if not decode:
+            return raw
+        try:
+            import numpy as np  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "numpy is required to decode PAE; install with `pip install numpy` "
+                "or call download_pae(decode=False) for raw bytes"
+            ) from e
+        arr_uint8 = np.load(io.BytesIO(raw))
+        scale = float(
+            resp.headers.get("X-Pae-Scale-Angstrom", str(_DEFAULT_PAE_SCALE_ANGSTROM))
+        )
+        return arr_uint8.astype(np.float32) * scale
+
+    def get_pae_summary(self, fold_id: int | str) -> dict[str, Any]:
+        """Fetch PAE summary statistics — open to all tiers.
+
+        :returns: Dict with ``shape``, ``min``, ``max``, ``mean``, ``p95``,
+                  ``per_chain_pair_max``, ``scale_angstrom_per_unit``. Useful
+                  for AI-chat context, plotting axes, and quick triage without
+                  paying for the full matrix download.
+        """
+        return self._transport.request(
+            "GET",
+            f"/api/v1/folds/{fold_id}/pae/summary",
+        ) or {}
+
 
 class AsyncFolds(AsyncResource):
     """Async mirror of :class:`Folds`."""
@@ -185,4 +251,42 @@ class AsyncFolds(AsyncResource):
         }
         return await self._transport.request(
             "GET", "/api/folds/expand-hotspot", params=params,
+        ) or {}
+
+    async def download_pae(
+        self,
+        fold_id: int | str,
+        *,
+        decode: bool = True,
+    ) -> "np.ndarray | bytes":
+        """Async mirror of :meth:`Folds.download_pae`."""
+        if self._client is not None:
+            self._client._require_feature("pae_download")
+        resp = await self._transport.request(
+            "GET",
+            f"/api/v1/folds/{fold_id}/pae",
+            headers={"Accept": "application/octet-stream"},
+            expect_json=False,
+        )
+        raw = resp.content
+        if not decode:
+            return raw
+        try:
+            import numpy as np  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "numpy is required to decode PAE; install with `pip install numpy` "
+                "or call download_pae(decode=False) for raw bytes"
+            ) from e
+        arr_uint8 = np.load(io.BytesIO(raw))
+        scale = float(
+            resp.headers.get("X-Pae-Scale-Angstrom", str(_DEFAULT_PAE_SCALE_ANGSTROM))
+        )
+        return arr_uint8.astype(np.float32) * scale
+
+    async def get_pae_summary(self, fold_id: int | str) -> dict[str, Any]:
+        """Async mirror of :meth:`Folds.get_pae_summary` — open to all tiers."""
+        return await self._transport.request(
+            "GET",
+            f"/api/v1/folds/{fold_id}/pae/summary",
         ) or {}
