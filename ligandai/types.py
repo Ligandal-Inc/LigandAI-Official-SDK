@@ -751,6 +751,31 @@ class Peptide(_LGModel):
         default=None, alias="predictedKd",
         description="Predicted dissociation constant (M) from DeltaForge.",
     )
+    predicted_binder: bool | None = Field(
+        default=None,
+        alias="predictedBinder",
+        description="Separate DeltaForge structure/energy binder call.",
+    )
+    predicted_binder_call: str | None = Field(
+        default=None,
+        alias="predictedBinderCall",
+        description="'binder', 'not_binder', or 'unassigned'.",
+    )
+    predicted_binder_label: str | None = Field(
+        default=None,
+        alias="predictedBinderLabel",
+        description="Human-readable DeltaForge binder-call label.",
+    )
+    binder_call_method: str | None = Field(
+        default=None,
+        alias="binderCallMethod",
+        description="Method used to assign the separate binder/non-binder call.",
+    )
+    predicted_non_binder_reasons: list[str] | None = Field(
+        default=None,
+        alias="predictedNonBinderReasons",
+        description="Failed gate reasons when DeltaForge calls not_binder.",
+    )
     is_elite: bool | None = Field(
         default=None, alias="isElite",
         description="Server-side elite classification (typically iPSAE >= 0.85).",
@@ -758,6 +783,25 @@ class Peptide(_LGModel):
     masked: bool | None = Field(
         default=None, alias="_masked",
         description="True when sequence has been truncated due to tier (free = first 10 AA + '********').",
+    )
+    # Per-chain iPTM + PAE (post 2026-05-09 schema_version >= 2)
+    peptide_interface_iptm: float | None = Field(
+        default=None, alias="peptideInterfaceIptm",
+        description="Per-peptide-chain iPTM, uncontaminated by protein-protein contributions. "
+                    "Distinct from the global ``iptm`` (overall complex score). "
+                    "Populated when fold ran with schema_version >= 2 (post 2026-05-09).",
+    )
+    chain_pair_iptm: dict[str, float] | None = Field(
+        default=None, alias="chainPairIptm",
+        description="Per-chain-pair iPTM matrix from Boltz-2 summary_confidences. "
+                    "Keys are 'A_B', 'A_C', etc. Tier-gated: free/basic see summary "
+                    "(min/max/pair_count); academia+ see full matrix.",
+    )
+    fold_metric_details: dict | None = Field(
+        default=None, alias="foldMetricDetails",
+        description="Detailed per-chain + per-pair metrics: overall, peptide, perChain, "
+                    "peptidePerReceptor, chainPairs, plddtDetails. Same shape as "
+                    "ptf_fold_results.fold_metric_details JSONB column.",
     )
 
 
@@ -851,6 +895,13 @@ class PeptideDetail(_LGModel):
     plddt: float | None = None
     delta_g: float | None = Field(default=None, alias="deltaG")
     predicted_kd: float | None = Field(default=None, alias="predictedKd")
+    predicted_binder: bool | None = Field(default=None, alias="predictedBinder")
+    predicted_binder_call: str | None = Field(default=None, alias="predictedBinderCall")
+    predicted_binder_label: str | None = Field(default=None, alias="predictedBinderLabel")
+    binder_call_method: str | None = Field(default=None, alias="binderCallMethod")
+    predicted_non_binder_reasons: list[str] | None = Field(
+        default=None, alias="predictedNonBinderReasons"
+    )
     deltaforge_v10: DeltaForgeScore | None = Field(default=None, alias="deltaforgeV10")
     created_at: datetime = Field(alias="createdAt")
 
@@ -1082,6 +1133,35 @@ class GenerationResult(_LGModel):
         }
 
 
+class LigandChain(_LGModel):
+    """Small-molecule ligand co-folded alongside the receptor + peptide.
+
+    Boltz-2 folds receptors with their crystallographic ligands intact
+    (sulfates, ions, glycans, prosthetic groups, covalent modifiers).
+    These come back as separate chains in the PDB and are tracked here
+    so platform code never confuses them with protein chains. The
+    structure viewer can show/hide them; scorers (LigandIQ, DeltaForge)
+    skip them when evaluating peptide-receptor binding.
+    """
+
+    chain: str | None = None
+    """PDB chain identifier of the ligand (e.g. 'B', 'C')."""
+
+    ccd: str | None = None
+    """Three- or four-letter Chemical Component Dictionary code (e.g. 'SO4', 'MG', 'ATP')."""
+
+    smiles: str | None = None
+    """SMILES string for non-CCD small molecules."""
+
+
+class ReceptorChain(_LGModel):
+    """A protein chain belonging to the target receptor (not the peptide)."""
+
+    chain: str | None = None
+    length: int | None = None
+    type: str | None = None  # 'protein' | 'dna' | 'rna'
+
+
 class FoldResult(_LGModel):
     job_id: str = Field(alias="jobId")
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
@@ -1090,7 +1170,39 @@ class FoldResult(_LGModel):
     ipsae: float | None = None
     plddt: float | None = None
     ptm: float | None = None
+    ipae: float | None = None
+    """Per-interface predicted aligned error (chain-pair). Populated when the
+    fold writer ran with schema_version >= 2; nullable for older runs."""
+
     chain_pair_iptm: dict[str, float] | None = Field(default=None, alias="chainPairIptm")
+    per_chain: dict[str, dict[str, float]] | None = Field(default=None, alias="perChain")
+    """Per-chain pLDDT / pTM / iPTM map keyed by chain id."""
+
+    peptide_chain_id: str | None = Field(default=None, alias="peptideChainId")
+    """PDB chain id of the peptide in the folded structure (e.g. 'D' for a
+    PTGES3 monomer with two SO4 ligand chains, 'C' for a typical complex)."""
+
+    receptor_chains: list[ReceptorChain] | None = Field(default=None, alias="receptorChains")
+    ligands: list[LigandChain] | None = None
+    """Small-molecule ligands present in the fold. Empty list means no
+    ligands were co-folded; ``None`` means schema_version < 2 (legacy)."""
+
+    pae_url: str | None = Field(default=None, alias="paeUrl")
+    """Lazy-fetch URL for the gzipped PAE matrix. Tier-gated (paid only)."""
+
+    peptide_interface_iptm: float | None = Field(
+        default=None, alias="peptideInterfaceIptm",
+        description="Per-peptide-chain iPTM, uncontaminated by protein-protein contributions.",
+    )
+    fold_metric_details: dict | None = Field(
+        default=None, alias="foldMetricDetails",
+        description="Detailed per-chain + per-pair fold metrics (same as Peptide.fold_metric_details).",
+    )
+    pae_matrix_uri: str | None = Field(
+        default=None, alias="paeMatrixPath",
+        description="Canonical PAE URI 'pae://<pdb_hash>:<rank>'. Use client.folds.download_pae(fold_id) "
+                    "to fetch the matrix. Tier-gated: academia+.",
+    )
 
 
 class DeltaForgeBestPair(_LGModel):
@@ -1112,6 +1224,22 @@ class DeltaForgePairScore(_LGModel):
     features: dict[str, Any] | None = None
 
 
+class DeltaForgeGateReadout(_LGModel):
+    """Separate structure/energy binder-call readout from DeltaForge."""
+
+    predicted_binder: bool | None = Field(default=None, alias="predicted_binder")
+    predicted_binder_call: str | None = Field(default=None, alias="predicted_binder_call")
+    predicted_binder_label: str | None = Field(default=None, alias="predicted_binder_label")
+    predicted_binder_probability: float | None = Field(
+        default=None, alias="predicted_binder_probability"
+    )
+    binder_call_method: str | None = Field(default=None, alias="binder_call_method")
+    fold_metrics_available: bool | None = Field(default=None, alias="fold_metrics_available")
+    gate_passed: bool | None = Field(default=None, alias="gate_passed")
+    failed_gate_reasons: list[str] | None = Field(default=None, alias="failed_gate_reasons")
+    missing_gate_inputs: list[str] | None = Field(default=None, alias="missing_gate_inputs")
+
+
 class DeltaForgeScore(_LGModel):
     dg: float | None = None
     kd: float | None = None
@@ -1123,6 +1251,36 @@ class DeltaForgeScore(_LGModel):
     model_sha256: str | None = Field(default=None, alias="model_sha256")
     feature_schema_version: str | None = Field(default=None, alias="feature_schema_version")
     aggregate_method: str | None = Field(default=None, alias="aggregate_method")
+    version_family: str | None = Field(default=None, alias="version_family")
+    affinity_scorer: str | None = Field(default=None, alias="affinity_scorer")
+    affinity_scorer_version: str | None = Field(default=None, alias="affinity_scorer_version")
+    calibration_head: str | None = Field(default=None, alias="calibration_head")
+    structure_source_detected: str | None = Field(default=None, alias="structure_source_detected")
+    calibration_router: str | None = Field(default=None, alias="calibration_router")
+    peptide_length: int | None = Field(default=None, alias="peptide_length")
+    platform_length_scope: str | None = Field(default=None, alias="platform_length_scope")
+    predicted_affinity_tier: str | None = Field(default=None, alias="predicted_affinity_tier")
+    predicted_binder: bool | None = Field(default=None, alias="predicted_binder")
+    predicted_binder_call: str | None = Field(default=None, alias="predicted_binder_call")
+    predicted_binder_label: str | None = Field(default=None, alias="predicted_binder_label")
+    predicted_binder_probability: float | None = Field(
+        default=None, alias="predicted_binder_probability"
+    )
+    binder_call_method: str | None = Field(default=None, alias="binder_call_method")
+    predicted_non_binder_reasons: list[str] | None = Field(
+        default=None, alias="predicted_non_binder_reasons"
+    )
+    missing_binder_gate_inputs: list[str] | None = Field(
+        default=None, alias="missing_binder_gate_inputs"
+    )
+    readout_note: str | None = Field(default=None, alias="readout_note")
+    affinity_plus_structure_readout: dict[str, Any] | None = Field(
+        default=None, alias="affinity_plus_structure_readout"
+    )
+    dual_readout: dict[str, Any] | None = Field(default=None, alias="dual_readout")
+    structural_energy_gates: DeltaForgeGateReadout | None = Field(
+        default=None, alias="structural_energy_gates"
+    )
     best_pair: DeltaForgeBestPair | None = Field(default=None, alias="best_pair")
     pair_scores: list[DeltaForgePairScore] | None = Field(default=None, alias="pair_scores")
     pair_errors: list[dict[str, Any]] | None = Field(default=None, alias="pair_errors")
