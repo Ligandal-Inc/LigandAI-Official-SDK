@@ -6,9 +6,12 @@ from __future__ import annotations
 import os
 
 import pytest
+from pytest_httpx import HTTPXMock
 
 from ligandai import AsyncLigandAI, LigandAI
 from ligandai.errors import LigandAITierError
+
+BASE = "http://api.ligandai.test"
 
 
 def test_construct_with_explicit_key() -> None:
@@ -152,6 +155,80 @@ def test_resource_namespaces_present() -> None:
 def test_context_manager() -> None:
     with LigandAI(api_key="lgai_pro_x") as c:
         assert c.tier == "pro"
+
+
+def test_top_level_generate_uses_production_generation_endpoint(
+    httpx_mock: HTTPXMock,
+) -> None:
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/ptf/parallel/generate",
+        method="POST",
+        json={"sessionId": "gen_1", "status": "queued"},
+    )
+
+    job = c.generate("EGFR", n_samples=7, auto_fold=False)
+
+    assert job.session_id == "gen_1"
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert str(request.url) == f"{BASE}/api/ptf/parallel/generate"
+    assert "/api/workers/" not in str(request.url)
+    body = request.read().decode()
+    assert '"gene":"EGFR"' in body
+    assert '"peptidesPerTarget":7' in body
+
+
+def test_top_level_generate_rejects_unmounted_worker_methods() -> None:
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    with pytest.raises(NotImplementedError, match="worker routes are not mounted"):
+        c.generate("EGFR", method="bindcraft")
+
+
+def test_top_level_generate_rejects_raw_sequence_target() -> None:
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    with pytest.raises(ValueError, match="target=<sequence>"):
+        c.generate("M" * 35)
+
+
+def test_top_level_fold_uses_production_folding_endpoint(
+    httpx_mock: HTTPXMock,
+) -> None:
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/folding/predict",
+        method="POST",
+        json={"jobId": "fold_1", "status": "queued"},
+    )
+
+    job = c.fold("M" * 35, "ACDEFGHIK", sampling_steps=15)
+
+    assert job.id == "fold_1"
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert str(request.url) == f"{BASE}/api/folding/predict"
+    assert "/api/workers/" not in str(request.url)
+    body = request.read().decode()
+    assert '"chainId":"A"' in body
+    assert '"chainId":"B"' in body
+    assert '"samplingSteps":15' in body
+
+
+def test_top_level_fold_accepts_sequences_keyword(httpx_mock: HTTPXMock) -> None:
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/folding/predict",
+        method="POST",
+        json={"jobId": "fold_2"},
+    )
+
+    job = c.fold(sequences=["ACDEFGHIK"], target_gene="EGFR")
+
+    assert job.id == "fold_2"
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert str(request.url) == f"{BASE}/api/folding/predict"
+    assert "/api/workers/" not in str(request.url)
 
 
 @pytest.mark.asyncio

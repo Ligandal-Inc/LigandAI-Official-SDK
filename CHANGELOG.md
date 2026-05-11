@@ -5,9 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.5.4] - 2026-05-07
+## [0.5.4] - 2026-05-11
 
-### Changed — two-tier super-elite (structural + thermo)
+### Fixed - production-safe top-level helpers
+
+- `client.generate(...)` now routes to the mounted production
+  `client.peptides.generate(...)` endpoint instead of the experimental
+  `/api/workers/{method}/invoke` route, which is not mounted on production.
+- `client.fold(...)` now routes to the mounted production
+  `client.peptides.fold(...)` endpoint instead of
+  `/api/workers/boltzgen/fold/invoke`.
+- `client.generate(method=...)` raises a local `NotImplementedError` for
+  non-LigandForge experimental worker methods rather than making a request
+  that 404s.
+
+### Added - DeltaForge binder readout fields
+
+- DeltaForge score parsing exposes binder/non-binder classification fields
+  separately from affinity `dg` / `kd_nm`, including structural-energy gate
+  readouts and non-binder reasons when returned by the API.
+
+### Changed — two-tier super-elite (structural + affinity)
 
 Super-elite is now reported as TWO separate buckets, never collapsed:
 
@@ -16,7 +34,7 @@ Super-elite is now reported as TWO separate buckets, never collapsed:
   `iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND pLDDT ≥ 88` (0–100 scale; null
   passes). The 3-metric structural gate. Use for the headline
   "super-elite" count.
-- **Thermo** (`super_elite_thermo=True`, NEW) — structural gate AND
+- **Affinity** (`super_elite_affinity=True`, NEW) — structural gate AND
   predicted Kd < 100 nM (DeltaForge). The synthesis-priority subset
   for users who care about predicted affinity.
 
@@ -32,7 +50,7 @@ to two server-side bugs:
    non-null pLDDT row trivially passed `≥ 0.88`.
 
 Both bugs are fixed server-side. The structural gate now uses
-`pLDDT ≥ 88` (no Kd term); the thermo gate adds `predicted_kd ≤ 100`
+`pLDDT ≥ 88` (no Kd term); the affinity gate adds `predicted_kd ≤ 100`
 in nM. Counts will increase substantially for sessions where pLDDT
 was previously masking everything.
 

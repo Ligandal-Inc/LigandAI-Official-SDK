@@ -62,6 +62,9 @@ docs = [
     "myst-parser>=2.0",
 ]
 
+[project.scripts]
+ligandai = "ligandai.cli:main"
+
 [project.urls]
 Homepage = "https://ligandai.com"
 Documentation = "https://docs.ligandai.com"
