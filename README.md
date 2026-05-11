@@ -280,25 +280,32 @@ client.goals.resume(run.run_id)
 client.goals.stop(run.run_id)
 ```
 
-## DeltaForge V10 Scoring
+## DeltaForge Scoring
 
 ```python
 # Fold a target/binder pair, then score with DeltaForge auto mode.
 job = client.peptides.score_complex(
     binder_sequence="ACDEFGHIK",
     target_sequence="MNPQRSTVWY",
-    scorer="auto",  # auto | current | v10
+    scorer="auto",  # auto | current | v10 | v10_2 | unified
 )
 score = job.wait().results
-print(score.dg, score.kd_nm, score.scorer_version)
+print(score.dg, score.kd_nm, score.predicted_binder_call, score.scorer_version)
 
-# Score your own PDB directly, with multivalent per-chain decomposition.
+# Score your own folded PDB directly, with multivalent per-chain decomposition.
+# The fold_* values are optional Boltz-2 confidence metrics used for the
+# separate binder/non-binder call. The affinity values still return separately.
 score = client.peptides.score_pdb(
     pdb_file="complex.pdb",
     receptor_chains=["A", "C"],
     peptide_chain="B",
-    scorer="v10",
+    scorer="auto",
+    fold_ipsae=0.72,
+    fold_iptm=0.84,
+    fold_complex_plddt=91.2,
 )
+print(score.dg, score.kd_nm)                       # affinity readout
+print(score.predicted_binder_call, score.predicted_non_binder_reasons)
 for pair in score.pair_scores or []:
     print(pair.receptor_chain, pair.peptide_chain, pair.dg, pair.contacts)
 ```

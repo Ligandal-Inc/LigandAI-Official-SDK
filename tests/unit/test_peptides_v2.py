@@ -154,6 +154,32 @@ def test_list_rejects_empty_gene(pro_client: LigandAI) -> None:
         pro_client.peptides.list("   ")
 
 
+# ---------- search --------------------------------------------------------
+
+
+def test_search_forwards_super_elite_affinity_param(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/peptides/search?limit=5&offset=0&sort=ipsae&order=desc&super_elite_affinity=true",
+        json={"peptides": [], "total": 0},
+    )
+
+    assert pro_client.peptides.search(super_elite_affinity=True, limit=5) == []
+
+
+def test_search_accepts_deprecated_super_elite_thermo_alias(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/peptides/search?limit=5&offset=0&sort=ipsae&order=desc&super_elite_affinity=true",
+        json={"peptides": [], "total": 0},
+    )
+
+    with pytest.warns(DeprecationWarning, match="super_elite_thermo is deprecated"):
+        assert pro_client.peptides.search(super_elite_thermo=True, limit=5) == []
+
+
 # ---------- get -----------------------------------------------------------
 
 
@@ -172,9 +198,15 @@ def test_get_thin_response(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
             "plddt": 89.5,
             "deltaG": -6.4,
             "predictedKd": 0.0023,
+            "predictedBinder": True,
+            "predictedBinderCall": "binder",
+            "predictedBinderLabel": "Predicted binder",
+            "binderCallMethod": "deterministic_joint_ipSAE_ipTM_DeltaForge_gate",
             "deltaforgeV10": {
                 "delta_g": -9.25,
                 "kd_nm": 166.0,
+                "predicted_binder": True,
+                "predicted_binder_call": "binder",
                 "scorer": "deltaforge_v10_boltz2_calibrated_gbr",
                 "scorer_version": "v10_boltz2_gbr_2026_03_29",
                 "best_pair": {
@@ -202,7 +234,11 @@ def test_get_thin_response(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
     assert detail.gene == "GRIN1"
     assert detail.session_id == "sess_abc"
     assert detail.sequence == "ACDEFGHIK"
+    assert detail.predicted_binder is True
+    assert detail.predicted_binder_call == "binder"
     assert detail.deltaforge_v10 is not None
+    assert detail.deltaforge_v10.predicted_binder is True
+    assert detail.deltaforge_v10.predicted_binder_call == "binder"
     assert detail.deltaforge_v10.scorer_version == "v10_boltz2_gbr_2026_03_29"
     assert detail.deltaforge_v10.best_pair is not None
     assert detail.deltaforge_v10.best_pair.receptor_chain == "A"
@@ -312,6 +348,19 @@ def test_score_pdb_posts_raw_pdb_and_parses_v10_decomposition(
             "kd_nm": 166.0,
             "scorer": "deltaforge_v10_boltz2_calibrated_gbr",
             "scorer_version": "v10_boltz2_gbr_2026_03_29",
+            "predicted_affinity_tier": "sub_uM",
+            "predicted_binder": False,
+            "predicted_binder_call": "not_binder",
+            "predicted_binder_label": "Not predicted binder",
+            "binder_call_method": "deterministic_joint_ipSAE_ipTM_DeltaForge_gate",
+            "predicted_non_binder_reasons": ["ipSAE < 0.67"],
+            "missing_binder_gate_inputs": [],
+            "structural_energy_gates": {
+                "predicted_binder": False,
+                "predicted_binder_call": "not_binder",
+                "failed_gate_reasons": ["ipSAE < 0.67"],
+                "missing_gate_inputs": [],
+            },
             "model_sha256": "sha",
             "aggregate_method": "boltzmann_parallel",
             "best_pair": {
@@ -337,10 +386,19 @@ def test_score_pdb_posts_raw_pdb_and_parses_v10_decomposition(
         receptor_chains=["A"],
         peptide_chain="B",
         scorer="v10",
+        fold_ipsae=0.51,
+        fold_iptm=0.84,
+        fold_complex_plddt=91.2,
     )
 
     assert score.dg == pytest.approx(-9.25)
     assert score.kd_nm == pytest.approx(166.0)
+    assert score.predicted_binder is False
+    assert score.predicted_binder_call == "not_binder"
+    assert score.predicted_affinity_tier == "sub_uM"
+    assert score.predicted_non_binder_reasons == ["ipSAE < 0.67"]
+    assert score.structural_energy_gates is not None
+    assert score.structural_energy_gates.predicted_binder is False
     assert score.scorer_version == "v10_boltz2_gbr_2026_03_29"
     assert score.best_pair is not None
     assert score.best_pair.receptor_chain == "A"
@@ -354,17 +412,21 @@ def test_score_pdb_posts_raw_pdb_and_parses_v10_decomposition(
     assert body["receptorChains"] == ["A"]
     assert body["peptideChain"] == "B"
     assert body["scorer"] == "v10"
+    assert body["foldIpsae"] == 0.51
+    assert body["foldIptm"] == 0.84
+    assert body["foldComplexPlddt"] == 91.2
 
 
-# ---------- paid-tier validation -----------------------------------------
+# ---------- tier-open peptide reads --------------------------------------
 
 
-def test_free_tier_raises_paid_tier_required_on_by_gene(free_client: LigandAI) -> None:
-    """Client-side fail-fast — no network call is made for free keys."""
-    with pytest.raises(LigandAIPaidTierRequired) as excinfo:
-        free_client.peptides.by_gene()
-    assert excinfo.value.current_tier == "free"
-    assert excinfo.value.required_tier == "basic"
+def test_free_tier_by_gene_uses_flexible_api(httpx_mock: HTTPXMock, free_client: LigandAI) -> None:
+    """v0.5.3: free users can read their own aggregate peptide rows."""
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/peptides/by-gene?limit=50&offset=0",
+        json={"success": True, "rows": [], "count": 0, "total": 0, "_tier": "free"},
+    )
+    assert free_client.peptides.by_gene() == []
 
 
 def test_free_tier_raises_paid_tier_required_on_get(free_client: LigandAI) -> None:

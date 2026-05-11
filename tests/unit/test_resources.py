@@ -34,7 +34,7 @@ def test_account_me(httpx_mock: HTTPXMock, client: LigandAI) -> None:
 
 def test_account_credits(httpx_mock: HTTPXMock, client: LigandAI) -> None:
     httpx_mock.add_response(
-        url=f"{BASE}/api/user-credits",
+        url=f"{BASE}/api/credits",
         json={"balance": 12345, "monthlyAllocation": 5000},
     )
     credits = client.account.credits()

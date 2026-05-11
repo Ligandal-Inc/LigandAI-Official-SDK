@@ -30,29 +30,6 @@ from uuid import uuid4
 
 import httpx
 
-_logger = logging.getLogger("ligandai")
-
-
-def _log_client_init(cls_name: str, base_url: str, tier: str | None, api_key: str | None) -> None:
-    """Emit a single INFO line so customers (and their AI agents) can confirm
-    which host the SDK is talking to and which tier the key resolved to.
-
-    Suppressible via standard logging config:
-        logging.getLogger("ligandai").setLevel(logging.WARNING)
-    """
-    if api_key:
-        # Show only the prefix so logs never leak the full secret.
-        key_hint = api_key[:8] + "..."
-    else:
-        key_hint = "<none>"
-    _logger.info(
-        "%s initialized: base_url=%s tier=%s api_key=%s",
-        cls_name,
-        base_url,
-        tier or "anonymous",
-        key_hint,
-    )
-
 from ligandai._constants import (
     API_KEY_PREFIXES,
     DEFAULT_BASE_URL,
@@ -73,6 +50,7 @@ from ligandai.errors import (
     LigandAIPaidTierRequired,
     LigandAITierError,
 )
+from ligandai.key_wallet import WALLET_PATH, KeyWallet
 from ligandai.resources.account import Account, AsyncAccount
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.charts import AsyncCharts, Charts
@@ -92,6 +70,28 @@ from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
 from ligandai.types import ClientSessionUsage, Credits, User
 from ligandai.version_check import emit_update_notice
+
+_logger = logging.getLogger("ligandai")
+_CANONICAL_AA = frozenset("ACDEFGHIKLMNPQRSTVWY")
+
+
+def _log_client_init(cls_name: str, base_url: str, tier: str | None, api_key: str | None) -> None:
+    """Emit one INFO line with host and tier, without leaking the API key."""
+    key_hint = api_key[:8] + "..." if api_key else "<none>"
+    _logger.info(
+        "%s initialized: base_url=%s tier=%s api_key=%s",
+        cls_name,
+        base_url,
+        tier or "anonymous",
+        key_hint,
+    )
+
+
+def _looks_like_target_sequence(value: str | None) -> bool:
+    if not value:
+        return False
+    cleaned = "".join(value.upper().split())
+    return len(cleaned) >= 30 and all(ch in _CANONICAL_AA for ch in cleaned)
 
 
 def _resolve_api_key(api_key: str | None) -> str | None:
@@ -347,6 +347,140 @@ class LigandAI(_ClientCommon):
         c = self.account.credits()
         self._credits = c
         return c.balance
+
+    # ─── Rotating-JWT wallet methods ─────────────────────────────────────────
+
+    def mint_wallet(
+        self,
+        scope: str,
+        target_seq: str,
+        count: int = 5,
+        *,
+        audience: str = "ligandai",
+        wallet_path: Any = WALLET_PATH,
+    ) -> KeyWallet:
+        """Mint a wallet of ``count`` single-use JWTs from the server.
+
+        Calls ``POST /api/auth/scoped-key/issue`` using the client's existing
+        API key (legacy ``lgai_*_`` key) or session auth.  The resulting wallet
+        is saved to ``~/.ligandai/keys.json`` (mode 0600) and returned.
+
+        Parameters
+        ----------
+        scope
+            ``"generate"``, ``"fold"``, or ``"score"``.
+        target_seq
+            Full amino-acid sequence of the target protein. Canonicalized and
+            hashed server-side; the wallet is locked to this target.
+        count
+            Number of JWTs to mint (1-10). Default 5.
+        audience
+            ``"ligandai"`` (default), ``"biodefense"``, or ``"peptgames"``.
+        wallet_path
+            Override path for the wallet file. Defaults to
+            ``~/.ligandai/keys.json``.
+
+        Returns
+        -------
+        KeyWallet
+            The freshly minted and saved wallet.
+        """
+        payload: dict[str, Any] = {
+            "scope": scope,
+            "target_seq": target_seq,
+            "count": count,
+            "audience": audience,
+        }
+        resp = self._transport.request("POST", "/api/auth/scoped-key/issue", json=payload) or {}
+        wallet = KeyWallet.from_issue_response(resp, path=wallet_path)
+        _logger.info(
+            "Minted wallet: scope=%s count=%d target_hash=%s…",
+            scope,
+            wallet.remaining,
+            wallet.target_hash[:12] if wallet.target_hash else "<none>",
+        )
+        return wallet
+
+    def generate(
+        self,
+        target: str | None = None,
+        method: str = "ligandforge",
+        n_samples: int = 100,
+        **kwargs: Any,
+    ) -> Any:
+        """Convenience wrapper for production LigandForge generation.
+
+        This method intentionally routes through the mounted public SDK
+        endpoint used by :meth:`client.peptides.generate`, not the experimental
+        worker-invoke routes.  Pass a gene, PDB ID, or uploaded-variant target
+        identifier here, or call ``client.peptides.generate(...)`` directly for
+        the full typed surface.
+        """
+        method_key = method.lower().replace("_", "-")
+        if method_key not in {"ligandforge", "ligandai", "ptf"}:
+            raise NotImplementedError(
+                "Top-level client.generate() currently supports production "
+                "LigandForge generation only. Use client.peptides.generate(...) "
+                "for the stable SDK API; experimental worker routes are not "
+                "mounted on production."
+            )
+
+        gene = kwargs.pop("gene", None) or kwargs.pop("target_gene", None)
+        if gene is None and target is not None:
+            if _looks_like_target_sequence(target):
+                raise ValueError(
+                    "client.generate(target=<sequence>) would require the "
+                    "experimental worker API, which is not mounted on "
+                    "production. Use client.peptides.generate(gene=..., "
+                    "variant_id=...) after registering or selecting a target."
+                )
+            gene = target
+        if not gene:
+            raise ValueError(
+                "client.generate() requires a gene/PDB/target identifier. "
+                "Pass target='EGFR' or call client.peptides.generate(gene='EGFR', ...)."
+            )
+
+        num_peptides = kwargs.pop("num_peptides", n_samples)
+        return self.peptides.generate(gene=gene, num_peptides=num_peptides, **kwargs)
+
+    def fold(
+        self,
+        target: str | list[Any] | None = None,
+        peptide: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Convenience wrapper for production Boltz-2 folding.
+
+        Supported forms:
+
+        - ``client.fold(sequences=[...], target_gene="EGFR")``
+        - ``client.fold(["SEQ1", "SEQ2"], target_gene="EGFR")``
+        - ``client.fold(target_sequence, peptide_sequence)`` for a two-chain
+          complex fold
+        """
+        sequences = kwargs.pop("sequences", None)
+        if sequences is not None:
+            if target is not None:
+                raise ValueError("Pass either target positional data or sequences=, not both.")
+            return self.peptides.fold(sequences=sequences, **kwargs)
+
+        if peptide is not None:
+            if target is None or not isinstance(target, str):
+                raise ValueError("target must be the receptor sequence when peptide is provided.")
+            return self.peptides.fold(
+                sequences=[
+                    {"sequence": target, "chainId": "A", "name": "target"},
+                    {"sequence": peptide, "chainId": "B", "name": "peptide"},
+                ],
+                **kwargs,
+            )
+
+        if target is None:
+            raise ValueError("client.fold() requires sequences=, a sequence list, or target+peptide.")
+        if isinstance(target, list):
+            return self.peptides.fold(sequences=target, **kwargs)
+        return self.peptides.fold(sequences=[target], **kwargs)
 
     def close(self) -> None:
         self._transport.close()

@@ -281,6 +281,86 @@ class NotSupportedOnReceptorDB(LigandAIError):
     """
 
 
+# ─── Wallet / rotating-key exceptions (Track E) ──────────────────────────────
+
+
+class WalletEmpty(LigandAIError):
+    """The local key wallet has no JWTs remaining and cannot be refreshed.
+
+    This occurs when:
+    - All single-use JWTs in ``~/.ligandai/keys.json`` have been consumed,
+    - The ``refresh_token`` is absent, expired, or the refresh call failed.
+
+    Recovery: call ``client.mint_wallet(scope=..., target_seq=...)`` to obtain
+    a fresh wallet, or pass a valid ``lgai_*_`` API key for the legacy flow.
+    """
+
+
+class WalletExpired(LigandAIError):
+    """The wallet's refresh token has passed its 7-day TTL.
+
+    The refresh token embedded in ``~/.ligandai/keys.json`` cannot be used to
+    mint more single-use keys. Call ``client.mint_wallet(...)`` to start a new
+    wallet chain.
+    """
+
+
+class KeyTargetMismatch(LigandAIError):
+    """The cached wallet's ``target_hash`` does not match the requested target.
+
+    The wallet was minted for a different target sequence. Either call
+    ``client.mint_wallet(scope=..., target_seq=<new_target>)`` to replace the
+    wallet, or pass the same target sequence that was used when the wallet was
+    originally minted.
+
+    Attributes
+    ----------
+    wallet_hash : str | None
+        SHA-256 hex digest the wallet was minted for.
+    request_hash : str | None
+        SHA-256 hex digest computed from the target sequence in this request.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        wallet_hash: str | None = None,
+        request_hash: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.wallet_hash = wallet_hash
+        self.request_hash = request_hash
+
+
+class LigandAIScopeError(LigandAIError):
+    """The wallet's ``scope`` claim does not match the endpoint being called.
+
+    For example, a wallet minted with ``scope="fold"`` cannot authorize a
+    ``generate`` request. Mint a new wallet with the correct scope.
+
+    Attributes
+    ----------
+    wallet_scope : str | None
+        The scope the wallet was minted for.
+    required_scope : str | None
+        The scope required by the endpoint.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        wallet_scope: str | None = None,
+        required_scope: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.wallet_scope = wallet_scope
+        self.required_scope = required_scope
+
+
 def error_from_response(
     status_code: int,
     payload: dict[str, Any] | None,

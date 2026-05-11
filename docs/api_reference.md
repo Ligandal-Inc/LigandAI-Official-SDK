@@ -143,7 +143,7 @@ All criteria AND-combine. v0.5.1+.
 - `super_elite=true` — **STRUCTURAL** Proteina-Complexa gate
   (bioRxiv v27): iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND pLDDT ≥ 88
   (0–100 scale; null passes). The 3-metric structural-confidence gate.
-- `super_elite_thermo=true` — **THERMO** super-elite: structural gate
+- `super_elite_affinity=true` — **AFFINITY** super-elite: structural gate
   AND predicted Kd < 100 nM (DeltaForge). Synthesis-priority subset.
   Reported as a SEPARATE bucket from the structural gate.
 

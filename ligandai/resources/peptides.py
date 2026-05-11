@@ -54,7 +54,7 @@ from ligandai.types import (
 # against an allowlist and returns 400 for unknown entries — keep this in sync.
 _IncludeField = Literal["pocket_features", "interface", "pdb"]
 _ALLOWED_INCLUDE: frozenset[str] = frozenset({"pocket_features", "interface", "pdb"})
-_DeltaForgeScorer = Literal["auto", "current", "v10"]
+_DeltaForgeScorer = Literal["auto", "current", "v10", "v10_2", "unified"]
 _DeltaForgeAggregateMethod = Literal["boltzmann_parallel", "best_pair", "mean_pair"]
 
 # Cysteine-control keys that used to be passed via ``extra={...}`` and are now
@@ -141,22 +141,57 @@ def _requests_advanced_guidance(
 
 def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
     scoring = data.get("scoring") or data.get("deltaforge") or data
+
+    def pick(*keys: str) -> Any:
+        for key in keys:
+            if key in scoring and scoring[key] is not None:
+                return scoring[key]
+        return None
+
     return DeltaForgeScore.model_validate(
         {
-            "dg": scoring.get("dg") or scoring.get("delta_g"),
-            "kd": scoring.get("kd") or scoring.get("kd_nm"),
-            "kd_nm": scoring.get("kd_nm"),
-            "contacts": scoring.get("contacts") or scoring.get("contact_count") or scoring.get("num_contacts"),
-            "interfaceResidues": scoring.get("interface_residues"),
-            "scorer": scoring.get("scorer"),
-            "scorer_version": scoring.get("scorer_version"),
-            "model_sha256": scoring.get("model_sha256"),
-            "feature_schema_version": scoring.get("feature_schema_version"),
-            "aggregate_method": scoring.get("aggregate_method"),
-            "best_pair": scoring.get("best_pair"),
-            "pair_scores": scoring.get("pair_scores"),
-            "pair_errors": scoring.get("pair_errors"),
-            "warnings": scoring.get("warnings"),
+            "dg": pick("dg", "delta_g", "deltaG"),
+            "kd": pick("kd", "kd_nm", "kdNm"),
+            "kd_nm": pick("kd_nm", "kdNm"),
+            "contacts": pick("contacts", "contact_count", "num_contacts"),
+            "interfaceResidues": pick("interface_residues", "interfaceResidues"),
+            "scorer": pick("scorer"),
+            "scorer_version": pick("scorer_version", "scorerVersion"),
+            "model_sha256": pick("model_sha256", "modelSha256"),
+            "feature_schema_version": pick("feature_schema_version", "featureSchemaVersion"),
+            "aggregate_method": pick("aggregate_method", "aggregateMethod"),
+            "version_family": pick("version_family", "versionFamily"),
+            "affinity_scorer": pick("affinity_scorer", "affinityScorer"),
+            "affinity_scorer_version": pick("affinity_scorer_version", "affinityScorerVersion"),
+            "calibration_head": pick("calibration_head", "calibrationHead"),
+            "structure_source_detected": pick("structure_source_detected", "structureSourceDetected"),
+            "calibration_router": pick("calibration_router", "calibrationRouter"),
+            "peptide_length": pick("peptide_length", "peptideLength"),
+            "platform_length_scope": pick("platform_length_scope", "platformLengthScope"),
+            "predicted_affinity_tier": pick("predicted_affinity_tier", "predictedAffinityTier"),
+            "predicted_binder": pick("predicted_binder", "predictedBinder"),
+            "predicted_binder_call": pick("predicted_binder_call", "predictedBinderCall"),
+            "predicted_binder_label": pick("predicted_binder_label", "predictedBinderLabel"),
+            "predicted_binder_probability": pick(
+                "predicted_binder_probability", "predictedBinderProbability"
+            ),
+            "binder_call_method": pick("binder_call_method", "binderCallMethod"),
+            "predicted_non_binder_reasons": pick(
+                "predicted_non_binder_reasons", "predictedNonBinderReasons"
+            ),
+            "missing_binder_gate_inputs": pick(
+                "missing_binder_gate_inputs", "missingBinderGateInputs"
+            ),
+            "readout_note": pick("readout_note", "readoutNote"),
+            "affinity_plus_structure_readout": pick(
+                "affinity_plus_structure_readout", "affinityPlusStructureReadout"
+            ),
+            "dual_readout": pick("dual_readout", "dualReadout"),
+            "structural_energy_gates": pick("structural_energy_gates", "structuralEnergyGates"),
+            "best_pair": pick("best_pair", "bestPair"),
+            "pair_scores": pick("pair_scores", "pairScores"),
+            "pair_errors": pick("pair_errors", "pairErrors"),
+            "warnings": pick("warnings"),
             "metadata": scoring.get("metadata") or scoring,
         }
     )
@@ -1244,12 +1279,21 @@ class Peptides(Resource):
         scorer: _DeltaForgeScorer = "auto",
         aggregate_method: _DeltaForgeAggregateMethod = "boltzmann_parallel",
         include_features: bool = False,
+        fold_ipsae: float | None = None,
+        fold_iptm: float | None = None,
+        fold_ptm: float | None = None,
+        fold_plddt_mean: float | None = None,
+        fold_complex_plddt: float | None = None,
+        fold_complex_iplddt: float | None = None,
     ) -> DeltaForgeScore:
         """Score a user-provided PDB with DeltaForge.
 
         Pass either ``pdb_content=`` or ``pdb_file=``. ``receptor_chains`` and
         ``peptide_chain`` are preferred; ``chain_a`` / ``chain_b`` are accepted
-        as aliases for single-interface scoring.
+        as aliases for single-interface scoring. Optional ``fold_*`` metrics
+        are forwarded to the production binder/non-binder gate; affinity
+        ``dg``/``kd_nm`` still return independently when the gate calls
+        ``not_binder``.
         """
         if not pdb_content and not pdb_file:
             raise ValueError("Pass pdb_content= or pdb_file=")
@@ -1271,6 +1315,12 @@ class Peptides(Resource):
                 "scorer": scorer,
                 "aggregateMethod": aggregate_method,
                 "includeFeatures": include_features,
+                "foldIpsae": fold_ipsae,
+                "foldIptm": fold_iptm,
+                "foldPtm": fold_ptm,
+                "foldPlddtMean": fold_plddt_mean,
+                "foldComplexPlddt": fold_complex_plddt,
+                "foldComplexIplddt": fold_complex_iplddt,
             },
         ) or {}
         return _parse_deltaforge_score(payload)
@@ -1337,6 +1387,7 @@ class Peptides(Resource):
         length_max: int | None = None,
         is_elite: bool | None = None,
         super_elite: bool | None = None,
+        super_elite_affinity: bool | None = None,
         super_elite_thermo: bool | None = None,
         hotspot_residues: list[str] | None = None,
         pocket_residues: list[str] | None = None,
@@ -1374,10 +1425,11 @@ class Peptides(Resource):
                 pLDDT ≥ 88 (0–100 scale; null passes). The 3-metric
                 structural gate. Use this for the headline
                 "super-elite" count.
-            super_elite_thermo: Thermo super-elite — structural gate
+            super_elite_affinity: Affinity super-elite — structural gate
                 above PLUS predicted Kd < 100 nM (DeltaForge). The
                 synthesis-priority subset. Reported as a SEPARATE
                 bucket from the structural gate.
+            super_elite_thermo: Deprecated alias for ``super_elite_affinity``.
             hotspot_residues: List of ``"chain:resi"`` strings (PDB
                 numbering) for the residues you wanted the peptide to
                 contact, e.g. ``["A:60", "A:62"]``.
@@ -1404,6 +1456,14 @@ class Peptides(Resource):
         """
         if min_ipsae is not None and ipsae_min is None:
             ipsae_min = min_ipsae
+        if super_elite_thermo is not None:
+            warnings.warn(
+                "super_elite_thermo is deprecated; use super_elite_affinity instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if super_elite_affinity is None:
+                super_elite_affinity = super_elite_thermo
         params: dict[str, Any] = {"limit": limit, "offset": offset, "sort": sort, "order": order}
         if gene is not None: params["gene"] = gene.upper()
         if classification is not None: params["classification"] = classification
@@ -1417,7 +1477,7 @@ class Peptides(Resource):
         if length_max is not None: params["length_max"] = length_max
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
-        if super_elite_thermo is not None: params["super_elite_thermo"] = "true" if super_elite_thermo else "false"
+        if super_elite_affinity is not None: params["super_elite_affinity"] = "true" if super_elite_affinity else "false"
         if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
         if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
         if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)
@@ -2259,6 +2319,12 @@ class AsyncPeptides(AsyncResource):
         scorer: _DeltaForgeScorer = "auto",
         aggregate_method: _DeltaForgeAggregateMethod = "boltzmann_parallel",
         include_features: bool = False,
+        fold_ipsae: float | None = None,
+        fold_iptm: float | None = None,
+        fold_ptm: float | None = None,
+        fold_plddt_mean: float | None = None,
+        fold_complex_plddt: float | None = None,
+        fold_complex_iplddt: float | None = None,
     ) -> DeltaForgeScore:
         if not pdb_content and not pdb_file:
             raise ValueError("Pass pdb_content= or pdb_file=")
@@ -2280,6 +2346,12 @@ class AsyncPeptides(AsyncResource):
                 "scorer": scorer,
                 "aggregateMethod": aggregate_method,
                 "includeFeatures": include_features,
+                "foldIpsae": fold_ipsae,
+                "foldIptm": fold_iptm,
+                "foldPtm": fold_ptm,
+                "foldPlddtMean": fold_plddt_mean,
+                "foldComplexPlddt": fold_complex_plddt,
+                "foldComplexIplddt": fold_complex_iplddt,
             },
         ) or {}
         return _parse_deltaforge_score(payload)
@@ -2344,6 +2416,7 @@ class AsyncPeptides(AsyncResource):
         length_max: int | None = None,
         is_elite: bool | None = None,
         super_elite: bool | None = None,
+        super_elite_affinity: bool | None = None,
         super_elite_thermo: bool | None = None,
         hotspot_residues: list[str] | None = None,
         pocket_residues: list[str] | None = None,
@@ -2370,6 +2443,14 @@ class AsyncPeptides(AsyncResource):
         """
         if min_ipsae is not None and ipsae_min is None:
             ipsae_min = min_ipsae
+        if super_elite_thermo is not None:
+            warnings.warn(
+                "super_elite_thermo is deprecated; use super_elite_affinity instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if super_elite_affinity is None:
+                super_elite_affinity = super_elite_thermo
         params: dict[str, Any] = {"limit": limit, "offset": offset, "sort": sort, "order": order}
         if gene is not None: params["gene"] = gene.upper()
         if classification is not None: params["classification"] = classification
@@ -2383,7 +2464,7 @@ class AsyncPeptides(AsyncResource):
         if length_max is not None: params["length_max"] = length_max
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
-        if super_elite_thermo is not None: params["super_elite_thermo"] = "true" if super_elite_thermo else "false"
+        if super_elite_affinity is not None: params["super_elite_affinity"] = "true" if super_elite_affinity else "false"
         if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
         if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
         if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)
