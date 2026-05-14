@@ -340,6 +340,52 @@ fold_job = client.peptides.fold(
 )
 ```
 
+## Batch fold against a fixed receptor (v0.5.5+)
+
+`client.peptides.fold_batch(peptides, target_gene=...)` submits N peptides
+against one fixed receptor in parallel — each peptide is folded as a 2-chain
+complex (chain A = receptor, chain B = peptide). Pass exactly one of
+`target_gene`, `receptor_pdb`, or `receptor_sequence`. Peptide input accepts
+bare AA strings **or** FASTA blocks (multi-record supported).
+
+Billing is **100 credits per fold per trajectory**, with a
+`max(1.0, sampling_steps / 50)` multiplier — the full batch cost is charged
+upfront. HTTP 402 if balance is short.
+
+```python
+# Gene-based receptor (canonical PDB or human-proteome lookup)
+job = client.peptides.fold_batch(
+    peptides=["ACDEFGHIK", "MNPQRSTVWY", "DPVQETICK"],
+    target_gene="EGFR",
+    diffusion_samples=4,
+)
+print(job.batch_id, job.total_cost_credits)
+results = job.wait(on_progress=lambda s: print(s["done"], "/", s["total"]))
+for fold in results:
+    if fold is not None:
+        print(fold.iptm, fold.ipsae)
+
+# Custom PDB receptor
+job = client.peptides.fold_batch(
+    peptides=peptide_library,
+    receptor_pdb="receptors/my_target.pdb",  # path OR raw PDB content
+    receptor_name="MY_TARGET_v2",
+    sampling_steps=100,                      # 2× billing multiplier
+)
+
+# FASTA input (server parses multi-record blocks)
+with open("candidates.fasta") as fh:
+    job = client.peptides.fold_batch(
+        peptides=[fh.read()],
+        target_gene="CD47",
+    )
+```
+
+`BatchFoldJob` exposes `batch_id`, `jobs` (per-peptide submission metadata),
+`total_cost_credits`, `peptide_count`, `trajectories_per_peptide`, `receptor`,
+`sub_jobs`, `results`/`folds`, plus `wait(timeout=, poll_interval=, on_progress=)`
+and `cancel()`. See `examples/23_fold_batch.py` for the full workflow.
+
 ```python
 from ligandai import (
     align_candidates_to_receptor,

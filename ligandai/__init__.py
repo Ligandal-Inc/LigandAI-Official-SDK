@@ -49,6 +49,7 @@ from ligandai._fold_time_model import (
     update_fold_time_model,
 )
 from ligandai.jobs import AsyncJob, Job
+from ligandai.resources.peptides import AsyncBatchFoldJob, BatchFoldJob
 from ligandai.peptide_viewer import (
     PROTEINVIEW_ATTRIBUTION,
     DashboardHandle,
@@ -124,10 +125,12 @@ __all__ = [
     "AdaptyvSequence",
     "AdaptyvTarget",
     "ApiCallLogEntry",
+    "AsyncBatchFoldJob",
     "AsyncJob",
     "AsyncLigandAI",
     "AsyncReceptorDBClient",
     "AutoTopupConfig",
+    "BatchFoldJob",
     "BindingOrientationResult",
     "BiotinLinker",
     "BivalentTarget",

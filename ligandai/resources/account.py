@@ -12,12 +12,23 @@ from ligandai.types import (
     AutoTopupConfig,
     ClientSessionUsage,
     Credits,
+    CreditsWidget,
     CreditTransaction,
     TierLimits,
     TopUpResult,
     UsageSummary,
     User,
 )
+
+# Conversion: 100 credits = $0.01 → 1 USD = 10,000 credits.
+# (Andre 2026-05-14, matches shared/schema.ts CREDIT_PRICING.customCreditRate = 100.)
+_CREDITS_PER_USD = 10_000
+
+
+def _credits_to_usd(credits: int | None) -> float:
+    if credits is None:
+        return 0.0
+    return round(int(credits) / _CREDITS_PER_USD, 2)
 
 # Implausibly large balance — almost certainly a server-side sentinel
 # (Number.MAX_SAFE_INTEGER = 9_007_199_254_740_991, or 1e16) returned for
@@ -163,6 +174,40 @@ class Account(Resource):
             body["paymentMethodId"] = payment_method_id
         payload = self._transport.request("POST", "/api/billing/topup", json=body) or {}
         return TopUpResult.model_validate(payload)
+
+    def widget(self) -> CreditsWidget:
+        """``GET /api/credits/balance`` — Claude-Code-style billing widget snapshot.
+
+        Returns a normalized :class:`~ligandai.types.CreditsWidget` with:
+          - balance_credits / balance_usd
+          - monthly_limit_credits / monthly_limit_usd
+          - used_this_month_credits / spent_this_month_usd
+          - pct_used (0-100)
+          - reset_date (first of next month)
+          - auto_reload_enabled + threshold/amount
+
+        Renders identically to the dollar-progress widget Andre uses in the
+        Claude Code billing pane.
+        """
+        payload = self._transport.request("GET", "/api/credits/balance") or {}
+        bal = int(payload.get("available") or 0)
+        total = int(payload.get("total") or 0)
+        used = int(payload.get("used_this_month") or max(0, total - bal))
+        pct = int(round(100 * used / total)) if total > 0 else 0
+        return CreditsWidget.model_validate({
+            "available": bal,
+            "total": total,
+            "usedThisMonth": used,
+            "balance_usd": _credits_to_usd(bal),
+            "monthly_limit_usd": _credits_to_usd(total),
+            "spent_this_month_usd": _credits_to_usd(used),
+            "pct_used": pct,
+            "resetDate": payload.get("reset_date"),
+            "autoReplenish": bool(payload.get("auto_replenish") or False),
+            "threshold": payload.get("threshold"),
+            "replenishAmount": payload.get("replenish_amount"),
+            "tier": payload.get("tier"),
+        })
 
     def configure_auto_topup(
         self,

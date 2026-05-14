@@ -444,6 +444,14 @@ class LigandAI(_ClientCommon):
         num_peptides = kwargs.pop("num_peptides", n_samples)
         return self.peptides.generate(gene=gene, num_peptides=num_peptides, **kwargs)
 
+    def fold_batch(self, peptides: list[str], **kwargs: Any) -> Any:
+        """Convenience wrapper for :meth:`client.peptides.fold_batch`.
+
+        Submit N peptides against one fixed receptor for batch Boltz-2 folding.
+        See :meth:`Peptides.fold_batch` for full parameter docs and examples.
+        """
+        return self.peptides.fold_batch(peptides, **kwargs)
+
     def fold(
         self,
         target: str | list[Any] | None = None,
@@ -564,6 +572,10 @@ class AsyncLigandAI(_ClientCommon):
 
     def session(self, session_id: str | None = None) -> AsyncCreditSession:
         return AsyncCreditSession(self, session_id=session_id)
+
+    async def fold_batch(self, peptides: list[str], **kwargs: Any) -> Any:
+        """Async convenience wrapper for :meth:`AsyncPeptides.fold_batch`."""
+        return await self.peptides.fold_batch(peptides, **kwargs)
 
     async def close(self) -> None:
         await self._transport.close()
