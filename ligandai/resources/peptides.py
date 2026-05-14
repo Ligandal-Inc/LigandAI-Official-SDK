@@ -8,6 +8,7 @@ Endpoint mapping (server source-of-truth):
 
 - :meth:`Peptides.generate`               → ``POST /api/ptf/parallel/generate``
 - :meth:`Peptides.fold`                   → ``POST /api/folding/predict``
+- :meth:`Peptides.fold_batch`             → ``POST /api/v1/folding/predict-batch``
 - :meth:`Peptides.fold_custom_mutation`   → ``POST /api/ptf/fold-custom-mutation`` (or boltz2/modified-fold)
 - :meth:`Peptides.continue_folding`       → ``POST /api/ptf/parallel/{sid}/continue``
 - :meth:`Peptides.score_complex`          → ``POST /api/binder-scoring/fold-and-score``
@@ -27,7 +28,7 @@ from __future__ import annotations
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from ligandai.errors import LigandAIError
 from ligandai.jobs import AsyncJob, Job
@@ -632,6 +633,512 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     )
 
 
+# ─── Batch fold helpers (v0.5.5) ────────────────────────────────────────────
+
+# The batch-fold endpoint takes either bare AA strings or FASTA blocks. The
+# server parses FASTA already, so this list is forwarded verbatim — but we
+# strip empty/whitespace-only entries client-side to surface argument errors
+# closer to the caller.
+def _normalize_batch_peptide_inputs(peptides: list[str]) -> list[str]:
+    if not isinstance(peptides, list) or not peptides:
+        raise ValueError("peptides must be a non-empty list of strings")
+    cleaned: list[str] = []
+    for i, p in enumerate(peptides):
+        if not isinstance(p, str):
+            raise TypeError(f"peptides[{i}] must be a string, got {type(p).__name__}")
+        s = p.strip()
+        if s:
+            cleaned.append(s)
+    if not cleaned:
+        raise ValueError("peptides list contained no non-empty strings")
+    return cleaned
+
+
+def _resolve_receptor_pdb_arg(receptor_pdb: str | None) -> str | None:
+    """Accept either raw PDB content or a filesystem path. Path -> read once."""
+    if receptor_pdb is None:
+        return None
+    if not isinstance(receptor_pdb, str) or not receptor_pdb.strip():
+        raise ValueError("receptor_pdb must be a non-empty string")
+    # If the value looks like a real PDB record we forward as-is. Otherwise, if
+    # it looks like a path that exists on disk, read it.
+    has_pdb_header = any(
+        receptor_pdb.lstrip().startswith(tok)
+        for tok in ("HEADER", "TITLE", "COMPND", "REMARK", "ATOM", "HETATM", "MODEL", "CRYST1")
+    )
+    if has_pdb_header:
+        return receptor_pdb
+    # Heuristic: short single-line strings without ATOM records but with a
+    # plausible file suffix are treated as paths.
+    if len(receptor_pdb) < 4096 and ("/" in receptor_pdb or "\\" in receptor_pdb or receptor_pdb.endswith(".pdb")):
+        try:
+            path = Path(receptor_pdb).expanduser()
+            if path.exists() and path.is_file():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            # Fall through — caller probably meant a literal string
+            pass
+    return receptor_pdb
+
+
+def _build_batch_fold_body(
+    *,
+    peptides: list[str],
+    target_gene: str | None,
+    receptor_pdb: str | None,
+    receptor_sequence: str | None,
+    receptor_name: str | None,
+    diffusion_samples: int,
+    sampling_steps: int,
+    recycling_steps: int | None,
+    step_scale: float | None,
+    msa_enabled: bool | None,
+    glycosylation: bool | None,
+    template_mode: bool,
+    n_parallel_gpus: int | None,
+    session_id: str | None,
+    contribute_to_receptordb: bool | None,
+) -> dict[str, Any]:
+    """Construct the POST /api/v1/folding/predict-batch JSON body."""
+    receptor_specified = [v for v in (target_gene, receptor_pdb, receptor_sequence) if v]
+    if len(receptor_specified) != 1:
+        raise ValueError(
+            "Pass exactly one of target_gene=, receptor_pdb=, or receptor_sequence="
+        )
+
+    body: dict[str, Any] = {
+        "peptides": _normalize_batch_peptide_inputs(peptides),
+        "diffusion_samples": int(diffusion_samples),
+        "sampling_steps": int(sampling_steps),
+        "template_mode": bool(template_mode),
+    }
+    if target_gene is not None:
+        body["target_gene"] = target_gene
+    if receptor_pdb is not None:
+        body["receptor_pdb"] = _resolve_receptor_pdb_arg(receptor_pdb)
+    if receptor_sequence is not None:
+        body["receptor_sequence"] = receptor_sequence
+    if receptor_name is not None:
+        body["receptor_name"] = receptor_name
+    if recycling_steps is not None:
+        body["recycling_steps"] = int(recycling_steps)
+    if step_scale is not None:
+        body["step_scale"] = float(step_scale)
+    if msa_enabled is not None:
+        body["msa_enabled"] = bool(msa_enabled)
+    if glycosylation is not None:
+        body["glycosylation"] = bool(glycosylation)
+    if n_parallel_gpus is not None:
+        body["n_parallel_gpus"] = int(n_parallel_gpus)
+    if session_id is not None:
+        body["session_id"] = session_id
+    if contribute_to_receptordb is not None:
+        body["contribute_to_receptordb"] = bool(contribute_to_receptordb)
+    return body
+
+
+class BatchFoldJob:
+    """A batch of N peptide-receptor fold jobs submitted by ``Peptides.fold_batch``.
+
+    Internally wraps N :class:`~ligandai.jobs.Job` instances (one per peptide)
+    sharing a single ``batch_id``. ``wait()`` blocks until every sub-job is
+    terminal and returns the list of parsed :class:`FoldResult` objects in the
+    same order as the input peptides.
+
+    The credit charge is taken upfront on submission — sub-job failures do
+    NOT automatically refund. Use ``.refunds_pending`` to see how many failed.
+    """
+
+    def __init__(
+        self,
+        transport: Any,
+        *,
+        batch_id: str,
+        jobs: list[dict[str, Any]],
+        total_cost_credits: int,
+        peptide_count: int,
+        trajectories_per_peptide: int,
+        receptor: dict[str, Any] | None = None,
+        sampling_steps: int | None = None,
+    ) -> None:
+        from ligandai.jobs import Job  # local to avoid circular import
+
+        self._transport = transport
+        self._batch_id = batch_id
+        self._jobs_meta = jobs
+        self._total_cost_credits = int(total_cost_credits)
+        self._peptide_count = int(peptide_count)
+        self._trajectories_per_peptide = int(trajectories_per_peptide)
+        self._receptor = receptor or {}
+        self._sampling_steps = sampling_steps
+        self._sub_jobs: list[Job[FoldResult]] = []
+        for entry in jobs:
+            jid = entry.get("job_id") or entry.get("jobId") or ""
+            if not jid:
+                # Submission failed for this slot — placeholder kept so
+                # peptide_index alignment is preserved in .results.
+                self._sub_jobs.append(None)  # type: ignore[arg-type]
+                continue
+            self._sub_jobs.append(
+                Job(
+                    transport,
+                    jid,
+                    job_type="folding",
+                    parser=_parse_fold,
+                    status_path="/api/folding/jobs/{job_id}",
+                    cancel_path="/api/folding/jobs/{job_id}",
+                    sse_path="/api/jobs/{job_id}/sse",
+                    initial={"id": jid, "type": "folding", "status": "queued"},
+                )
+            )
+        self._results: list[FoldResult | None] | None = None
+
+    # ─── Public properties ──────────────────────────────────────────────────
+
+    @property
+    def batch_id(self) -> str:
+        return self._batch_id
+
+    @property
+    def jobs(self) -> list[dict[str, Any]]:
+        """Raw per-peptide submission metadata: job_id, peptide_index, sequence."""
+        return list(self._jobs_meta)
+
+    @property
+    def total_cost_credits(self) -> int:
+        return self._total_cost_credits
+
+    @property
+    def peptide_count(self) -> int:
+        return self._peptide_count
+
+    @property
+    def trajectories_per_peptide(self) -> int:
+        return self._trajectories_per_peptide
+
+    @property
+    def receptor(self) -> dict[str, Any]:
+        """Server-resolved receptor metadata: mode, gene, uniprot_id, length, source."""
+        return dict(self._receptor)
+
+    @property
+    def sub_jobs(self) -> list[Any]:
+        """List of :class:`Job` instances aligned with ``peptide_index``.
+
+        Failed-to-submit slots are ``None`` (kept so indices line up with input).
+        """
+        return list(self._sub_jobs)
+
+    @property
+    def results(self) -> list[FoldResult | None]:
+        """Parsed FoldResults aligned with ``peptide_index`` (None for failures).
+
+        Triggers a per-job refresh + parse if not already cached. Call ``.wait()``
+        first to ensure all sub-jobs are terminal.
+        """
+        if self._results is None:
+            out: list[FoldResult | None] = []
+            for sub in self._sub_jobs:
+                if sub is None:
+                    out.append(None)
+                    continue
+                try:
+                    out.append(sub.results)
+                except Exception:
+                    out.append(None)
+            self._results = out
+        return list(self._results)
+
+    @property
+    def folds(self) -> list[FoldResult | None]:
+        """Alias for :attr:`results` — matches the docstring example surface."""
+        return self.results
+
+    @property
+    def refunds_pending(self) -> int:
+        """Sub-jobs that failed-to-submit or ended non-successfully (refund tally)."""
+        n = 0
+        for sub in self._sub_jobs:
+            if sub is None:
+                n += 1
+                continue
+            try:
+                if sub.is_terminal and not sub.succeeded:
+                    n += 1
+            except Exception:
+                n += 1
+        return n
+
+    # ─── Polling & waiting ──────────────────────────────────────────────────
+
+    def wait(
+        self,
+        timeout: float = 7200.0,
+        poll_interval: float = 5.0,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[FoldResult | None]:
+        """Block until every sub-job is terminal. Returns ordered results.
+
+        Parameters
+        ----------
+        timeout
+            Total wall-clock budget (seconds) for the whole batch. Raises
+            :class:`LigandAITimeoutError` if exceeded.
+        poll_interval
+            Sleep between polls (seconds). Each tick refreshes every still-
+            running sub-job before sleeping.
+        on_progress
+            Optional callback receiving a dict ``{"done": int, "total": int,
+            "failed": int, "batch_id": str}`` on every poll tick.
+        """
+        import time
+        from ligandai.errors import LigandAITimeoutError
+
+        deadline = time.monotonic() + timeout
+        total = len(self._sub_jobs)
+        while True:
+            done = 0
+            failed = 0
+            for sub in self._sub_jobs:
+                if sub is None:
+                    failed += 1
+                    done += 1
+                    continue
+                if sub.is_terminal:
+                    done += 1
+                    if not sub.succeeded:
+                        failed += 1
+                else:
+                    try:
+                        sub.refresh()
+                        if sub.is_terminal:
+                            done += 1
+                            if not sub.succeeded:
+                                failed += 1
+                    except Exception:
+                        # Transient — keep retrying on next tick
+                        pass
+            if on_progress is not None:
+                try:
+                    on_progress({
+                        "batch_id": self._batch_id,
+                        "done": done,
+                        "total": total,
+                        "failed": failed,
+                    })
+                except Exception:
+                    pass
+            if done >= total:
+                break
+            if time.monotonic() > deadline:
+                raise LigandAITimeoutError(
+                    f"Batch {self._batch_id} did not complete within {timeout}s "
+                    f"({done}/{total} sub-jobs terminal)"
+                )
+            time.sleep(poll_interval)
+        # Force per-job result parse once
+        self._results = None
+        return self.results
+
+    def cancel(self) -> int:
+        """Cancel every still-running sub-job. Returns the number canceled."""
+        n = 0
+        for sub in self._sub_jobs:
+            if sub is None:
+                continue
+            try:
+                if not sub.is_terminal and sub.cancel():
+                    n += 1
+            except Exception:
+                pass
+        return n
+
+    def __len__(self) -> int:
+        return len(self._sub_jobs)
+
+    def __repr__(self) -> str:
+        return (
+            f"BatchFoldJob(batch_id={self._batch_id!r}, "
+            f"peptide_count={self._peptide_count}, "
+            f"trajectories_per_peptide={self._trajectories_per_peptide}, "
+            f"total_cost_credits={self._total_cost_credits})"
+        )
+
+
+class AsyncBatchFoldJob:
+    """Async sibling of :class:`BatchFoldJob`. See :class:`BatchFoldJob` for full API."""
+
+    def __init__(
+        self,
+        transport: Any,
+        *,
+        batch_id: str,
+        jobs: list[dict[str, Any]],
+        total_cost_credits: int,
+        peptide_count: int,
+        trajectories_per_peptide: int,
+        receptor: dict[str, Any] | None = None,
+        sampling_steps: int | None = None,
+    ) -> None:
+        from ligandai.jobs import AsyncJob  # local to avoid circular import
+
+        self._transport = transport
+        self._batch_id = batch_id
+        self._jobs_meta = jobs
+        self._total_cost_credits = int(total_cost_credits)
+        self._peptide_count = int(peptide_count)
+        self._trajectories_per_peptide = int(trajectories_per_peptide)
+        self._receptor = receptor or {}
+        self._sampling_steps = sampling_steps
+        self._sub_jobs: list[Any] = []
+        for entry in jobs:
+            jid = entry.get("job_id") or entry.get("jobId") or ""
+            if not jid:
+                self._sub_jobs.append(None)
+                continue
+            self._sub_jobs.append(
+                AsyncJob(
+                    transport,
+                    jid,
+                    job_type="folding",
+                    parser=_parse_fold,
+                    status_path="/api/folding/jobs/{job_id}",
+                    cancel_path="/api/folding/jobs/{job_id}",
+                    sse_path="/api/jobs/{job_id}/sse",
+                    initial={"id": jid, "type": "folding", "status": "queued"},
+                )
+            )
+        self._results: list[FoldResult | None] | None = None
+
+    @property
+    def batch_id(self) -> str:
+        return self._batch_id
+
+    @property
+    def jobs(self) -> list[dict[str, Any]]:
+        return list(self._jobs_meta)
+
+    @property
+    def total_cost_credits(self) -> int:
+        return self._total_cost_credits
+
+    @property
+    def peptide_count(self) -> int:
+        return self._peptide_count
+
+    @property
+    def trajectories_per_peptide(self) -> int:
+        return self._trajectories_per_peptide
+
+    @property
+    def receptor(self) -> dict[str, Any]:
+        return dict(self._receptor)
+
+    @property
+    def sub_jobs(self) -> list[Any]:
+        return list(self._sub_jobs)
+
+    async def wait(
+        self,
+        timeout: float = 7200.0,
+        poll_interval: float = 5.0,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[FoldResult | None]:
+        import asyncio
+        import time
+        from ligandai.errors import LigandAITimeoutError
+
+        deadline = time.monotonic() + timeout
+        total = len(self._sub_jobs)
+        while True:
+            done = 0
+            failed = 0
+            for sub in self._sub_jobs:
+                if sub is None:
+                    failed += 1
+                    done += 1
+                    continue
+                if sub.is_terminal:
+                    done += 1
+                    if not sub.succeeded:
+                        failed += 1
+                else:
+                    try:
+                        await sub.refresh()
+                        if sub.is_terminal:
+                            done += 1
+                            if not sub.succeeded:
+                                failed += 1
+                    except Exception:
+                        pass
+            if on_progress is not None:
+                try:
+                    on_progress({
+                        "batch_id": self._batch_id,
+                        "done": done,
+                        "total": total,
+                        "failed": failed,
+                    })
+                except Exception:
+                    pass
+            if done >= total:
+                break
+            if time.monotonic() > deadline:
+                raise LigandAITimeoutError(
+                    f"Batch {self._batch_id} did not complete within {timeout}s "
+                    f"({done}/{total} sub-jobs terminal)"
+                )
+            await asyncio.sleep(poll_interval)
+        # Force result parse
+        out: list[FoldResult | None] = []
+        for sub in self._sub_jobs:
+            if sub is None:
+                out.append(None)
+                continue
+            try:
+                # AsyncJob.results may be a sync property that fetches lazily;
+                # if it requires an await on a loader, fall back to a fresh
+                # refresh + parse here.
+                out.append(sub.results)
+            except Exception:
+                out.append(None)
+        self._results = out
+        return list(out)
+
+    @property
+    def results(self) -> list[FoldResult | None]:
+        if self._results is None:
+            return [None] * len(self._sub_jobs)
+        return list(self._results)
+
+    @property
+    def folds(self) -> list[FoldResult | None]:
+        return self.results
+
+    async def cancel(self) -> int:
+        n = 0
+        for sub in self._sub_jobs:
+            if sub is None:
+                continue
+            try:
+                if not sub.is_terminal and await sub.cancel():
+                    n += 1
+            except Exception:
+                pass
+        return n
+
+    def __len__(self) -> int:
+        return len(self._sub_jobs)
+
+    def __repr__(self) -> str:
+        return (
+            f"AsyncBatchFoldJob(batch_id={self._batch_id!r}, "
+            f"peptide_count={self._peptide_count}, "
+            f"trajectories_per_peptide={self._trajectories_per_peptide}, "
+            f"total_cost_credits={self._total_cost_credits})"
+        )
+
+
 def _first_target_gene(payload: dict[str, Any]) -> str | None:
     targets = payload.get("targets")
     if isinstance(targets, list) and targets:
@@ -1159,6 +1666,132 @@ class Peptides(Resource):
             cancel_path="/api/folding/jobs/{job_id}",
             sse_path="/api/jobs/{job_id}/sse",
             initial={"id": job_id, "type": "folding", "status": "queued", **payload},
+        )
+
+    def fold_batch(
+        self,
+        peptides: list[str],
+        *,
+        target_gene: str | None = None,
+        receptor_pdb: str | None = None,
+        receptor_sequence: str | None = None,
+        receptor_name: str | None = None,
+        diffusion_samples: int = 1,
+        sampling_steps: int = 50,
+        recycling_steps: int | None = None,
+        step_scale: float | None = None,
+        msa_enabled: bool | None = None,
+        glycosylation: bool | None = None,
+        template_mode: bool = False,
+        n_parallel_gpus: int | None = None,
+        session_id: str | None = None,
+        contribute_to_receptordb: bool | None = None,
+    ) -> BatchFoldJob:
+        """Submit N peptides against a single fixed receptor for batch Boltz-2 folding.
+
+        ``POST /api/v1/folding/predict-batch``
+
+        Each peptide is folded as a 2-chain complex (chain A = receptor,
+        chain B = peptide). The full peptide list is folded in parallel
+        subject to server-side concurrency limits (tier + GPU quota).
+
+        Billing
+        -------
+        100 credits per fold per trajectory. Sampling steps >50 apply a
+        multiplier of ``max(1.0, sampling_steps / 50)``. Total cost is
+        charged upfront before any GPU work begins; HTTP 402 is raised when
+        balance is insufficient.
+
+        Receptor (pass exactly one)
+        ---------------------------
+        ``target_gene``
+            Gene symbol (e.g. ``"EGFR"``). Resolved server-side via the
+            canonical predicted PDB if available, otherwise via the human
+            proteome UniProt SQLite.
+        ``receptor_pdb``
+            Raw PDB content, base64-encoded PDB, or a local path to a .pdb
+            file (the SDK reads the file once and forwards the content).
+        ``receptor_sequence``
+            Raw amino-acid sequence. The server attempts a UniProt match for
+            attribution and falls back to the literal sequence labelled with
+            ``receptor_name`` (or ``"custom_sequence"``).
+
+        Peptide input
+        -------------
+        Each entry in ``peptides`` may be a bare AA string OR a FASTA block
+        (string starting with ``>``). Multi-record FASTA is supported: every
+        record produces one fold job. Duplicates are de-duplicated server-side.
+
+        Examples
+        --------
+        Gene-based receptor::
+
+            job = client.peptides.fold_batch(
+                peptides=["ACDEFGHIK", "WYLKPRSTV", "MNPQRSTAV"],
+                target_gene="EGFR",
+                diffusion_samples=4,
+            )
+            result = job.wait()
+            for fold in result:
+                if fold is not None:
+                    print(fold.iptm, fold.ipsae)
+
+        FASTA input::
+
+            with open("candidates.fasta") as fh:
+                job = client.peptides.fold_batch(
+                    peptides=[fh.read()],
+                    target_gene="CD47",
+                    diffusion_samples=4,
+                )
+
+        Custom PDB receptor (e.g. an Adaptyv-expressed mutant)::
+
+            job = client.peptides.fold_batch(
+                peptides=peptide_library,
+                receptor_pdb="receptors/my_target.pdb",
+                receptor_name="MY_TARGET_v2",
+                sampling_steps=100,        # 2x billing multiplier
+            )
+
+        Returns
+        -------
+        :class:`BatchFoldJob`
+            ``.batch_id``, ``.jobs`` (per-peptide job metadata),
+            ``.total_cost_credits``, and ``.wait()`` for results.
+        """
+        if self._client is not None:
+            self._client._require_feature("predict_structure")
+        body = _build_batch_fold_body(
+            peptides=peptides,
+            target_gene=target_gene,
+            receptor_pdb=receptor_pdb,
+            receptor_sequence=receptor_sequence,
+            receptor_name=receptor_name,
+            diffusion_samples=diffusion_samples,
+            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps,
+            step_scale=step_scale,
+            msa_enabled=msa_enabled,
+            glycosylation=glycosylation,
+            template_mode=template_mode,
+            n_parallel_gpus=n_parallel_gpus,
+            session_id=session_id,
+            contribute_to_receptordb=contribute_to_receptordb,
+        )
+        payload = self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        batch_id = payload.get("batch_id") or payload.get("batchId") or ""
+        if not batch_id:
+            raise LigandAIError("Server did not return a batch_id for fold_batch", response=payload)
+        return BatchFoldJob(
+            self._transport,
+            batch_id=batch_id,
+            jobs=payload.get("jobs") or [],
+            total_cost_credits=int(payload.get("total_cost_credits") or 0),
+            peptide_count=int(payload.get("peptide_count") or 0),
+            trajectories_per_peptide=int(payload.get("trajectories_per_peptide") or diffusion_samples),
+            receptor=payload.get("receptor"),
+            sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
         )
 
     def fold_custom_mutation(
@@ -2206,6 +2839,65 @@ class AsyncPeptides(AsyncResource):
             cancel_path="/api/folding/jobs/{job_id}",
             sse_path="/api/jobs/{job_id}/sse",
             initial={"id": job_id, "type": "folding", "status": "queued", **payload},
+        )
+
+    async def fold_batch(
+        self,
+        peptides: list[str],
+        *,
+        target_gene: str | None = None,
+        receptor_pdb: str | None = None,
+        receptor_sequence: str | None = None,
+        receptor_name: str | None = None,
+        diffusion_samples: int = 1,
+        sampling_steps: int = 50,
+        recycling_steps: int | None = None,
+        step_scale: float | None = None,
+        msa_enabled: bool | None = None,
+        glycosylation: bool | None = None,
+        template_mode: bool = False,
+        n_parallel_gpus: int | None = None,
+        session_id: str | None = None,
+        contribute_to_receptordb: bool | None = None,
+    ) -> AsyncBatchFoldJob:
+        """Async variant of :meth:`Peptides.fold_batch`.
+
+        See :meth:`Peptides.fold_batch` for receptor modes, FASTA support, and
+        billing details. Returns an :class:`AsyncBatchFoldJob` whose ``.wait()``
+        is a coroutine.
+        """
+        if self._client is not None:
+            self._client._require_feature("predict_structure")
+        body = _build_batch_fold_body(
+            peptides=peptides,
+            target_gene=target_gene,
+            receptor_pdb=receptor_pdb,
+            receptor_sequence=receptor_sequence,
+            receptor_name=receptor_name,
+            diffusion_samples=diffusion_samples,
+            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps,
+            step_scale=step_scale,
+            msa_enabled=msa_enabled,
+            glycosylation=glycosylation,
+            template_mode=template_mode,
+            n_parallel_gpus=n_parallel_gpus,
+            session_id=session_id,
+            contribute_to_receptordb=contribute_to_receptordb,
+        )
+        payload = await self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        batch_id = payload.get("batch_id") or payload.get("batchId") or ""
+        if not batch_id:
+            raise LigandAIError("Server did not return a batch_id for fold_batch", response=payload)
+        return AsyncBatchFoldJob(
+            self._transport,
+            batch_id=batch_id,
+            jobs=payload.get("jobs") or [],
+            total_cost_credits=int(payload.get("total_cost_credits") or 0),
+            peptide_count=int(payload.get("peptide_count") or 0),
+            trajectories_per_peptide=int(payload.get("trajectories_per_peptide") or diffusion_samples),
+            receptor=payload.get("receptor"),
+            sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
         )
 
     async def fold_custom_mutation(

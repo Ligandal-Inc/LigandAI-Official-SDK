@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.5] - 2026-05-11
+
+### Added — `client.peptides.fold_batch()` and `BatchFoldJob`
+
+- **`POST /api/v1/folding/predict-batch`** — submit N peptides against one
+  fixed receptor for parallel Boltz-2 folding. Each peptide is folded as a
+  2-chain complex (chain A = receptor, chain B = peptide).
+- New methods on `Peptides` and `AsyncPeptides`: `fold_batch(peptides,
+  target_gene= | receptor_pdb= | receptor_sequence=, ...)`.
+- New top-level convenience: `client.fold_batch(peptides, target_gene=...)`.
+- Receptor resolution accepts gene symbols, raw or path-based PDB content,
+  or amino-acid sequences (server attempts UniProt match for attribution).
+- Peptide input accepts bare AA strings AND FASTA records (multi-record
+  FASTA blocks are parsed server-side; one fold job per record).
+- New result types `BatchFoldJob` / `AsyncBatchFoldJob` expose `batch_id`,
+  `jobs`, `total_cost_credits`, `peptide_count`, `trajectories_per_peptide`,
+  `receptor`, `sub_jobs`, `results`, `folds`, `refunds_pending`, plus
+  `wait(timeout=, poll_interval=, on_progress=)` and `cancel()`.
+- **Billing**: 100 credits per fold per trajectory, with a
+  `max(1.0, sampling_steps / 50)` multiplier (e.g. 100 sampling steps =
+  2× credits). The full batch cost is charged upfront — HTTP 402 is
+  returned when balance is insufficient.
+
+### Examples
+- New `examples/23_fold_batch.py` walks through gene / PDB / sequence /
+  FASTA receptor modes against a realistic candidate library.
+
 ## [0.5.4] - 2026-05-11
 
 ### Fixed - production-safe top-level helpers

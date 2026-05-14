@@ -194,7 +194,208 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override wallet file path.",
     )
 
+    # ── credits ───────────────────────────────────────────────────────────────
+    credits_parser = sub.add_parser(
+        "credits",
+        help="Show balance + spend widget; top up; toggle auto-reload.",
+    )
+    credits_sub = credits_parser.add_subparsers(dest="credits_command", title="credits sub-commands")
+
+    # credits (no sub) → widget. Bare `ligandai credits` is the default.
+    credits_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit raw JSON instead of the styled widget.",
+    )
+
+    # credits top-up
+    topup_parser = credits_sub.add_parser(
+        "top-up",
+        aliases=["topup", "buy"],
+        help="Purchase credits ($25 minimum). Returns a Stripe checkout URL.",
+    )
+    topup_parser.add_argument(
+        "--amount", "-a",
+        type=int,
+        required=True,
+        metavar="USD",
+        help="Dollar amount to top up (integer, min 25, max 20000).",
+    )
+    topup_parser.add_argument(
+        "--save-card",
+        action="store_true",
+        help="Save the payment method for future use (enables off-session auto top-up).",
+    )
+
+    # credits auto-reload
+    auto_parser = credits_sub.add_parser(
+        "auto-reload",
+        aliases=["auto"],
+        help="Configure auto-reload (paid tiers only).",
+    )
+    auto_group = auto_parser.add_mutually_exclusive_group(required=True)
+    auto_group.add_argument(
+        "--enable",
+        action="store_true",
+        help="Enable auto-reload with --threshold and --amount.",
+    )
+    auto_group.add_argument(
+        "--disable",
+        action="store_true",
+        help="Disable auto-reload.",
+    )
+    auto_parser.add_argument(
+        "--threshold",
+        type=int,
+        metavar="CREDITS",
+        help="Balance threshold (in credits) that triggers a reload. 100-100000.",
+    )
+    auto_parser.add_argument(
+        "--amount",
+        type=int,
+        choices=[25, 100, 200, 500, 1000, 2000],
+        metavar="USD",
+        help="Dollar amount per reload event.",
+    )
+
     return parser
+
+
+# ─── credits commands ─────────────────────────────────────────────────────────
+
+
+def _make_client(args: argparse.Namespace):
+    """Construct a LigandAIClient honoring --base-url and env-based auth.
+
+    Imported lazily so unit tests can patch this without dragging in the full
+    transport stack.
+    """
+    from ligandai import LigandAIClient
+
+    kwargs: dict[str, Any] = {}
+    base_url = getattr(args, "base_url", None)
+    if base_url:
+        kwargs["base_url"] = base_url
+    return LigandAIClient(**kwargs)
+
+
+def _format_progress_bar(pct: int, width: int = 40) -> str:
+    """ASCII progress bar matching Andre's screenshot style.
+
+    Filled cells show used spend; empty cells show remaining headroom.
+    """
+    pct = max(0, min(100, int(pct)))
+    filled = int(round(width * pct / 100))
+    return "█" * filled + "░" * (width - filled)
+
+
+def render_credits_widget(widget: Any, *, no_color: bool = False) -> str:
+    """Render a CreditsWidget like Andre's Claude-Code style screenshot.
+
+    Pure formatter — takes the widget object (or a dict-like with the same
+    fields) and returns the multi-line string. Separated out so the unit
+    tests can render against a fixture without an HTTP round-trip.
+    """
+    # Duck-typing: accept either pydantic model or dict.
+    get = lambda k, default=None: getattr(widget, k, None) if hasattr(widget, k) else widget.get(k, default)  # noqa: E731
+    spent = get("spent_this_month_usd", 0.0) or 0.0
+    limit = get("monthly_limit_usd", 0.0) or 0.0
+    pct = get("pct_used", 0) or 0
+    balance_usd = get("balance_usd", 0.0) or 0.0
+    auto = bool(get("auto_reload_enabled", False))
+    reset = get("reset_date", None)
+    # reset_date may be datetime, str, or None. Format defensively.
+    if reset and hasattr(reset, "strftime"):
+        reset_str = reset.strftime("%b %-d")
+    elif isinstance(reset, str):
+        reset_str = reset[:10]
+    else:
+        reset_str = "next month"
+
+    bar = _format_progress_bar(pct)
+    lines = [
+        f"  ${spent:>6.2f} spent  {bar}  {pct}% used",
+        f"  Resets {reset_str} · ${limit:.0f} monthly limit",
+        "",
+        f"  ▸ 1. ${balance_usd:.2f} balance · auto-reload {'on' if auto else 'off'}",
+        f"    2. Buy more  (ligandai credits top-up --amount 50)",
+        f"    3. {'Disable' if auto else 'Enable'} auto-reload",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_credits_widget(args: argparse.Namespace) -> int:
+    """Default `ligandai credits` — render the billing widget."""
+    try:
+        client = _make_client(args)
+        widget = client.account.widget()
+    except Exception as exc:
+        print(f"ligandai credits: failed to fetch balance: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        # Pydantic dumps via .model_dump_json on v2
+        try:
+            print(widget.model_dump_json(by_alias=True))
+        except Exception:
+            print(repr(widget))
+        return 0
+    print(render_credits_widget(widget))
+    return 0
+
+
+def cmd_credits_topup(args: argparse.Namespace) -> int:
+    """`ligandai credits top-up --amount 50`."""
+    if args.amount < 25 or args.amount > 20_000:
+        print("--amount must be between $25 and $20000.", file=sys.stderr)
+        return 2
+    try:
+        client = _make_client(args)
+        result = client.account.top_up(
+            amount_usd=args.amount,
+            save_card=bool(getattr(args, "save_card", False)),
+        )
+    except Exception as exc:
+        print(f"ligandai credits top-up: failed: {exc}", file=sys.stderr)
+        return 1
+    if getattr(result, "checkout_url", None):
+        print(f"Complete the purchase: {result.checkout_url}")
+        return 0
+    if getattr(result, "success", False):
+        credits = getattr(result, "credits_added", None)
+        new_bal = getattr(result, "new_balance", None)
+        suffix = f" → balance now {new_bal:,} credits" if new_bal else ""
+        print(f"Top-up succeeded: +{credits:,} credits{suffix}")
+        return 0
+    print("Top-up did not complete; check Stripe setup.", file=sys.stderr)
+    return 1
+
+
+def cmd_credits_auto(args: argparse.Namespace) -> int:
+    """`ligandai credits auto-reload --enable --threshold 5000 --amount 100`."""
+    if args.enable:
+        if not args.threshold or not args.amount:
+            print("--enable requires both --threshold and --amount.", file=sys.stderr)
+            return 2
+        if args.threshold < 100 or args.threshold > 100_000:
+            print("--threshold must be 100-100000 credits.", file=sys.stderr)
+            return 2
+    try:
+        client = _make_client(args)
+        cfg = client.account.configure_auto_topup(
+            enabled=bool(args.enable),
+            threshold_credits=args.threshold or 10_000,
+            amount_usd=args.amount or 200,
+        )
+    except Exception as exc:
+        print(f"ligandai credits auto-reload: failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Auto-reload {'enabled' if cfg.enabled else 'disabled'} "
+        f"(threshold={cfg.threshold_credits:,} cr, amount=${cfg.amount_usd})"
+        if cfg.enabled
+        else f"Auto-reload disabled."
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -210,6 +411,17 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_keys_revoke(args)
         else:
             parser.parse_args(["keys", "--help"])
+            return 1
+    elif args.command == "credits":
+        sub = getattr(args, "credits_command", None)
+        if sub in (None, ""):
+            return cmd_credits_widget(args)
+        elif sub in ("top-up", "topup", "buy"):
+            return cmd_credits_topup(args)
+        elif sub in ("auto-reload", "auto"):
+            return cmd_credits_auto(args)
+        else:
+            parser.parse_args(["credits", "--help"])
             return 1
     else:
         parser.print_help()

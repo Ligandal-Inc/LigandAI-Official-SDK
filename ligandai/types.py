@@ -137,6 +137,30 @@ class AutoTopupConfig(_LGModel):
     failure_count: int | None = Field(default=None, alias="failureCount")
 
 
+class CreditsWidget(_LGModel):
+    """Snapshot of credit state for a Claude-Code-style billing widget.
+
+    Conversion rate (Andre 2026-05-14): 100 credits = $0.01 → 1 USD = 10,000 credits.
+
+    The :attr:`pct_used` field is 0-100 (rounded). The :attr:`reset_date`
+    is the first of the following month at 00:00 UTC (matches server-side
+    /api/credits/balance response).
+    """
+
+    balance_credits: int = Field(alias="available")
+    monthly_limit_credits: int = Field(alias="total")
+    used_this_month_credits: int = Field(alias="usedThisMonth")
+    balance_usd: float
+    monthly_limit_usd: float
+    spent_this_month_usd: float
+    pct_used: int  # 0-100
+    reset_date: datetime | None = Field(default=None, alias="resetDate")
+    auto_reload_enabled: bool = Field(default=False, alias="autoReplenish")
+    auto_reload_threshold_credits: int | None = Field(default=None, alias="threshold")
+    auto_reload_amount_credits: int | None = Field(default=None, alias="replenishAmount")
+    tier: str | None = None
+
+
 class CostEstimate(_LGModel):
     """Credit cost estimate for a generation + folding job."""
 
