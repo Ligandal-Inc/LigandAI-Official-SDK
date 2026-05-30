@@ -68,9 +68,9 @@ ligandai = "ligandai.cli:main"
 [project.urls]
 Homepage = "https://ligandai.com"
 Documentation = "https://docs.ligandai.com"
-Repository = "https://github.com/ligandal/ligandai-python-sdk"
-Issues = "https://github.com/ligandal/ligandai-python-sdk/issues"
-Changelog = "https://github.com/ligandal/ligandai-python-sdk/blob/main/CHANGELOG.md"
+Repository = "https://github.com/nanogenomic/LigandAI"
+Issues = "https://github.com/nanogenomic/LigandAI/issues"
+Changelog = "https://github.com/nanogenomic/LigandAI/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ligandai"]
