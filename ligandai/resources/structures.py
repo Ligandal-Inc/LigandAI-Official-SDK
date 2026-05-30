@@ -17,16 +17,70 @@ from ligandai.types import (
 class Structures(Resource):
     """``/api/structure/*``, ``/api/gene-resolver/*``."""
 
-    def get(self, gene: str) -> Structure:
-        """``GET /api/structure/:gene`` — best structure (FastAPI 5058 proxy)."""
+    def get(
+        self,
+        gene: str,
+        *,
+        pdb_code: str | None = None,
+        isoform: int | None = None,
+        species: str | None = None,
+        declared_gene_set: list[str] | str | None = None,
+    ) -> Structure:
+        """``GET /api/structure/:gene`` — best structure with optional selection.
+
+        Args:
+            gene: Gene symbol (e.g. ``"KRAS"``, ``"CLDN18"``).
+            pdb_code: Specific PDB code to fetch (e.g. ``"6VG2"``). When given,
+                the resolver returns that exact structure instead of picking the
+                top-scored candidate.
+            isoform: Isoform number (e.g. ``2`` for CLDN18.2). Routed through
+                the resolver's UniProt isoform lookup.
+            species: ``"human"`` (default), ``"mouse"``, ``"rat"``, ``"cyno"``.
+                Non-human currently falls through to PDB-only resolution.
+            declared_gene_set: List or CSV of gene symbols for explicit
+                multimer/monomer disambiguation (e.g. ``["CD8A", "CD8B"]`` to
+                force the heterodimer; ``["CD8A"]`` to force the monomer).
+        """
+        params: dict[str, str] = {}
+        if pdb_code:
+            params["pdb_code"] = pdb_code
+        if isoform is not None:
+            params["isoform"] = str(isoform)
+        if species:
+            params["species"] = species
+        if declared_gene_set:
+            if isinstance(declared_gene_set, list):
+                params["declared_gene_set"] = ",".join(declared_gene_set)
+            else:
+                params["declared_gene_set"] = declared_gene_set
         return Structure.model_validate(
-            self._transport.request("GET", f"/api/structure/{gene}") or {"gene": gene, "source": "unknown"}
+            self._transport.request("GET", f"/api/structure/{gene}", params=params or None)
+            or {"gene": gene, "source": "unknown"}
         )
 
     def candidates(self, gene: str) -> list[StructureCandidate]:
         payload = self._transport.request("GET", f"/api/structure/candidates/{gene}") or []
         items = payload if isinstance(payload, list) else payload.get("candidates", [])
         return [StructureCandidate.model_validate(c) for c in items]
+
+    def list_isoforms(self, gene: str) -> list[dict]:
+        """``GET /api/structure/{gene}/isoforms`` — enumerate UniProt isoforms.
+
+        Returns list of ``{id, name, sequence_length, is_canonical, isoform_number}``.
+        Empty list if the gene has no reviewed UniProt entries.
+        """
+        payload = self._transport.request("GET", f"/api/structure/{gene}/isoforms") or {}
+        return payload.get("isoforms", [])
+
+    def list_species(self, gene: str) -> list[dict]:
+        """``GET /api/structure/{gene}/species`` — cross-species variants.
+
+        Returns list of ``{taxid, species, organism_name, common_name, accession}``
+        for every species in which this gene has a reviewed UniProt entry. Use the
+        returned ``species`` value as the ``species=`` kwarg for :meth:`get`.
+        """
+        payload = self._transport.request("GET", f"/api/structure/{gene}/species") or {}
+        return payload.get("species", [])
 
     def analyze(
         self,
@@ -142,9 +196,30 @@ class Structures(Resource):
 
 
 class AsyncStructures(AsyncResource):
-    async def get(self, gene: str) -> Structure:
+    async def get(
+        self,
+        gene: str,
+        *,
+        pdb_code: str | None = None,
+        isoform: int | None = None,
+        species: str | None = None,
+        declared_gene_set: list[str] | str | None = None,
+    ) -> Structure:
+        """Async variant of :meth:`Structures.get` — same kwargs."""
+        params: dict[str, str] = {}
+        if pdb_code:
+            params["pdb_code"] = pdb_code
+        if isoform is not None:
+            params["isoform"] = str(isoform)
+        if species:
+            params["species"] = species
+        if declared_gene_set:
+            if isinstance(declared_gene_set, list):
+                params["declared_gene_set"] = ",".join(declared_gene_set)
+            else:
+                params["declared_gene_set"] = declared_gene_set
         return Structure.model_validate(
-            await self._transport.request("GET", f"/api/structure/{gene}")
+            await self._transport.request("GET", f"/api/structure/{gene}", params=params or None)
             or {"gene": gene, "source": "unknown"}
         )
 
@@ -152,6 +227,16 @@ class AsyncStructures(AsyncResource):
         payload = await self._transport.request("GET", f"/api/structure/candidates/{gene}") or []
         items = payload if isinstance(payload, list) else payload.get("candidates", [])
         return [StructureCandidate.model_validate(c) for c in items]
+
+    async def list_isoforms(self, gene: str) -> list[dict]:
+        """Async variant of :meth:`Structures.list_isoforms`."""
+        payload = await self._transport.request("GET", f"/api/structure/{gene}/isoforms") or {}
+        return payload.get("isoforms", [])
+
+    async def list_species(self, gene: str) -> list[dict]:
+        """Async variant of :meth:`Structures.list_species`."""
+        payload = await self._transport.request("GET", f"/api/structure/{gene}/species") or {}
+        return payload.get("species", [])
 
     async def analyze(
         self,
