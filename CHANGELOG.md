@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-05-30
+
+### Fixed — `__version__` was not bumped in 0.6.0 / 0.6.1
+
+`ligandai._version.__version__` still reported `"0.5.7"` after the 0.6.0
+release because the version string lives in a separate file from
+`pyproject.toml` and was missed in two consecutive bumps. The wheels
+published as 0.6.0 and 0.6.1 contain all the 0.6.0 code correctly (new
+kwargs on `structures.get`, `list_isoforms`, `list_species`) — only the
+introspectable `ligandai.__version__` attribute was wrong. This release
+fixes the version string and republishes; no functional changes from
+0.6.0.
+
 ## [0.6.0] - 2026-05-30
 
 ### Added — Cross-species + isoform + PDB selection on structure endpoint
