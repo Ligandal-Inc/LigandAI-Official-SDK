@@ -3,12 +3,130 @@
 Official Python SDK for the [LIGANDAI](https://ligandai.com) platform — peptide
 design, structure prediction, scoring, and discovery.
 
+> **v0.6.0** — `client.structures.get(gene)` now accepts `pdb_code=`,
+> `isoform=`, `species=`, and `declared_gene_set=` kwargs so SDK callers
+> can pin a specific PDB, an isoform (e.g. CLDN18.2), a non-human species
+> (mouse / rat / cyno / rhesus / pig / dog / rabbit / zebrafish / chimp), or
+> force a monomer-vs-multimer disambiguation. New: `list_isoforms(gene)`
+> and `list_species(gene)` to enumerate. Backwards-compatible — no kwargs
+> = unchanged human-default fast path. Also: tier resolution is now
+> `max(key_prefix_tier, account_tier)` so an upgraded enterprise account
+> with a pro-prefixed key gets enterprise privs (no more post-upgrade
+> 401s). Backend resolver parallelized: high-PDB-count genes (KRAS,
+> EGFR, TP53) resolve in ~2 s instead of the prior 90 s timeout, with
+> a 6 h in-process LRU cache for repeats. See [CHANGELOG.md](CHANGELOG.md)
+> for details.
+
+> **v0.5.6** — SDK hardening: `gpu="b200_plus"` is the only accepted GPU type
+> (2x/4x/8x B200 / H100 / A100 raise `LigandAIInvalidConfig` before any
+> network call); identical `fold` / `fold_batch` calls within 24h return the
+> cached `Job` handle from a local sqlite at `~/.ligandai/submitted.db`;
+> client-side credit pre-flight raises `LigandAIInsufficientCredits` if your
+> balance can't cover the batch. See
+> [Concurrency & Quota](#concurrency--quota) and
+> [Credit Tracking](#credit-tracking) below, or
+> [CHANGELOG.md](CHANGELOG.md).
+
 > **v0.5.0** — `peptides.list(program_id)` now works (no more `TypeError`),
 > plus new `peptides.search(...)`, `structures.list(program_id)`, and
 > `structures.get_pdb(id)`. See
 > [`docs/api_reference.md`](docs/api_reference.md),
 > [`docs/workflows.md`](docs/workflows.md), and
 > [`docs/error_codes.md`](docs/error_codes.md), or [CHANGELOG.md](CHANGELOG.md).
+
+## Concurrency & Quota
+
+The SDK enforces tier limits **client-side** before submitting GPU work. Your
+tier (inferred from the API-key prefix) caps the number of in-flight GPU jobs:
+
+| Tier        | Concurrent GPU jobs |
+|-------------|---------------------|
+| free        | 1                   |
+| basic       | 4                   |
+| academia    | 16                  |
+| pro         | 25                  |
+| enterprise  | 50                  |
+| superadmin  | 50                  |
+
+When you exceed your cap, the SDK raises `LigandAIConcurrencyLimit`
+immediately — no network round-trip, no wasted GPU minutes. Inspect
+in-flight submissions via:
+
+```python
+for row in client.submitted_set.list_in_flight(client.api_key_hash):
+    print(row["submission_hash"][:12], row["kind"], row["job_id"])
+```
+
+### GPU type policy
+
+The SDK targets a single GPU class: **B200+** (`"b200_plus"`). Multi-GPU
+folds (2x/4x/8x B200) are **not exposed** through the public SDK. Passing
+`gpu="b200_2x"`, `gpu="b200_4x"`, `gpu="b200_8x"`, or any non-`b200_plus`
+value (including bare `b200`, `h100`, `a100`, etc.) raises
+`LigandAIInvalidConfig` before the network call.
+
+### Local dedupe
+
+Identical `client.fold(...)` / `client.fold_batch(...)` calls within a
+24-hour window return the cached `Job` handle instead of re-submitting —
+saving credits and Modal GPU slots. Submission identity is
+`sha256(peptide_set + receptor_seq + gpu + params)` so re-ordering a peptide
+list does not produce a "different" submission. To force a fresh submission,
+pass `force_resubmit=True`:
+
+```python
+# First call: POSTs and records in ~/.ligandai/submitted.db.
+job = client.fold_batch(["ACDE", "PQRS"], target_gene="EGFR", diffusion_samples=4)
+
+# Second identical call: returns the cached Job, no HTTP.
+same_job = client.fold_batch(["PQRS", "ACDE"], target_gene="EGFR", diffusion_samples=4)
+assert same_job.batch_id == job.batch_id
+
+# Force a real re-submission (e.g. after a server-side cache invalidation).
+new_job = client.fold_batch(["ACDE", "PQRS"], target_gene="EGFR",
+                            diffusion_samples=4, force_resubmit=True)
+```
+
+The dedupe DB lives at `~/.ligandai/submitted.db` (mode 0600). Failed
+submissions are eligible for retry — only `submitted` and `completed` rows
+within the window block re-submit.
+
+## Credit Tracking
+
+Every `fold` / `fold_batch` call pre-checks your credit balance against the
+estimated cost; if you can't afford the batch, the SDK raises
+`LigandAIInsufficientCredits` BEFORE any HTTP work. Catch it like:
+
+```python
+from ligandai import LigandAI
+from ligandai.errors import LigandAIInsufficientCredits
+
+client = LigandAI()
+try:
+    job = client.fold_batch(
+        peptides=my_500_peps,
+        target_gene="EGFR",
+        diffusion_samples=4,
+        sampling_steps=100,
+    )
+except LigandAIInsufficientCredits as e:
+    print(f"Need {e.required:,} cr; have {e.available:,} (shortfall {e.shortfall:,}).")
+    print("Top up at https://ligandai.com/account/billing.")
+```
+
+Superadmin / unlimited accounts (`is_unlimited=True`) skip the pre-flight
+and rely on the server's authoritative gate.
+
+The SDK also keeps a local credit-consumption ledger at
+`~/.ligandai/credit_ledger.db` for offline audit:
+
+```python
+events = client.credit_ledger.recent_events(client.api_key_hash, limit=20)
+for e in events:
+    print(e["ts"], e["kind"], e["job_id"], e["estimated"], "→", e["actual"])
+```
+
+Both local databases are mode 0600 under a 0700 parent directory.
 
 > **License & Terms** — By installing or using this SDK you agree to the
 > [LigandAI Terms of Service](https://ligandai.com/terms) and

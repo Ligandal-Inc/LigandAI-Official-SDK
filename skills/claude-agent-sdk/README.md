@@ -10,9 +10,28 @@ project that already has the `ligandai` Python SDK installed alongside it.
 # In the agent project
 npm install @anthropic-ai/agent-sdk
 # In the same environment Claude can shell to:
-pip install ligandai>=0.5.0
+pip install ligandai>=0.6.0
 export LIGANDAI_API_KEY=lgai_pro_...     # any valid LigandAI key
 ```
+
+### v0.6.0 — structure resolution with isoform / species / PDB selection
+
+Agents can now pin a specific PDB, isoform, or cross-species variant
+through `client.structures.get(gene, ...)`. Useful when the gene has
+many candidate structures (KRAS, EGFR), an isoform-specific drug target
+(CLDN18.2), or a non-human ortholog is needed:
+
+```python
+struct = client.structures.get("KRAS")                          # default — human, best
+struct = client.structures.get("CLDN18", isoform=2)             # CLDN18.2
+struct = client.structures.get("KRAS", pdb_code="6VG2")         # specific PDB
+struct = client.structures.get("KRAS", species="mouse")         # cross-species
+client.structures.list_isoforms("CLDN18")                       # enumerate
+client.structures.list_species("KRAS")                          # enumerate
+```
+
+Tier handling: API key prefix is now a *hint*, not a privilege ceiling —
+an enterprise account using a `lgai_pro_*` key gets enterprise privs.
 
 ## Wire it up
 
