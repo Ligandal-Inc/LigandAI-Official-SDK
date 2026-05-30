@@ -5,6 +5,266 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-05-30
+
+### Added — Cross-species + isoform + PDB selection on structure endpoint
+
+`client.structures.get()` now accepts keyword arguments to scope structure
+resolution to a specific isoform, species, or PDB code:
+
+```python
+# Backwards-compat: no kwargs = original fast SDK path, human default
+struct = client.structures.get("KRAS")
+
+# Specific isoform
+struct = client.structures.get("CLDN18", isoform=2)        # CLDN18.2
+
+# Specific PDB code
+struct = client.structures.get("KRAS", pdb_code="6VG2")
+
+# Cross-species (when explicitly requested) — human stays default
+struct = client.structures.get("KRAS", species="mouse")
+
+# Explicit multimer/monomer disambiguation
+struct = client.structures.get("CD8A", declared_gene_set=["CD8A", "CD8B"])
+```
+
+When any of these kwargs is given, the request is routed through the full
+FastAPI structure resolver (which honors them); when none are given, the
+original fast SDK path (ReceptorDB → UniProt → RCSB) is preserved verbatim.
+
+#### New enumeration methods
+
+```python
+# UniProt-backed isoform enumeration for a gene
+isoforms = client.structures.list_isoforms("CLDN18")
+# → [{id, name, sequence_length, is_canonical, isoform_number}, ...]
+
+# Cross-species enumeration — which species have reviewed entries for this gene
+species = client.structures.list_species("KRAS")
+# → [{taxid, species, organism_name, common_name, accession}, ...]
+```
+
+#### Supported species
+
+`human`, `mouse`, `rat`, `cyno`, `rhesus`, `pig`, `dog`, `rabbit`,
+`zebrafish`, `chimp`. Aliases accepted (e.g. `mus_musculus`, `mmu`).
+Unknown values log a warning and fall back to human.
+
+#### Backend changes (server-side, no SDK action needed)
+
+- Parallel candidate fetch in resolver: KRAS-class genes (high PDB count)
+  resolve in ~2 s instead of timing out at 90 s
+- In-process LRU cache (6 h TTL, 200-entry cap) keyed on
+  `(gene, pdb_code, complex_name, isoform, declared_gene_set, species_taxid)`
+- Tier resolution: API key prefix is no longer the privilege ceiling —
+  `max(key_prefix_tier, user.subscription_tier)` so an enterprise account
+  using a `lgai_pro_*` key gets enterprise privileges (no more 401 on
+  tier upgrade)
+- `/api/structure/{gene}` now accepts `pdb_code`, `isoform`, `species`,
+  `declared_gene_set` query params
+- New endpoints: `GET /api/structure/{gene}/isoforms`,
+  `GET /api/structure/{gene}/species`
+- Cross-species topology: when `species` is non-human, the resolver queries
+  UniProt REST for the species' canonical entry instead of the local
+  human-only surface proteome DB
+
+### Both async and sync resources
+
+All new methods (`get` kwargs, `list_isoforms`, `list_species`) are
+implemented on both `Structures` and `AsyncStructures`.
+
+## [0.5.7] - 2026-05-17
+
+### Fixed — `Job.wait` / `BatchFoldJob.stream` durable contract (`bd-f5rf1`)
+
+Triggered by the 2026-05-17 PPB-ext fold-recovery run: 116/245 folds had
+`status='completed'` returned by the server but `folding_jobs.result` held
+only the Modal spawn-ACK (`{call_id, message, spawned, status}`) instead of
+the real fold result. The legacy SDK `Job.wait()` returned success on outer
+status and downstream code saw `pdb_data=None`, `iptm=None`, `pdb_written=False`.
+
+Root cause was a server-side regression in `/api/folding/submit` (spawn-ACK
+posted to the local webhook as a successful completion) — fixed in tandem
+in `LIGANDAI_ALPHA_V2`. The SDK now refuses to silently propagate that
+state regardless of the server's behavior.
+
+#### `Job.wait(durable=True)` (new default)
+
+- `wait()` no longer returns until the result payload carries durable
+  structural data (`pdb_data` non-empty OR server-emitted `has_structure=True`).
+- When the deadline elapses without durable data, raises a new
+  `LigandAIWaitTimeout` carrying the captured `call_id`, missing-field
+  list, and last server state — callers can pass that `call_id` to
+  `client.folds.recover_from_modal(job_id)` to pull the result from Modal.
+- Opt-out: `wait(durable=False)` keeps the legacy fast-but-permissive
+  behavior for advanced users running custom recovery loops.
+
+#### `BatchFoldJob.stream()` (new)
+
+- Yields one `BatchFoldEvent` per sub-job as each fold completes AND its
+  structural payload lands. No more `[job.wait() for job in batch.sub_jobs]`
+  serialization; no more "succeeded" events with empty PDB content.
+- Each event carries `record_id`, `peptide_sequence`, `peptide_index`,
+  `pdb_content`, `cif_data`, `iptm`, `ipsae`, `ipae`, `ptm`, `mean_plddt`,
+  `pae_url`, `confidence`, `per_chain`, `phase`, `timestamp`.
+
+#### `client.folds.recover_from_modal(job_id)` (new)
+
+- Hits the new server endpoint `POST /api/folding/jobs/:jobId/recover-from-modal`
+  which calls `FunctionCall.from_id(call_id).get(0)` against Modal and
+  replays the result through the local fold webhook so canonicalization,
+  chain-mapping, DB persistence, and SSE broadcast all run unchanged.
+- When `wait=True` (default), polls the status endpoint until the structure
+  lands or `timeout` elapses.
+
+#### `FoldResult` schema additions
+
+- `pdb_path: Path | None` — local filesystem path of the on-disk PDB
+  whenever the SDK writes one (e.g. via `Job.wait(save_to=...)`).
+- `has_structure: bool` — mirror of the server's `has_structure` flag.
+- `pae_matrix: list[list[float]] | None` — decoded PAE matrix (residue x
+  residue). None for tier < pro/academia or before `download_pae` runs.
+- `cif_data: str | None` — inline mmCIF content alongside `pdb_data`.
+- `scores: dict | None` — DeltaForge / LigandIQ scores when emitted.
+- `metrics: dict[str, float] | None` — flat dict of headline confidence
+  metrics (iptm, ipsae, ptm, mean_plddt, ipae, peptide_iptm).
+- `confidence: dict | None` — per-chain / per-pair confidence breakdown.
+
+#### SSE path correction
+
+- All fold-job `Job` / `AsyncJob` / `BatchFoldJob` constructors now point
+  `sse_path` at `/api/folding/jobs/{job_id}/logs/stream` (the real server
+  endpoint). The legacy path `/api/jobs/{job_id}/sse` never existed
+  server-side and silently caused `Job.stream()` to 404 and fall back to
+  polling.
+- The fallback path now (a) gracefully ignores SSE 404 and (b) emits a
+  terminal `complete`/`failed` event whose `payload` is the durable result
+  dict, so `for event in job.stream(): ...` yields the PDB in the final
+  tick without a separate `.results` call.
+
+#### Exports
+
+- New: `LigandAIIncompleteResult`, `LigandAIWaitTimeout`, `BatchFoldEvent`.
+
+
+## [0.5.6] - 2026-05-17
+
+### Hardening — GPU allowlist + local dedupe + credit pre-flight (`bd-qp82g`)
+
+Triggered by the 2026-05-17 PPB-ext duplicate-submission incident: an SDK
+caller submitted 130 duplicate fold batches on identical `record_id`s
+through `Peptides.fold_batch(...)`, burning ~$50-100 of redundant Modal
+compute before the server-side concurrency limiter rejected the rest at
+~399 / 716 folds. Root cause: the SDK had no client-side dedupe, no GPU
+allowlist, and no local credit pre-flight; it cheerfully forwarded every
+call to the server.
+
+This release adds five client-side guards. Each runs BEFORE any HTTP
+work so the SDK never even attempts a forbidden / duplicate / unaffordable
+submission.
+
+#### GPU type allowlist
+
+- `client.fold(...)` / `client.fold_batch(...)` / `client.peptides.fold(...)`
+  / `client.peptides.fold_batch(...)` (sync + async) now accept a single
+  GPU class: **`"b200_plus"`**. Passing `gpu="b200_2x"`, `"b200_4x"`,
+  `"b200_8x"`, bare `"b200"`, `"h100"`, `"a100"`, `"l40s"`, `"cpu"`, or
+  any other value raises `LigandAIInvalidConfig` BEFORE the request hits
+  the wire.
+- The multi-GPU B200 variants (`predict_structure_from_entities_b200_2x/4x/8x`
+  in `modal_workers/boltz2_multimer.py`) remain available for internal
+  pipeline jobs but are unreachable through the public SDK.
+- Defense in depth: the FastAPI backend `gpu_guard.assert_public_gpu_type()`
+  and the Express `/v1/folding/predict-batch` zod schema also reject any
+  non-`b200_plus` value (HTTP 400) so a custom non-SDK client cannot bypass
+  the SDK.
+
+#### Local dedupe (`~/.ligandai/submitted.db`)
+
+- Sqlite-backed `SubmittedSet` keyed on `sha256(peptide_set + receptor_seq
+  + gpu + params)` per `api_key_hash`. Within a 24-hour window, identical
+  `fold` / `fold_batch` calls return the cached `Job` handle without
+  re-submitting.
+- Peptide-list reorder + case differences do NOT change submission
+  identity (sorted+unique+uppercased before hashing).
+- Pass `force_resubmit=True` on `fold(...)` / `fold_batch(...)` to bypass
+  the cache.
+- Failed submissions are eligible for retry — only `submitted` and
+  `completed` rows block.
+- Orphaned `submitted` rows older than 1 hour with no job_id are ignored
+  (prevents permanent lockout when a POST crashes mid-flight).
+- File mode 0600 under 0700 parent dir; WAL journaling for multi-process
+  safety with the recovery worker.
+
+#### Client-side concurrency cap
+
+- The SDK tracks in-flight submissions in the same sqlite and refuses to
+  submit when the count reaches `TIER_GPU_SLOTS[client.tier]` (free=1,
+  basic=4, academia=16, pro=25, enterprise=50, superadmin=50). Raises
+  `LigandAIConcurrencyLimit` with `in_flight` / `limit` attributes.
+- Calling `client.submitted_set.mark_completed(...)` releases a slot.
+
+#### Credit pre-flight
+
+- `fold_batch(...)` estimates cost locally as
+  `ceil(peptide_count × trajectories × 100 × max(1.0, sampling_steps / 50))`
+  (mirrors `enterprise-api-routes.ts`).
+- `fold(...)` estimates `trajectories × 100 × max(1.0, sampling_steps / 50)`.
+- Both compare against `client.credits` and raise
+  `LigandAIInsufficientCredits` (with `required` / `available` /
+  `shortfall` attributes) BEFORE any HTTP submit if the balance is short.
+- Superadmin / unlimited accounts (`is_unlimited=True`) skip the
+  pre-flight — server stays authoritative.
+
+#### Local credit ledger (`~/.ligandai/credit_ledger.db`)
+
+- Sqlite-backed append-only log of credit-consumption events
+  (`api_key_hash, job_id, kind, ts, estimated, actual, balance_before,
+  balance_after, note`). Independent of server-side billing; useful for
+  offline audit and reconciliation.
+- Inspect via `client.credit_ledger.recent_events(client.api_key_hash)`.
+
+#### New public exceptions
+
+- `LigandAIInvalidConfig` — raised pre-flight for invalid GPU / param values
+  (`field`, `value`, `allowed` attributes).
+- `LigandAIInsufficientCredits` — local pre-flight detected shortfall
+  (`required`, `available`, `shortfall`).
+- `LigandAIDuplicateSubmission` — strict-mode dedupe hit
+  (`submission_hash`, `previous_job_id`, `previous_status`).
+- `LigandAIConcurrencyLimit` — local in-flight count ≥ tier cap
+  (`in_flight`, `limit`).
+
+All four subclass `LigandAIError` and are re-exported from `ligandai`.
+
+#### Backend defense in depth
+
+- `/mnt/backup/LIGANDAI_ALPHA_V2/fastapi_backend/middleware/gpu_guard.py`:
+  new `assert_public_gpu_type(gpu_type, *, job_type)` helper rejects any
+  non-`b200_plus` value with HTTP 400 / `code: "GPU_TYPE_REJECTED"`.
+- `/mnt/backup/LIGANDAI_ALPHA_V2/server/enterprise-api-routes.ts`:
+  the `/v1/folding/predict-batch` zod schema now declares
+  `gpu_type: z.enum(['b200_plus']).optional()` so any other value fails
+  parse-time validation.
+
+#### Tests
+
+- `tests/unit/test_gpu_rejection.py` — every rejected GPU string raises
+  `LigandAIInvalidConfig` at sync + async client + resource layers, with
+  no HTTP traffic. Positive `b200_plus` case verifies the body never leaks
+  a `gpu` field to the server.
+- `tests/unit/test_dedupe.py` — direct `SubmittedSet` unit tests + end-to-end
+  client tests for cache hit, `force_resubmit`, different-gene-no-dedupe,
+  reordered-peptide-list dedupe, failed-row-eligible-for-retry.
+- `tests/unit/test_credit_preflight.py` — cost-estimator formula, shortfall
+  rejection, sufficient-balance pass-through, `is_unlimited` skip, and
+  superadmin (`lgai_sa_*`) skip.
+- `tests/unit/test_tier_caps.py` — basic-tier 4-slot cap, free-tier 1-slot
+  cap, slot-release-by-mark-completed, pro/superadmin constant assertions.
+
+All 103 hardening tests pass.
+
 ## [0.5.5] - 2026-05-11
 
 ### Added — `client.peptides.fold_batch()` and `BatchFoldJob`
