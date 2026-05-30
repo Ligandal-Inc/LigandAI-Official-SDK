@@ -67,6 +67,30 @@ up = client.proteins.upload_pdb(file=Path("<PATH>"), gene="<NAME>")
 job = client.peptides.generate(gene="<NAME>", variant_id=up.id, auto_fold=True)
 ```
 
+When the user wants a specific isoform, species, or PDB (v0.6.0+):
+
+```python
+# Isoform (e.g. CLDN18.2)
+struct = client.structures.get("CLDN18", isoform=2)
+
+# Cross-species — only when explicitly requested; human stays default
+struct = client.structures.get("KRAS", species="mouse")
+
+# Pick a specific PDB by code
+struct = client.structures.get("KRAS", pdb_code="6VG2")
+
+# Force monomer vs heterodimer
+struct = client.structures.get("CD8A", declared_gene_set=["CD8A", "CD8B"])
+
+# Enumerate available isoforms / species first if unsure
+isoforms = client.structures.list_isoforms("CLDN18")  # UniProt-backed
+species  = client.structures.list_species("KRAS")     # species with reviewed entries
+```
+
+Supported species: `human` (default), `mouse`, `rat`, `cyno`, `rhesus`,
+`pig`, `dog`, `rabbit`, `zebrafish`, `chimp`. Aliases accepted
+(`mus_musculus`, `mmu`, etc.). Unknown → warning + human fallback.
+
 ## Error handling (always wrap in try/except)
 
 ```python

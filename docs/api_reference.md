@@ -282,6 +282,89 @@ Error codes: `E001`, `E014` (TOS not accepted), `402 upgrade_required`,
 | `/api/v1/structures/:id/pdb` | GET | All (free = polyalanine) | `client.structures.get_pdb(id)` |
 | `/api/v1/structures/fetch` | POST | Paid | `client.structures.get(gene)` |
 | `/api/v1/structures/batch` | POST | Paid | _(bulk fetch)_ |
+| `/api/structure/:gene` | GET | All | `client.structures.get(gene, **opts)` |
+| `/api/structure/:gene/isoforms` | GET | All | `client.structures.list_isoforms(gene)` _(v0.6.0+)_ |
+| `/api/structure/:gene/species` | GET | All | `client.structures.list_species(gene)` _(v0.6.0+)_ |
+| `/api/structure/pdb/:pdbId` | GET | All | `client.structures.from_pdb(pdb_id)` |
+| `/api/structure/alphafold/:uniprotId` | GET | All | `client.structures.from_alphafold(uniprot_id)` |
+
+### `GET /api/structure/{gene}` — best structure with optional selection (v0.6.0+)
+
+Resolves the best structure for a gene through the full 6-tier hierarchy
+(PDB-with-EC-ligand → Boltz-2 high-quality → standard PDB multimer →
+lower-quality Boltz-2/PDB monomer → experimental monomer → AlphaFold).
+Backwards-compatible: no kwargs = human default fast path; any kwarg
+routes through the full FastAPI resolver.
+
+**Query params (all optional):**
+
+| Param | Type | Description |
+|---|---|---|
+| `pdb_code` | str | Specific PDB code to fetch (e.g. `6VG2`). Overrides automatic selection. |
+| `isoform` | int | Isoform number (e.g. `2` for CLDN18.2). Routed through resolver's UniProt isoform lookup. |
+| `species` | str | `human` (default), `mouse`, `rat`, `cyno`, `rhesus`, `pig`, `dog`, `rabbit`, `zebrafish`, `chimp`. Aliases accepted (e.g. `mus_musculus`, `mmu`). |
+| `declared_gene_set` | csv | Comma-separated genes for explicit multimer/monomer disambiguation (e.g. `CD8A,CD8B` to force heterodimer; `CD8A` to force monomer). |
+
+**SDK examples:**
+```python
+# Default (human, single best structure) — unchanged from v0.5.x
+struct = client.structures.get("KRAS")
+
+# Specific isoform — CLDN18.2
+struct = client.structures.get("CLDN18", isoform=2)
+
+# Specific PDB code
+struct = client.structures.get("KRAS", pdb_code="6VG2")
+
+# Cross-species — mouse KRAS (only when explicitly requested)
+struct = client.structures.get("KRAS", species="mouse")
+
+# Force monomer vs heterodimer
+struct = client.structures.get("CD8A", declared_gene_set=["CD8A"])
+struct = client.structures.get("CD8A", declared_gene_set=["CD8A", "CD8B"])
+```
+
+The response includes a `requested` block echoing the params honored.
+
+### `GET /api/structure/{gene}/isoforms` (v0.6.0+)
+
+Enumerate UniProt isoforms for a gene.
+
+```python
+isoforms = client.structures.list_isoforms("CLDN18")
+# → [
+#     {"id": "P56856",   "name": "CLD18_HUMAN", "sequence_length": 261, "is_canonical": True,  "isoform_number": 1},
+#     {"id": "P56856-1", "name": "A1",          "sequence_length": None, "is_canonical": False, "isoform_number": 1},
+#     {"id": "P56856-2", "name": "A2",          "sequence_length": None, "is_canonical": False, "isoform_number": 2},
+#   ]
+```
+
+Returns `{gene, isoforms: [...], count}`. Empty list if the gene has no
+reviewed UniProt entries.
+
+### `GET /api/structure/{gene}/species` (v0.6.0+)
+
+Enumerate species in which this gene has a reviewed UniProt entry.
+
+```python
+species = client.structures.list_species("KRAS")
+# → [
+#     {"taxid": 9606,  "species": "human", "organism_name": "Homo sapiens",        "common_name": "Human", "accession": "P01116"},
+#     {"taxid": 10090, "species": "mouse", "organism_name": "Mus musculus",        "common_name": "Mouse", "accession": "P32883"},
+#     {"taxid": 10116, "species": "rat",   "organism_name": "Rattus norvegicus",   "common_name": "Rat",   "accession": "P08644"},
+#   ]
+```
+
+Use the returned `species` value as the `species=` kwarg on `get()`.
+
+### Tier-upgrade-aware key authentication (v0.6.0+)
+
+`validateAPIKey` now resolves the effective tier as
+`max(key_prefix_tier, user.subscription_tier)`. An API key minted at a
+lower tier prefix (e.g. `lgai_pro_*`) that belongs to an upgraded
+enterprise account will now grant **enterprise** privileges — no more
+401s after a tier upgrade. The key prefix is a *hint*, not a ceiling.
+
 
 ### `GET /api/v1/structures/list`
 
@@ -337,6 +420,19 @@ Error codes: `E001`, `404 structure_not_found`.
 Error codes: `E001`, `E014`, `E429`, `402 upgrade_required`,
 `402 insufficient credits` (returned with `error: "insufficient_credits"`,
 not `upgrade_required`).
+
+## Linker modifications + Mode B payload optimization (pro+ / academia+; bd-dre-3dalk)
+
+| Endpoint | Method | Tier | SDK |
+|----------|--------|------|-----|
+| `/api/v1/linker_modifications/uaa_palette` | GET | Authenticated | `client.linker_modifications.list_uaa_palette()` |
+| `/api/v1/linker_modifications/fold` | POST | Pro+ | `client.linker_modifications.fold_with_linker_mods(...)` |
+| `/api/v1/payload_optimization/libraries` | GET | Pro+ | `client.linker_modifications.list_payload_libraries()` |
+| `/api/v1/payload_optimization/libraries/:key` | GET | Pro+ | `client.linker_modifications.get_payload_library(key)` |
+| `/api/v1/payload_optimization/runs` | POST | Pro+ | `client.linker_modifications.optimize_payload(...)` |
+| `/api/v1/payload_optimization/runs/:runId` | GET | Pro+ | `client.linker_modifications.get_payload_run(run_id)` / `wait(run)` |
+
+Dataclasses exposed at the top level: `LinkerModification`, `CovalentAttachment`, `ReceptorChain`, `PayloadFilter`, `PayloadOptimizationRun`. Errors: `422 mw_verification_failed` (per-row rejection list in `.detail`), `403 pro tier required`.
 
 ## Transcriptomics
 

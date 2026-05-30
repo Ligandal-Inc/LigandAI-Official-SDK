@@ -14,11 +14,18 @@ Drop-in tool definitions for an OpenAI tool-calling agent.
 ## Install
 
 ```bash
-pip install openai ligandai>=0.5.0
+pip install openai ligandai>=0.6.0
 export OPENAI_API_KEY=sk-...
 export LIGANDAI_API_KEY=lgai_pro_...
 python agent_example.py "Design 25 EGFR binders with iPSAE>0.7 and estimate cost first."
 ```
+
+> **v0.6.0** — `client.structures.get(gene)` now accepts `pdb_code=`,
+> `isoform=`, `species=`, `declared_gene_set=` kwargs. New methods
+> `list_isoforms(gene)` and `list_species(gene)` enumerate UniProt-backed
+> variants. Backwards-compatible — no kwargs = original human-default
+> fast path. Tier handling is now `max(key_prefix_tier, account_tier)` so
+> upgraded enterprise accounts on pro-prefix keys get enterprise privs.
 
 ## Tool catalogue (all 9 currently exposed)
 
