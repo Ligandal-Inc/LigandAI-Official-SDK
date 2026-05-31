@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+import threading
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
+
+if TYPE_CHECKING:
+    from ligandai._dedupe import CreditLedger, SubmittedSet
 
 from ligandai._constants import (
     API_KEY_PREFIXES,
@@ -53,12 +57,17 @@ from ligandai.errors import (
 from ligandai.key_wallet import WALLET_PATH, KeyWallet
 from ligandai.resources.account import Account, AsyncAccount
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
+from ligandai.resources.linker_modifications import (
+    AsyncLinkerModifications,
+    LinkerModifications,
+)
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
 from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
 from ligandai.resources.jobs import AsyncJobs, Jobs
+from ligandai.resources.ligands import AsyncLigands, Ligands
 from ligandai.resources.memory import AsyncMemory, Memory
 from ligandai.resources.msa import MSA, AsyncMSA
 from ligandai.resources.peptides import AsyncPeptides, Peptides
@@ -135,6 +144,12 @@ class _ClientCommon:
         self._api_key = api_key
         self._tier = _detect_tier(api_key)
         self._base_url = base_url
+        # bd-qp82g (2026-05-17): lazy-initialized local dedupe + credit ledger.
+        # Anonymous / un-authenticated clients never touch ~/.ligandai/.
+        self._submitted_set: SubmittedSet | None = None
+        self._credit_ledger: CreditLedger | None = None
+        self._dedupe_lock = threading.Lock()
+        self._api_key_hash: str | None = None
 
     @property
     def api_key(self) -> str | None:
@@ -181,6 +196,53 @@ class _ClientCommon:
             # Unknown feature — assume allowed; server will gate.
             return True
         return _tier_at_least(self._tier, required)
+
+    # ─── Local dedupe + credit-ledger access (bd-qp82g, 2026-05-17) ─────────
+
+    @property
+    def submitted_set(self) -> "SubmittedSet":
+        """Lazy ``~/.ligandai/submitted.db`` handle — created on first use.
+
+        Used by the SDK's pre-submit dedupe and concurrency-cap checks. End
+        users may inspect this directly to see in-flight submissions:
+
+        .. code-block:: python
+
+            for row in client.submitted_set.list_in_flight(client.api_key_hash):
+                print(row['submission_hash'][:12], row['kind'], row['job_id'])
+        """
+        if self._submitted_set is None:
+            with self._dedupe_lock:
+                if self._submitted_set is None:
+                    from ligandai._dedupe import SubmittedSet
+                    self._submitted_set = SubmittedSet()
+        return self._submitted_set
+
+    @property
+    def credit_ledger(self) -> "CreditLedger":
+        """Lazy ``~/.ligandai/credit_ledger.db`` handle — created on first use.
+
+        Append-only audit trail of credit consumption. Use
+        ``client.credit_ledger.recent_events(client.api_key_hash)`` to inspect.
+        """
+        if self._credit_ledger is None:
+            with self._dedupe_lock:
+                if self._credit_ledger is None:
+                    from ligandai._dedupe import CreditLedger
+                    self._credit_ledger = CreditLedger()
+        return self._credit_ledger
+
+    @property
+    def api_key_hash(self) -> str:
+        """SHA-256[:16] of the active api_key — safe to log, never invertible.
+
+        Used as the partition key for the local sqlite dedupe + credit ledger
+        so multiple api keys on the same machine don't collide.
+        """
+        if self._api_key_hash is None:
+            from ligandai._dedupe import compute_api_key_hash
+            self._api_key_hash = compute_api_key_hash(self._api_key)
+        return self._api_key_hash
 
     def _require_feature(self, feature: str) -> None:
         """Raise LigandAITierError client-side if the feature is unavailable."""
@@ -288,12 +350,18 @@ class LigandAI(_ClientCommon):
         # Resource namespaces
         self.account: Account = Account(self._transport)
         self.bivalent: Bivalent = Bivalent(self._transport, client=self)
+        # bd-dre-3dalk — linker_modifications + Mode B payload optimization.
+        self.linker_modifications: LinkerModifications = LinkerModifications(
+            self._transport, client=self,
+        )
         self.charts: Charts = Charts(self._transport)
         self.diseases: Diseases = Diseases(self._transport)
         self.discovery: Discovery = Discovery(self._transport, client=self)
         self.folds: Folds = Folds(self._transport, client=self)
         self.jobs: Jobs = Jobs(self._transport)
         self.goals: Goals = Goals(self._transport, client=self)
+        # Small-molecule Kd scoring (bd-dre-0meky) — free-tier accessible.
+        self.ligands: Ligands = Ligands(self._transport, client=self)
         self.memory: Memory = Memory(self._transport)
         self.msa: MSA = MSA(self._transport)
         self.peptides: Peptides = Peptides(self._transport, client=self)
@@ -338,14 +406,31 @@ class LigandAI(_ClientCommon):
     def credits(self) -> int:
         """Current credit balance. Lightweight refresh on each access.
 
-        For unlimited / superadmin accounts the server may return a sentinel
-        value; in that case :class:`~ligandai.types.Credits.is_unlimited`
-        will be True and the integer returned here will be the raw sentinel.
-        Use ``client.account.credits()`` and inspect ``.is_unlimited`` for a
-        clean check.
+        Returns the **stored** balance for finite accounts. For unlimited /
+        superadmin accounts where the server returns a sentinel (any value
+        ≥ 10 billion, treated as the "is_unlimited" flag), this property
+        returns ``0`` rather than the raw sentinel — so user-facing CLIs
+        and logs never print "Credits: 9,999,999,999,999,999". To detect
+        unlimited accounts cleanly, use ``client.account.credits()`` and
+        inspect the returned :class:`~ligandai.types.Credits.is_unlimited`
+        attribute, or read ``client._credits.is_unlimited`` after a refresh.
+
+        bd-yifvw.2 (2026-05-17): the previous behavior surfaced the raw
+        sentinel as the int return value, which produced confusing
+        "implausible credits balance" warnings even on legitimately-resolved
+        superadmin accounts AND a far more confusing display for non-
+        superadmin users hitting a server tier-leak regression. Masking the
+        sentinel at the SDK boundary prevents both failure modes from
+        showing implausible numbers to users.
         """
         c = self.account.credits()
         self._credits = c
+        # When the server-side sentinel is in play (legit superadmin OR a
+        # tier-leak regression), surface 0 to the int property. The full
+        # Credits object on self._credits keeps the raw balance + is_unlimited
+        # flag available to callers who need to distinguish.
+        if c.is_unlimited:
+            return 0
         return c.balance
 
     # ─── Rotating-JWT wallet methods ─────────────────────────────────────────
@@ -449,7 +534,18 @@ class LigandAI(_ClientCommon):
 
         Submit N peptides against one fixed receptor for batch Boltz-2 folding.
         See :meth:`Peptides.fold_batch` for full parameter docs and examples.
+
+        bd-qp82g (2026-05-17): the SDK pre-validates ``gpu`` / ``gpu_type``
+        kwargs and rejects anything other than ``"b200_plus"`` before
+        delegating. Multi-GPU (2x/4x/8x), bare B200, H100, A100, etc. raise
+        :class:`~ligandai.errors.LigandAIInvalidConfig` without a network
+        round-trip.
         """
+        # bd-qp82g: pre-flight GPU validation BEFORE any HTTP work. The
+        # remaining kwargs are forwarded to Peptides.fold_batch which performs
+        # its own dedupe + credit + concurrency checks.
+        from ligandai._hardening import extract_and_validate_gpu
+        extract_and_validate_gpu(kwargs)
         return self.peptides.fold_batch(peptides, **kwargs)
 
     def fold(
@@ -466,7 +562,15 @@ class LigandAI(_ClientCommon):
         - ``client.fold(["SEQ1", "SEQ2"], target_gene="EGFR")``
         - ``client.fold(target_sequence, peptide_sequence)`` for a two-chain
           complex fold
+
+        bd-qp82g (2026-05-17): the SDK pre-validates ``gpu`` / ``gpu_type``
+        kwargs and rejects anything other than ``"b200_plus"`` BEFORE
+        delegating. Multi-GPU (2x/4x/8x), bare B200, H100, A100, etc. raise
+        :class:`~ligandai.errors.LigandAIInvalidConfig`.
         """
+        # bd-qp82g: pre-flight GPU validation BEFORE any HTTP work.
+        from ligandai._hardening import extract_and_validate_gpu
+        extract_and_validate_gpu(kwargs)
         sequences = kwargs.pop("sequences", None)
         if sequences is not None:
             if target is not None:
@@ -543,12 +647,18 @@ class AsyncLigandAI(_ClientCommon):
 
         self.account: AsyncAccount = AsyncAccount(self._transport)
         self.bivalent: AsyncBivalent = AsyncBivalent(self._transport, client=self)
+        # bd-dre-3dalk — linker_modifications + Mode B payload optimization.
+        self.linker_modifications: AsyncLinkerModifications = AsyncLinkerModifications(
+            self._transport, client=self,
+        )
         self.charts: AsyncCharts = AsyncCharts(self._transport)
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
         self.folds: AsyncFolds = AsyncFolds(self._transport, client=self)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
         self.goals: AsyncGoals = AsyncGoals(self._transport, client=self)
+        # Small-molecule Kd scoring (bd-dre-0meky) — free-tier accessible.
+        self.ligands: AsyncLigands = AsyncLigands(self._transport, client=self)
         self.memory: AsyncMemory = AsyncMemory(self._transport)
         self.msa: AsyncMSA = AsyncMSA(self._transport)
         self.peptides: AsyncPeptides = AsyncPeptides(self._transport, client=self)
@@ -574,7 +684,14 @@ class AsyncLigandAI(_ClientCommon):
         return AsyncCreditSession(self, session_id=session_id)
 
     async def fold_batch(self, peptides: list[str], **kwargs: Any) -> Any:
-        """Async convenience wrapper for :meth:`AsyncPeptides.fold_batch`."""
+        """Async convenience wrapper for :meth:`AsyncPeptides.fold_batch`.
+
+        bd-qp82g (2026-05-17): GPU pre-validation runs before delegation —
+        passing ``gpu="b200_2x"`` etc. raises
+        :class:`~ligandai.errors.LigandAIInvalidConfig` without a round-trip.
+        """
+        from ligandai._hardening import extract_and_validate_gpu
+        extract_and_validate_gpu(kwargs)
         return await self.peptides.fold_batch(peptides, **kwargs)
 
     async def close(self) -> None:

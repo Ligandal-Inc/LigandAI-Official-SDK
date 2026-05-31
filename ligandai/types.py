@@ -1190,6 +1190,40 @@ class FoldResult(_LGModel):
     job_id: str = Field(alias="jobId")
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
     pdb_data: str | None = Field(default=None, alias="pdbData")
+    """Full PDB structure content (inline). Non-None when ``has_structure`` is True.
+
+    bd-f5rf1 (2026-05-17): when ``Job.wait(durable=True)`` (the default) returns,
+    this MUST be a non-empty string for a succeeded fold. If it isn't, the SDK
+    raises :class:`~ligandai.errors.LigandAIIncompleteResult` instead of silently
+    handing back a half-populated result.
+    """
+    pdb_path: Path | None = Field(default=None, alias="pdbPath")
+    """Local filesystem path of the on-disk PDB. Set by the SDK whenever
+    ``Job.wait(save_to=...)`` runs OR whenever the SDK writes a side-effect
+    copy under ``~/.ligandai/structures/<job_id>.pdb``. Decoupled from
+    ``pdb_url`` (server URL) and ``pdb_data`` (inline content)."""
+    has_structure: bool = Field(default=False, alias="hasStructure")
+    """Mirror of the server's ``has_structure`` flag. The SDK trusts this
+    field's True only when ``pdb_data`` is also non-empty — ``status='completed'``
+    + ``has_structure=False`` triggers the durable-wait re-poll loop."""
+    pae_matrix: list[list[float]] | None = Field(default=None, alias="paeMatrix")
+    """Decoded PAE matrix (residue x residue). None for tier < pro/academia OR
+    when ``pae_matrix_uri`` has not been hydrated yet — call
+    ``client.folds.download_pae(job_id)`` to fetch."""
+    cif_data: str | None = Field(default=None, alias="cifData")
+    """Full mmCIF content (inline). May be None even when ``pdb_data`` is set
+    (older fold writers only emit PDB)."""
+    scores: dict[str, Any] | None = None
+    """Server-provided per-fold scores (e.g. DeltaForge ΔG, LigandIQ readout)
+    when available. May be empty for tier < basic or when the scoring pipeline
+    was skipped."""
+    metrics: dict[str, float] | None = None
+    """Convenience flat dict of headline confidence metrics — keys include
+    ``iptm``, ``ipsae``, ``ptm``, ``mean_plddt``, ``peptide_iptm``. Pre-computed
+    server-side so callers can subscript without poking individual fields."""
+    confidence: dict[str, Any] | None = None
+    """Detailed confidence breakdown — per-chain pLDDT, per-pair iPTM, etc.
+    Populated by the Boltz-2 writer when schema_version >= 2."""
     iptm: float | None = None
     ipsae: float | None = None
     plddt: float | None = None
@@ -1327,6 +1361,27 @@ class SolubilityResult(_LGModel):
     multi_cys_flag: bool | None = Field(default=None, alias="multiCysFlag")
     passes_filter: bool | None = Field(default=None, alias="passesFilter")
     notes: str | None = None
+
+
+class LigandScore(_LGModel):
+    """LF-SM v3 small-molecule Kd prediction for one (holo structure, ligand).
+
+    Returned by :meth:`ligandai.resources.ligands.Ligands.score_ligand`. The
+    free-tier CPU scorer extracts 288-d NEURAL_DOCKER features from a HOLO
+    complex (protein + bound ligand HETATM) and runs the KdHead v3 MLP.
+    """
+
+    p_kd: float | None = Field(default=None, alias="pKd")
+    binder_probability: float | None = Field(default=None, alias="binder_probability")
+    binder: bool | None = None
+    log_kd_nm_pred: float | None = Field(default=None, alias="logKd_nM_pred")
+    model_version: str | None = Field(default=None, alias="model_version")
+    feature_status: str | None = Field(default=None, alias="feature_status")
+    het_code: str | None = Field(default=None, alias="het_code")
+    n_contacts: int | None = Field(default=None, alias="n_contacts")
+    n_candidate_ligands: int | None = Field(default=None, alias="n_candidate_ligands")
+    ligand_smiles: str | None = Field(default=None, alias="ligand_smiles")
+    latency_ms: float | None = Field(default=None, alias="latency_ms")
 
 
 # -- Bivalent ----------------------------------------------------------------
@@ -1841,6 +1896,68 @@ class JobEvent(_LGModel):
     message: str | None = None
     progress: float | None = None
     payload: dict[str, Any] | None = None
+    timestamp: datetime | None = None
+
+
+class BatchFoldEvent(_LGModel):
+    """A single per-peptide completion event from
+    :meth:`~ligandai.resources.peptides.BatchFoldJob.stream`.
+
+    bd-f5rf1 (2026-05-17): one event is yielded as each sub-job becomes
+    terminal AND its structural payload has landed (durable contract — never
+    yields a "completed but PDB empty" event). For batches of N peptides,
+    callers can pipeline scoring/visualization per-event instead of waiting
+    for the whole batch.
+
+    Attributes
+    ----------
+    record_id : str | None
+        Caller-provided per-peptide identifier when supplied, otherwise the
+        sub-job's ``job_id``.
+    job_id : str
+        Server-assigned fold job id (``fold_<ms>_<rand>``).
+    peptide_index : int | None
+        Zero-based index into the batch's input peptide list.
+    peptide_sequence : str | None
+        The peptide AA sequence that was folded.
+    status : str
+        Final sub-job status — ``"succeeded"`` when ``pdb_content`` is non-empty,
+        ``"failed"`` / ``"cancelled"`` / ``"incomplete"`` otherwise.
+    pdb_content : str | None
+        Inline PDB structure content. Non-None on success.
+    cif_data : str | None
+        Inline mmCIF content (may be None for older fold writers).
+    iptm, ipsae, ipae, ptm, mean_plddt
+        Headline confidence metrics. None for failed sub-jobs.
+    pae_url : str | None
+        Lazy-fetch URL for the PAE matrix (tier-gated).
+    confidence : dict | None
+        Per-chain / per-pair confidence breakdown (when emitted server-side).
+    per_chain : dict | None
+        Per-chain pLDDT/pTM/iPTM map keyed by chain id.
+    phase : str | None
+        Free-form processing phase tag (``"submitted"``, ``"folding"``,
+        ``"scoring"``, ``"complete"``) — useful for richer UI progress bars.
+    timestamp : datetime
+        Event emission time.
+    """
+
+    record_id: str | None = Field(default=None, alias="recordId")
+    job_id: str = Field(alias="jobId")
+    peptide_index: int | None = Field(default=None, alias="peptideIndex")
+    peptide_sequence: str | None = Field(default=None, alias="peptideSequence")
+    status: str
+    pdb_content: str | None = Field(default=None, alias="pdbContent")
+    cif_data: str | None = Field(default=None, alias="cifData")
+    iptm: float | None = None
+    ipsae: float | None = None
+    ipae: float | None = None
+    ptm: float | None = None
+    mean_plddt: float | None = Field(default=None, alias="meanPlddt")
+    pae_url: str | None = Field(default=None, alias="paeUrl")
+    confidence: dict[str, Any] | None = None
+    per_chain: dict[str, Any] | None = Field(default=None, alias="perChain")
+    phase: str | None = None
     timestamp: datetime | None = None
 
 
