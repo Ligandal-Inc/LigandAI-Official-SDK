@@ -1,5 +1,5 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
-"""Empirical fold-time projection model (Task I).
+"""Empirical fold-time projection model.
 
 Predicts wall-clock time for a Boltz-2 fold campaign as a function of:
   - protein_length (L) — receptor + peptide residue count
@@ -7,24 +7,20 @@ Predicts wall-clock time for a Boltz-2 fold campaign as a function of:
   - n_parallel_gpus — concurrent fold workers
   - sampling_steps, recycling_steps, diffusion_samples — Boltz-2 hparams
 
-Functional form (matches the brief):
+Functional form:
     T_total ≈ a + b · L^c · (num_traj / max(n_parallel_gpus, 1))
 
-The coefficients (a, b, c) are calibrated against gpu_job_usage.billed_seconds
-joined to ptf_fold_results across the last 30 days. Initial fit (2026-05-07,
-N≈600 fold sessions, BMPR1A + IL6R + EGFR + KIT mix):
+The coefficients (a, b, c) are calibrated against observed fold wall-clock
+times. Approximate fit:
 
-    a = 25.0     # Modal cold-start + checkpoint load (s)
+    a = 25.0     # cold-start + checkpoint load (s)
     b = 0.018    # per-residue scaling constant (s)
     c = 1.55     # length exponent (slightly super-linear due to attention)
 
-These are reasonable starting values; the fit script in
-`scripts/fold_time_calibration.py` regenerates them from prod telemetry
-on demand. Update via update_fold_time_model({"a": ..., "b": ..., "c": ...}).
+These are reasonable starting values. Update via
+update_fold_time_model({"a": ..., "b": ..., "c": ...}).
 
-Validation target (per brief): predicted vs actual within 25% on last 30 days.
-At calibration time the median absolute percent error (MAPE) on held-out
-sessions was approximately 18% — within tolerance.
+The estimate is intended to land within roughly 25% of actual wall-clock time.
 """
 
 from __future__ import annotations

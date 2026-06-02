@@ -2,7 +2,7 @@
 """Example 8 — list peptides by program, fetch full PDB structures.
 
 Demonstrates the v0.5.0 SDK additions:
-  - client.peptides.list(program_id=42)         (Andrew Keene's #1 ask)
+  - client.peptides.list(program_id=42) (a user's #1 ask)
   - client.peptides.search(kd_max=1e-8, ...)    (cross-program search)
   - client.structures.list(program_id=42)       (fold-structure listing)
   - client.structures.get_pdb(structure_id)     (raw PDB; polyalanine on free)

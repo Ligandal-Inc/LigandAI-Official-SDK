@@ -5,7 +5,7 @@
 Demonstrates the new must-contact / pocket-context residue pathway:
   1. Pick hotspot residues on the receptor (the ones the binder MUST touch).
   2. Auto-expand to the surrounding pocket via expand_hotspot_to_pocket.
-  3. Submit generation with both lists; the Modal v6.5.2 worker filters its
+  3. Submit generation with both lists; the the compute backend design worker filters its
      pocket_features tensor to (hotspots ∪ pocket) BEFORE the V6.5 generator
      runs, steering peptides to the named site.
 
@@ -41,9 +41,9 @@ def main() -> int:
 
     try:
         # Optional pre-step: expand the hotspots to a pocket (≤8 Å).
-        # If you skip this, the Modal worker will expand them in-process via CA-CA.
+        # If you skip this, the design worker will expand them in-process via CA-CA.
         # The expand endpoint requires a fold session; use it once you have folds.
-        # For first-run generation, just pass hotspot_residues — Modal handles it.
+        # For first-run generation, just pass hotspot_residues — the compute backend handles it.
         print(f"Generating peptides against {gene}/{chain} hotspots={hotspots}")
         job = client.peptides.generate(
             gene=gene,
@@ -52,7 +52,7 @@ def main() -> int:
             target_chains=[chain],
             # NEW in 0.5.x — preferred residue-list pathway:
             hotspot_residues=hotspots,
-            # pocket_residues=[ ... ]   # optional explicit pocket; omit to let Modal expand.
+            # pocket_residues=[ ... ] # optional explicit pocket; omit to let the compute backend expand.
             # numbering="pdb",          # default — what the user sees in the viewer.
             auto_fold=False,            # keep this example fast; fold separately if needed.
         )
@@ -61,7 +61,7 @@ def main() -> int:
         result = job.wait(timeout=600)
         print(f"  generated {len(result.peptides)} peptides")
 
-        # The featurization block (echoed back from Modal) confirms the steering:
+        # The featurization block (echoed back from the compute backend) confirms the steering:
         feat = getattr(result, "featurization", None) or {}
         if feat:
             print(f"  featurization.mode  = {feat.get('mode')}")

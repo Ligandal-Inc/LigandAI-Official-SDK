@@ -112,6 +112,31 @@ class LigandAICreditError(LigandAIError):
         Credits needed for this operation.
     available : int | None
         Credits currently available on the account.
+    shortfall : int | None
+        Credits the user needs to top up (= max(0, required - available)).
+        Surfaced from the server payload when present; otherwise computed
+        client-side when both ``required`` and ``available`` are known.
+    recovery_url : str | None
+        Path/URL the caller should open in a browser to top up. Servers
+        return a relative path (``/account/billing?recovery=...``); callers
+        can prefix the base URL when displaying.
+    top_up_usd : int | None
+        Suggested top-up amount in US dollars (server-computed). 100 credits
+        = $0.01, so a 1,000-credit shortfall rounds to a $0.10 top-up but the
+        server typically suggests a higher round dollar amount to cover the
+        next batch of jobs.
+    upgrade_url : str | None
+        Pricing page URL when an upgrade would be more cost-effective than
+        a top-up. Optional — most insufficient-credit responses focus on
+        top-up rather than tier change.
+
+    Example — handling mid-loop credit exhaustion::
+
+        try:
+            job = client.peptides.fold_batch(peptides=peps, target_gene="EGFR")
+        except LigandAICreditError as e:
+            print(f"Need {e.shortfall:,} more credits (${e.top_up_usd}).")
+            print(f"Top up at: {e.recovery_url}")
     """
 
     def __init__(
@@ -120,11 +145,23 @@ class LigandAICreditError(LigandAIError):
         *,
         required: int | None = None,
         available: int | None = None,
+        shortfall: int | None = None,
+        recovery_url: str | None = None,
+        top_up_usd: int | None = None,
+        upgrade_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(message, **kwargs)
         self.required = required
         self.available = available
+        # Best-effort derivation: if the server didn't send a shortfall but
+        # we know both required and available, compute it. Never negative.
+        if shortfall is None and required is not None and available is not None:
+            shortfall = max(0, int(required) - int(available))
+        self.shortfall = shortfall
+        self.recovery_url = recovery_url
+        self.top_up_usd = top_up_usd
+        self.upgrade_url = upgrade_url
 
 
 class LigandAIPaidTierRequired(LigandAIError):
@@ -273,6 +310,97 @@ class LigandAITimeoutError(LigandAIError):
     """A `.wait()` call exceeded its timeout while polling a job."""
 
 
+class LigandAIIncompleteResult(LigandAIError):
+    """A job server-reported ``status='completed'`` but the result payload is missing
+    structural data (no ``pdb_data``/``pdb_content``, ``has_structure=False``, or
+    no per-fold result for a batch peptide).
+
+    Raised when ``Job.wait(durable=True)`` is the default — the SDK refuses to
+    silently return a "succeeded" Job whose fold-result payload never landed
+    (call_id-only acknowledgement stored as result, result callback skipped,
+    etc.). Callers can pass ``durable=False`` to opt back into the
+    fast-but-permissive behavior.
+
+    Attributes
+    ----------
+    job_id : str | None
+        The id of the job whose result is incomplete.
+    job_status : str | None
+        Server-reported status (typically ``"completed"`` when this is raised).
+    missing_fields : list[str] | None
+        Names of fields the SDK expected to be populated. Common values:
+        ``"pdb_data"``, ``"pdb_path"``, ``"iptm"``, ``"ipsae"``,
+        ``"has_structure"``.
+    call_id : str | None
+        Compute call id from the partial result payload, if available.
+        Callers can use this to manually re-fetch via the recovery endpoint.
+    server_state : dict | None
+        Snapshot of the last server response, for debugging.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        job_id: str | None = None,
+        job_status: str | None = None,
+        missing_fields: list[str] | None = None,
+        call_id: str | None = None,
+        server_state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.job_id = job_id
+        self.job_status = job_status
+        self.missing_fields = list(missing_fields) if missing_fields else []
+        self.call_id = call_id
+        self.server_state = server_state
+
+
+class LigandAIWaitTimeout(LigandAITimeoutError):
+    """``Job.wait(durable=True)`` reached its timeout while still waiting for
+    structural data to land — server reported a terminal status but the SDK
+    refused to return because ``pdb_data`` / ``has_structure`` were missing.
+
+    Distinct from :class:`LigandAITimeoutError` because the underlying job is
+    *not* stuck on the platform side; the durable-success contract is what
+    gated the return. The original server state is attached so users can
+    inspect what was missing and (if needed) hit the recovery endpoint with
+    the captured ``call_id``.
+
+    Attributes
+    ----------
+    job_id : str | None
+        The id of the job that was being waited on.
+    job_status : str | None
+        Last server-reported status (typically ``"completed"`` or ``"running"``).
+    missing_fields : list[str] | None
+        Names of fields that were still missing when the deadline elapsed.
+    call_id : str | None
+        Compute call id, when surfaced by the partial result.
+    server_state : dict | None
+        Final server response snapshot, for debugging.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        job_id: str | None = None,
+        job_status: str | None = None,
+        missing_fields: list[str] | None = None,
+        call_id: str | None = None,
+        server_state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.job_id = job_id
+        self.job_status = job_status
+        self.missing_fields = list(missing_fields) if missing_fields else []
+        self.call_id = call_id
+        self.server_state = server_state
+
+
 class NotSupportedOnReceptorDB(LigandAIError):
     """Feature is not exposed via the ReceptorDB-restricted client.
 
@@ -281,7 +409,7 @@ class NotSupportedOnReceptorDB(LigandAIError):
     """
 
 
-# ─── Wallet / rotating-key exceptions (Track E) ──────────────────────────────
+# ─── Wallet / rotating-key exceptions ──────────────────────────────
 
 
 class WalletEmpty(LigandAIError):
@@ -361,6 +489,150 @@ class LigandAIScopeError(LigandAIError):
         self.required_scope = required_scope
 
 
+# ─── Local-enforcement exceptions ────────────────────
+
+
+class LigandAIInvalidConfig(LigandAIError):
+    """The caller passed a configuration the SDK refuses to forward.
+
+    Raised CLIENT-SIDE before any HTTP call when:
+
+    - ``gpu`` / ``gpu_type`` is anything other than ``"b200_plus"`` (the SDK
+      never exposes 2x/4x/8x or smaller GPUs — see ``ALLOWED_GPU_TYPES`` in
+      :mod:`ligandai._constants`).
+    - ``diffusion_samples`` / ``trajectories`` outside the documented range.
+    - Any other invariant the SDK enforces locally to prevent foot-guns.
+
+    Attributes
+    ----------
+    field : str | None
+        The name of the offending kwarg / field.
+    value : Any | None
+        The value the caller passed.
+    allowed : Any | None
+        The accepted values (when small / enumerable) or a short description.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field: str | None = None,
+        value: Any | None = None,
+        allowed: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.field = field
+        self.value = value
+        self.allowed = allowed
+
+
+class LigandAIInsufficientCredits(LigandAIError):
+    """Client-side credit pre-flight failed before submission.
+
+    Distinct from :class:`LigandAICreditError`:
+
+    - :class:`LigandAICreditError` is the SERVER's 402 INSUFFICIENT_CREDITS
+      after a request reached the wire.
+    - :class:`LigandAIInsufficientCredits` is the SDK's local pre-flight check
+      — the SDK asks the server for the balance, computes the expected cost
+      locally, and rejects the call BEFORE submitting it. This prevents
+      cascading 402 responses across a batch loop.
+
+    Attributes
+    ----------
+    required : int | None
+        Estimated credits the batch will consume.
+    available : int | None
+        Balance read from the server immediately before the check.
+    shortfall : int | None
+        ``max(0, required - available)``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        available: int | None = None,
+        shortfall: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.required = required
+        self.available = available
+        if shortfall is None and required is not None and available is not None:
+            shortfall = max(0, int(required) - int(available))
+        self.shortfall = shortfall
+
+
+class LigandAIDuplicateSubmission(LigandAIError):
+    """A caller tried to re-submit an identical fold/generate call without
+    ``force_resubmit=True``, and the local dedupe DB shows a recent submission.
+
+    The SDK normally returns the cached :class:`~ligandai.jobs.Job` handle
+    instead of raising — this exception fires only in strict modes (e.g.
+    ``return_cached=False``) or when the cached job is missing critical
+    metadata.
+
+    Attributes
+    ----------
+    submission_hash : str | None
+        SHA-256 of (peptide_seq + receptor_seq + gpu + params).
+    previous_job_id : str | None
+        Job ID of the earlier submission.
+    previous_status : str | None
+        Status the local DB recorded for that earlier submission.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        submission_hash: str | None = None,
+        previous_job_id: str | None = None,
+        previous_status: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.submission_hash = submission_hash
+        self.previous_job_id = previous_job_id
+        self.previous_status = previous_status
+
+
+class LigandAIConcurrencyLimit(LigandAIError):
+    """The caller's tier's local concurrency cap is full.
+
+    The SDK tracks in-flight jobs in the local sqlite DB
+    (``~/.ligandai/submitted.db``) and refuses to submit when the count of
+    ``submitted`` rows in the last
+    :data:`~ligandai._constants.DEFAULT_DEDUPE_WINDOW_SECS` for this
+    ``api_key_hash`` has reached
+    :data:`~ligandai._constants.TIER_GPU_SLOTS` for the caller's tier. The
+    platform enforces the same cap; local enforcement just fails faster.
+
+    Attributes
+    ----------
+    in_flight : int | None
+        Count of in-flight submissions tracked locally.
+    limit : int | None
+        Local cap for the caller's tier.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        in_flight: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.in_flight = in_flight
+        self.limit = limit
+
+
 def error_from_response(
     status_code: int,
     payload: dict[str, Any] | None,
@@ -411,10 +683,61 @@ def error_from_response(
                 or "https://ligandai.com/pricing",
                 **common,
             )
+        # surface the structured insufficient-credits
+        # response so callers can render a top-off CTA instead of seeing a
+        # bare "Insufficient credits" string. Server contract (matches
+        # the platform and the patched /v1/folding/predict-batch
+        # response):
+        #   {
+        #     "code": "INSUFFICIENT_CREDITS",
+        #     "creditsRequired": int,
+        #     "creditsAvailable": int,
+        #     "shortfall": int,
+        #     "recoveryUrl": "/account/billing?recovery=insufficient_credits&...",
+        #     "upgradeUrl": "https://ligandai.com/pricing",
+        #     "topup": <usd int>   // optional
+        #   }
+        # Older endpoints just send "required" + a free-text message; we
+        # accept both shapes for compatibility.
+        required_raw = (
+            payload.get("creditsRequired")
+            or payload.get("credits_required")
+            or payload.get("required")
+        )
+        available_raw = (
+            payload.get("creditsAvailable")
+            or payload.get("credits_available")
+            or payload.get("available")
+            or payload.get("currentBalance")
+            or payload.get("current_balance")
+        )
+        recovery_url_raw = (
+            payload.get("recoveryUrl")
+            or payload.get("recovery_url")
+        )
+        upgrade_url_raw = (
+            payload.get("upgradeUrl")
+            or payload.get("upgrade_url")
+        )
+        top_up_usd_raw = (
+            payload.get("topup")
+            or payload.get("top_up")
+            or payload.get("topupUsd")
+            or payload.get("top_up_usd")
+        )
+        shortfall_raw = (
+            payload.get("shortfall")
+            or payload.get("creditsShortfall")
+            or payload.get("credits_shortfall")
+        )
         return LigandAICreditError(
             message,
-            required=payload.get("required"),
-            available=payload.get("available"),
+            required=int(required_raw) if required_raw is not None else None,
+            available=int(available_raw) if available_raw is not None else None,
+            shortfall=int(shortfall_raw) if shortfall_raw is not None else None,
+            recovery_url=str(recovery_url_raw) if recovery_url_raw else None,
+            top_up_usd=int(top_up_usd_raw) if top_up_usd_raw is not None else None,
+            upgrade_url=str(upgrade_url_raw) if upgrade_url_raw else None,
             **common,
         )
     if status_code == 403:

@@ -21,7 +21,6 @@ from ligandai.types import (
 )
 
 # Conversion: 100 credits = $0.01 → 1 USD = 10,000 credits.
-# (Andre 2026-05-14, matches shared/schema.ts CREDIT_PRICING.customCreditRate = 100.)
 _CREDITS_PER_USD = 10_000
 
 
@@ -70,17 +69,10 @@ class Account(Resource):
     def credits(self) -> Credits:
         """``GET /api/credits`` — current credit balance.
 
-        Historical note: the SDK previously called ``/api/user-credits`` (the
-        sdk-alias path). That alias was leaking the superadmin sentinel
-        balance to every API-key caller because the upstream localhost
-        auto-login fires BEFORE the alias's API-key resolution. Until the
-        server-side fix is deployed (sdk-alias-routes.ts:745-791), the SDK
-        calls the canonical ``/api/credits`` route directly — that one
-        validates the API key correctly and returns per-user balance + tier.
-
-        Sentinel-sized balances (``>= 1e10``) still get a one-shot stderr
-        warning so genuine superadmins know they're hitting the unlimited
-        sentinel and not a tier-leak bug.
+        Returns the authenticated key's per-user balance and tier. Very large
+        balances (``>= 1e10``) represent an unlimited account and emit a
+        one-shot stderr warning so the caller knows the balance is a sentinel
+        rather than a real figure.
         """
         payload = self._transport.request("GET", "/api/credits") or {}
         return _warn_if_sentinel_balance(Credits.model_validate(payload or {}))
@@ -176,7 +168,7 @@ class Account(Resource):
         return TopUpResult.model_validate(payload)
 
     def widget(self) -> CreditsWidget:
-        """``GET /api/credits/balance`` — Claude-Code-style billing widget snapshot.
+        """``GET /api/credits/balance`` — billing widget snapshot.
 
         Returns a normalized :class:`~ligandai.types.CreditsWidget` with:
           - balance_credits / balance_usd
@@ -186,8 +178,7 @@ class Account(Resource):
           - reset_date (first of next month)
           - auto_reload_enabled + threshold/amount
 
-        Renders identically to the dollar-progress widget Andre uses in the
-        Claude Code billing pane.
+        Suitable for rendering a compact dollar-progress billing widget.
         """
         payload = self._transport.request("GET", "/api/credits/balance") or {}
         bal = int(payload.get("available") or 0)

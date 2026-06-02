@@ -107,7 +107,7 @@ def _build_headers(
         # We use Authorization per industry convention.
         headers["Authorization"] = f"Bearer {api_key}"
     if impersonate_user:
-        # Superadmin-only, server-gated to localhost/VPN.
+        # Internal operator hook; the platform independently authorizes it.
         headers["X-Impersonate-User"] = impersonate_user
     if client_session_id:
         headers["X-LigandAI-Client-Session-Id"] = client_session_id

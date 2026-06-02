@@ -1,5 +1,5 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
-"""Unit tests for the v0.2.0 paid-only peptides surface (LIGANDAI_ALPHA_V2-afspr).
+"""Unit tests for the v0.2.0 paid-only peptides surface.
 
 Covers:
   - ``Peptides.by_gene`` request shape + GeneSummary parsing
@@ -128,7 +128,7 @@ def test_list_returns_peptides(httpx_mock: HTTPXMock, pro_client: LigandAI) -> N
 
 
 def test_list_by_program_id_positional(httpx_mock: HTTPXMock, pro_client: LigandAI) -> None:
-    """v0.5.0: peptides.list(program_id_int) works (Andrew Keene's TypeError fix)."""
+    """v0.5.0: peptides.list(program_id_int) works (a user's TypeError fix)."""
     httpx_mock.add_response(
         url=f"{BASE}/api/v1/peptides/list?limit=10&offset=0&program_id=42",
         json={

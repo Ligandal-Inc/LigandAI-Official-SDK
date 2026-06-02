@@ -1,7 +1,6 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Fold-result filtering and pocket-expansion endpoints.
 
-Stream D / W4 (dre-twv8o) + Stream Q (LIGANDAI_ALPHA_V2-7dat3, native PPI bucket).
 Wraps:
 
 - :meth:`Folds.partition_by_hotspot` → ``POST /api/folds/partition-by-hotspot``
@@ -214,6 +213,75 @@ class Folds(Resource):
             "GET",
             f"/api/v1/folds/{fold_id}/pae/summary",
         ) or {}
+
+    # ─── Fold result recovery ──────────────────────────────────────────────
+
+    def recover(
+        self,
+        job_id: str,
+        *,
+        wait: bool = True,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Recover a fold whose compute job succeeded but whose result callback never landed.
+
+        The client-side fix for the case where ``Job.wait(durable=True)`` raises
+        :class:`~ligandai.errors.LigandAIWaitTimeout` with a captured
+        ``call_id``. This method asks the platform to re-fetch the result for
+        that job and finalize it so the structure lands in your account.
+
+        Parameters
+        ----------
+        job_id : str
+            The fold job id (``fold_<ms>_<rand>``) whose result needs re-pulling.
+        wait : bool
+            When True (default), poll the status endpoint until
+            ``has_structure=True`` before returning. When False, fire-and-forget.
+        timeout : float
+            Maximum seconds to wait for the recovery to land when ``wait=True``.
+
+        Returns
+        -------
+        dict
+            Platform response: ``{success, jobId, status, has_structure,
+            call_id?, iptm?, ipsae?, ...}``.
+
+        Notes
+        -----
+        Only callable for jobs the caller owns. Idempotent — re-running on a
+        job that already has a durable PDB returns ``{alreadyComplete: true}``
+        immediately.
+        """
+        import time as _time
+        from ligandai.errors import LigandAIError, LigandAITimeoutError
+
+        path = f"/api/folding/jobs/{job_id}/recover-from-modal"
+        body = {"wait": bool(wait), "timeout": float(timeout)}
+        resp = self._transport.request("POST", path, json=body) or {}
+
+        if not wait:
+            return resp
+        # Caller asked us to block — poll the status endpoint until the
+        # structure lands or we exceed the budget.
+        deadline = _time.monotonic() + max(timeout, 5.0)
+        last_state: dict[str, Any] = dict(resp)
+        while _time.monotonic() < deadline:
+            try:
+                state = self._transport.request("GET", f"/api/folding/jobs/{job_id}") or {}
+            except LigandAIError:
+                _time.sleep(2.0)
+                continue
+            last_state = state
+            if state.get("hasStructure") or state.get("has_structure"):
+                return {"success": True, "recovered": True, **state}
+            if state.get("status") in ("failed", "cancelled", "error"):
+                return {"success": False, "recovered": False, **state}
+            _time.sleep(2.0)
+        raise LigandAITimeoutError(
+            f"Recovery for fold {job_id} did not land structural data within {timeout}s "
+            f"(last state: status={last_state.get('status')!r}, "
+            f"hasStructure={last_state.get('hasStructure')})"
+        )
 
 
 class AsyncFolds(AsyncResource):

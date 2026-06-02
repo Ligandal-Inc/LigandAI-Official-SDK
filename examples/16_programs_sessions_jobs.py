@@ -10,7 +10,7 @@ Covers:
 
 Programs are the top-level container; sessions live inside a program (one
 per gene typically); workstreams group related sessions for parallel
-multi-target campaigns. Jobs are the GPU-side units that actually run on Modal.
+multi-target campaigns. Jobs are the GPU-side units that actually run on the compute backend.
 
 Run with:
     LIGANDAI_API_KEY=lgai_pro_... python 16_programs_sessions_jobs.py

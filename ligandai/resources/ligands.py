@@ -1,7 +1,7 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Small-molecule Kd scoring (LF-SM v3) — FREE-TIER accessible.
 
-Refs: bd-dre-0meky
+-0meky
 
 ``client.ligands.score_ligand(...)`` scores a (holo structure, ligand SMILES)
 pair with the LF-SM v3 KdHead and returns a predicted pKd + binder probability.

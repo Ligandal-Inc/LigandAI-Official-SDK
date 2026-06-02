@@ -39,14 +39,14 @@ design, structure prediction, scoring, and discovery.
 The SDK enforces tier limits **client-side** before submitting GPU work. Your
 tier (inferred from the API-key prefix) caps the number of in-flight GPU jobs:
 
-| Tier        | Concurrent GPU jobs |
+| Tier | Concurrent GPU jobs |
 |-------------|---------------------|
-| free        | 1                   |
-| basic       | 4                   |
-| academia    | 16                  |
-| pro         | 25                  |
-| enterprise  | 50                  |
-| superadmin  | 50                  |
+| free | 1 |
+| basic | 4 |
+| academia | 16 |
+| pro | 25 |
+| enterprise | 50 |
+| superadmin | 50 |
 
 When you exceed your cap, the SDK raises `LigandAIConcurrencyLimit`
 immediately — no network round-trip, no wasted GPU minutes. Inspect
@@ -69,7 +69,7 @@ value (including bare `b200`, `h100`, `a100`, etc.) raises
 
 Identical `client.fold(...)` / `client.fold_batch(...)` calls within a
 24-hour window return the cached `Job` handle instead of re-submitting —
-saving credits and Modal GPU slots. Submission identity is
+saving credits and GPU slots. Submission identity is
 `sha256(peptide_set + receptor_seq + gpu + params)` so re-ordering a peptide
 list does not produce a "different" submission. To force a fresh submission,
 pass `force_resubmit=True`:
@@ -189,10 +189,10 @@ design against chain C, fetch the structure by PDB ID and pass
 
 ```python
 client = LigandAI()
-struct = client.structures.from_pdb("9MIR")     # confirms the PDB resolves
+struct = client.structures.from_pdb("9MIR") # confirms the PDB resolves
 job = client.peptides.generate(
-    gene="9MIR",                                 # PDB ID accepted as identifier
-    target_chains=["C"],                         # restrict design to chain C
+    gene="9MIR", # PDB ID accepted as identifier
+    target_chains=["C"], # restrict design to chain C
     num_peptides=50,
     auto_fold=True,
     top_n_fold=10,
@@ -213,7 +213,7 @@ up = client.proteins.upload_pdb(
 job = client.peptides.generate(
     gene="MY_TARGET",
     variant_id=up.id,
-    target_chains=["A"],          # optional chain restriction on the upload
+    target_chains=["A"], # optional chain restriction on the upload
     num_peptides=25,
     auto_fold=True,
 )
@@ -256,7 +256,7 @@ client = LigandAI(api_key="lgai_basic_...")
 client = LigandAI()
 
 # 3. Custom base URL (dev / on-prem / enterprise)
-client = LigandAI(api_key="...", base_url="http://localhost:5050")
+client = LigandAI(api_key="...", base_url="http://localhost:8000")
 ```
 
 Any authenticated LIGANDAI account, including free accounts, can create API
@@ -270,17 +270,17 @@ API keys carry a **tier prefix**:
 |---|---|---|
 | `lgai_free_*` | free | quality-guided generation up to 10 peptides, 10 folds, 3 targets, 1 folding GPU |
 | `lgai_basic_*` | basic | up to 100 peptides, paid folding allowance, 4 folding GPUs |
-| `lgai_edu_*`  | academia | up to 300 peptides, academia guidance modules, 16 folding GPUs |
-| `lgai_pro_*`  | pro | up to 300 peptides, transcriptomics analysis, bivalent, 25 folding GPUs |
-| `lgai_ent_*`  | enterprise | everything + batch operations + priority queue |
-| `lgai_sa_*`   | superadmin | all features (internal) |
+| `lgai_edu_*` | academia | up to 300 peptides, academia guidance modules, 16 folding GPUs |
+| `lgai_pro_*` | pro | up to 300 peptides, transcriptomics analysis, bivalent, 25 folding GPUs |
+| `lgai_ent_*` | enterprise | everything + batch operations + priority queue |
+| `lgai_sa_*` | superadmin | all features (internal) |
 
 The client detects the tier from the prefix at construction — no network call.
 
 ```python
-client.tier                     # "pro"
-client.credits                  # int
-client.feature_allowed("...")   # bool
+client.tier # "pro"
+client.credits # int
+client.feature_allowed("...") # bool
 client.max_peptides_per_generation
 client.max_folds_per_generation
 client.max_targets_per_generation
@@ -298,21 +298,23 @@ For agent-specific billing, token, API-key, and Claude Skill routing, see
 
 | Namespace | Endpoints | What it does |
 |---|---|---|
-| `client.account`       | `/api/auth/user`, `/api/user-credits`, ... | profile, credits, tier limits |
-| `client.receptors`     | `/api/receptordb/*` | search, browse, download PDBs |
-| `client.structures`    | `/api/structure/*`, `/api/gene-resolver/*` | gene → PDB / AlphaFold |
-| `client.proteins`      | `/api/protein-info/*`, `/api/protein-variants/*` | UniProt info, variants, custom PDBs |
-| `client.discovery`     | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*` | tissue markers, scRNA, GEO import |
-| `client.diseases`      | `/api/disease-viewer/*` | disease search, mutations |
-| `client.goals`         | `/api/autoresearch/*` | persistent goal-directed AutoResearch runs |
-| `client.peptides`      | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/binder-scoring/*`, `/api/v1/deltaforge/score-pdb` | generate, fold, score |
-| `client.bivalent`      | `/api/ligandforge/bivalent/*` | bispecific design (pro+) |
-| `client.synthesis`     | `/api/synthesis-checkout/*`, `/api/adaptyv/*` | quote, cart, order |
-| `client.memory`        | `/api/episodic-memory/*` | memory search & save |
-| `client.programs`      | `/api/ptf/programs/*`, `/api/ptf/sessions/*` | programs, projects, sessions |
-| `client.charts`        | `/api/charts/*` | matplotlib chart generation |
-| `client.reports`       | `/api/reports/*` | PDF report generation |
-| `client.jobs`          | `/api/jobs/*` | list, cancel, stream |
+| `client.account` | `/api/auth/user`, `/api/user-credits`, ... | profile, credits, tier limits |
+| `client.receptors` | `/api/receptordb/*` | search, browse, download PDBs |
+| `client.structures` | `/api/structure/*`, `/api/gene-resolver/*` | gene → PDB / AlphaFold |
+| `client.proteins` | `/api/protein-info/*`, `/api/protein-variants/*` | UniProt info, variants, custom PDBs |
+| `client.discovery` | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*` | tissue markers, scRNA, GEO import |
+| `client.diseases` | `/api/disease-viewer/*` | disease search, mutations |
+| `client.goals` | `/api/autoresearch/*` | persistent goal-directed AutoResearch runs |
+| `client.peptides` | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/v1/deltaforge/score-pdb` | generate, fold, score |
+| `client.deltaforge` | `/api/v1/deltaforge/score-pdb`, `/api/v1/deltaforge/score-fold`, `/api/v1/deltaforge/batch-score-fold` | thermodynamic scoring (ΔG/Kd) |
+| `client.ligands` | `/api/v1/score/ligand` | small-molecule Kd scoring (free-tier) |
+| `client.bivalent` | `/api/ligandforge/bivalent/*` | bispecific design (pro+) |
+| `client.synthesis` | `/api/synthesis-checkout/*`, `/api/adaptyv/*` | quote, cart, order |
+| `client.memory` | `/api/episodic-memory/*` | memory search & save |
+| `client.programs` | `/api/ptf/programs/*`, `/api/ptf/sessions/*` | programs, projects, sessions |
+| `client.charts` | `/api/charts/*` | matplotlib chart generation |
+| `client.reports` | `/api/reports/*` | PDF report generation |
+| `client.jobs` | `/api/jobs/*` | list, cancel, stream |
 
 ## Billing & Account Management (v0.3.0+)
 
@@ -400,33 +402,70 @@ client.goals.stop(run.run_id)
 
 ## DeltaForge Scoring
 
-```python
-# Fold a target/binder pair, then score with DeltaForge auto mode.
-job = client.peptides.score_complex(
-    binder_sequence="ACDEFGHIK",
-    target_sequence="MNPQRSTVWY",
-    scorer="auto",  # auto | current | v10 | v10_2 | unified
-)
-score = job.wait().results
-print(score.dg, score.kd_nm, score.predicted_binder_call, score.scorer_version)
+DeltaForge predicts binding thermodynamics (ΔG / Kd) plus a binder/non-binder
+call. Use the `client.deltaforge` namespace. Auth is `Authorization: Bearer
+<api_key>` (handled by the client). The production scorer is selected
+server-side with `scorer="auto"`; the exact model that ran is returned on
+`score.scorer_version`.
 
-# Score your own folded PDB directly, with multivalent per-chain decomposition.
-# The fold_* values are optional Boltz-2 confidence metrics used for the
-# separate binder/non-binder call. The affinity values still return separately.
-score = client.peptides.score_pdb(
+**Canonical endpoints (these are the ONLY valid paths):**
+
+| Method | HTTP endpoint |
+|---|---|
+| `client.deltaforge.score_pdb(...)` | `POST /api/v1/deltaforge/score-pdb` |
+| `client.deltaforge.score_fold(fold_job_id, ...)` | `POST /api/v1/deltaforge/score-fold` |
+| `client.deltaforge.batch_score_fold([...])` | `POST /api/v1/deltaforge/batch-score-fold` |
+
+> There is **no** `/api/binder-scoring/deltaforge` endpoint — that path returns
+> 404. Use the `/api/v1/deltaforge/*` paths above.
+
+```python
+# 1) Score your own folded PDB. fold_* are optional Boltz-2 confidence metrics
+# used for the binder/non-binder call; the affinity (dg/kd_nm) returns
+# independently. Credits are charged only on a successful score.
+score = client.deltaforge.score_pdb(
     pdb_file="complex.pdb",
     receptor_chains=["A", "C"],
     peptide_chain="B",
-    scorer="auto",
+    scorer="auto", # auto | current | v10 | v10_2 | unified
     fold_ipsae=0.72,
     fold_iptm=0.84,
     fold_complex_plddt=91.2,
+    include_pae=False, # attach NxN PAE matrix when available
 )
-print(score.dg, score.kd_nm)                       # affinity readout
+print(score.dg, score.kd_nm, score.scorer_version)
 print(score.predicted_binder_call, score.predicted_non_binder_reasons)
 for pair in score.pair_scores or []:
     print(pair.receptor_chain, pair.peptide_chain, pair.dg, pair.contacts)
+
+# 2) Score a fold you ALREADY ran (no re-fold). Pass the fold job id; the stored
+# PDB + fold metrics (iptm/ptm/ipsae/plddt) are pulled and forwarded for you.
+score = client.deltaforge.score_fold(
+    "fold_1780410230005_wzgke1p5f",
+    include_pae=True, # NxN PAE on score.pae when resolvable
+)
+print(score.dg, score.kd_nm, score.iptm, score.ptm, score.ipsae, score.plddt_mean)
+if score.pae is not None:
+    print("PAE", len(score.pae), "x", len(score.pae[0]))
+else:
+    print("PAE status:", score.pae_status) # 'pending' | 'unavailable'
+
+# 3) Batch-score many existing folds; per-binder dg/kd_nm + all fold metrics.
+out = client.deltaforge.batch_score_fold(
+    ["fold_a", "fold_b", "fold_c"],
+    include_pae=False,
+)
+for r in out["results"]:
+    print(r["foldJobId"], r["sequence"], r["delta_g"], r["kd_nm"], r["classification"])
+
+# CSV export (PAE summarized as pae_shapeN / pae_status columns when requested):
+csv_text = client.deltaforge.batch_score_fold_csv(["fold_a", "fold_b"], include_pae=True)
+open("scores.csv", "w").write(csv_text)
 ```
+
+`iPTM` is generally more reliable than `iPSAE` (which can be inflated); both are
+returned. The legacy `client.peptides.score_pdb(...)` remains available and now
+also accepts `include_pae=`.
 
 ## Folding Controls and Peptide Viewing (v0.3.3+)
 
@@ -486,9 +525,9 @@ for fold in results:
 # Custom PDB receptor
 job = client.peptides.fold_batch(
     peptides=peptide_library,
-    receptor_pdb="receptors/my_target.pdb",  # path OR raw PDB content
+    receptor_pdb="receptors/my_target.pdb", # path OR raw PDB content
     receptor_name="MY_TARGET_v2",
-    sampling_steps=100,                      # 2× billing multiplier
+    sampling_steps=100, # 2× billing multiplier
 )
 
 # FASTA input (server parses multi-record blocks)
@@ -571,9 +610,9 @@ job = client.peptides.generate(
 job = client.peptides.generate(
     gene="EGFR",
     num_peptides=100,
-    length_range=(12, 22),      # cyclic-friendly length range
+    length_range=(12, 22), # cyclic-friendly length range
     cyclic_mode="disulfide",
-    strict_recombinant=True,    # forbid internal Cys (required for Adaptyv path)
+    strict_recombinant=True, # forbid internal Cys (required for Adaptyv path)
 )
 
 result = job.wait(timeout=1800)
@@ -582,10 +621,10 @@ for p in result.peptides:
         print(f"{p.sequence}: grade={p.stability_scores.stability_grade}, "
               f"halflife={p.stability_scores.predicted_halflife_hours:.1f}h")
     if p.immuno_scores:
-        print(f"  immuno_grade={p.immuno_scores.immuno_grade}, "
+        print(f" immuno_grade={p.immuno_scores.immuno_grade}, "
               f"pop_coverage={p.immuno_scores.population_coverage_pct:.0f}%")
     if p.cyclic_mode and p.cyclic_mode != "none":
-        print(f"  cyclic={p.cyclic_mode}")
+        print(f" cyclic={p.cyclic_mode}")
 ```
 
 ## Long-Running Jobs
@@ -594,9 +633,9 @@ Generation, folding, and scoring submit GPU work and return a `Job`:
 
 ```python
 job = client.peptides.generate(gene="EGFR", num_peptides=10)
-job.id              # str
-job.status          # "queued" | "running" | "complete" | "failed"
-job.progress        # 0-100 or None
+job.id # str
+job.status # "queued" | "running" | "complete" | "failed"
+job.progress # 0-100 or None
 job.estimated_credits
 
 # Block until done
@@ -631,16 +670,16 @@ results = asyncio.run(design_for_genes(["EGFR", "HER2", "KIT"]))
 
 ```python
 from ligandai import (
-    LigandAIError,             # base
-    LigandAIAuthError,         # 401 — invalid/expired/revoked key
-    LigandAIUpgradeRequired,   # 402 — caller's tier doesn't include the surface
-    LigandAICreditError,       # 402 — insufficient credits for operation
-    LigandAITierError,         # 403 — tier escalation needed
-    LigandAIForbidden,         # 403 — pilot allowlist, EULA, ownership
-    LigandAINotFoundError,     # 404
-    LigandAIRateLimitError,    # 429 — rate limit
-    LigandAIServerError,       # 5xx (auto-retried)
-    LigandAIValidationError,   # 400/422
+    LigandAIError, # base
+    LigandAIAuthError, # 401 — invalid/expired/revoked key
+    LigandAIUpgradeRequired, # 402 — caller's tier doesn't include the surface
+    LigandAICreditError, # 402 — insufficient credits for operation
+    LigandAITierError, # 403 — tier escalation needed
+    LigandAIForbidden, # 403 — pilot allowlist, EULA, ownership
+    LigandAINotFoundError, # 404
+    LigandAIRateLimitError, # 429 — rate limit
+    LigandAIServerError, # 5xx (auto-retried)
+    LigandAIValidationError, # 400/422
 )
 
 try:

@@ -280,7 +280,7 @@ def _make_client(args: argparse.Namespace):
 
 
 def _format_progress_bar(pct: int, width: int = 40) -> str:
-    """ASCII progress bar matching Andre's screenshot style.
+    """ASCII progress bar matching a compact terminal style.
 
     Filled cells show used spend; empty cells show remaining headroom.
     """
@@ -290,7 +290,7 @@ def _format_progress_bar(pct: int, width: int = 40) -> str:
 
 
 def render_credits_widget(widget: Any, *, no_color: bool = False) -> str:
-    """Render a CreditsWidget like Andre's Claude-Code style screenshot.
+    """Render a CreditsWidget like a compact screenshot.
 
     Pure formatter — takes the widget object (or a dict-like with the same
     fields) and returns the multi-line string. Separated out so the unit

@@ -1,8 +1,8 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """Public pydantic models for SDK request/response payloads.
 
-Models mirror the server-side schemas in ``shared/schema.ts``. They are
-intentionally permissive (``ConfigDict(extra="allow")``) so additive server
+Models mirror the platform's request/response schemas. They are
+intentionally permissive (``ConfigDict(extra="allow")``) so additive platform
 changes don't break SDK callers — but every documented field is typed.
 
 For internal-only types (HTTP machinery, rate limiter state) see
@@ -138,12 +138,12 @@ class AutoTopupConfig(_LGModel):
 
 
 class CreditsWidget(_LGModel):
-    """Snapshot of credit state for a Claude-Code-style billing widget.
+    """Snapshot of credit state for a compact billing widget.
 
-    Conversion rate (Andre 2026-05-14): 100 credits = $0.01 → 1 USD = 10,000 credits.
+    Conversion rate: 100 credits = $0.01 → 1 USD = 10,000 credits.
 
     The :attr:`pct_used` field is 0-100 (rounded). The :attr:`reset_date`
-    is the first of the following month at 00:00 UTC (matches server-side
+    is the first of the following month at 00:00 UTC (matches the platform's
     /api/credits/balance response).
     """
 
@@ -647,7 +647,7 @@ class BBBReceptor(_LGModel):
 
 
 class StabilityScores(_LGModel):
-    """Proteolytic stability + half-life scores emitted by the guided Modal worker.
+    """Proteolytic stability + half-life scores emitted by the guided design worker.
 
     Populated when ``serum_stability=True`` (and/or ``halflife`` is set) in
     :meth:`~ligandai.resources.peptides.Peptides.generate`.
@@ -689,7 +689,7 @@ class StabilityScores(_LGModel):
 
 
 class ImmunoScores(_LGModel):
-    """Immunogenicity scores emitted by the guided Modal worker.
+    """Immunogenicity scores emitted by the guided design worker.
 
     Populated when ``immunogenicity=True`` in
     :meth:`~ligandai.resources.peptides.Peptides.generate`.
@@ -832,8 +832,7 @@ class Peptide(_LGModel):
 class GeneSummary(_LGModel):
     """Per-gene peptide aggregation row from ``client.peptides.by_gene()``.
 
-    Mirrors the server-side ``AggregatePeptidesByGeneRow`` (see
-    ``server/storage.ts``) and the response shape of
+    Mirrors the platform's per-gene aggregation row and the response shape of
     ``GET /api/v1/peptides/by-gene``.
 
     A ``GeneSummary`` answers "what binders do I have for gene X?" — folded
@@ -1192,9 +1191,9 @@ class FoldResult(_LGModel):
     pdb_data: str | None = Field(default=None, alias="pdbData")
     """Full PDB structure content (inline). Non-None when ``has_structure`` is True.
 
-    bd-f5rf1 (2026-05-17): when ``Job.wait(durable=True)`` (the default) returns,
-    this MUST be a non-empty string for a succeeded fold. If it isn't, the SDK
-    raises :class:`~ligandai.errors.LigandAIIncompleteResult` instead of silently
+    When ``Job.wait(durable=True)`` (the default) returns, this MUST be a
+    non-empty string for a succeeded fold. If it isn't, the SDK raises
+    :class:`~ligandai.errors.LigandAIIncompleteResult` instead of silently
     handing back a half-populated result.
     """
     pdb_path: Path | None = Field(default=None, alias="pdbPath")
@@ -1344,6 +1343,19 @@ class DeltaForgeScore(_LGModel):
     pair_errors: list[dict[str, Any]] | None = Field(default=None, alias="pair_errors")
     warnings: list[str] | None = None
     metadata: dict[str, Any] | None = None
+    # Fold confidence metrics — always returned by score-fold (and forwarded by
+    # score-pdb when the caller passes fold_*). iPTM is more reliable than iPSAE (which can
+    # be inflated); both are surfaced.
+    iptm: float | None = None
+    ptm: float | None = None
+    ipsae: float | None = None
+    plddt_mean: float | None = Field(default=None, alias="plddt_mean")
+    fold_job_id: str | None = Field(default=None, alias="foldJobId")
+    # Optional NxN PAE matrix (Angstroms). Present only when include_pae=True AND
+    # the artifact resolved; otherwise pae is None and pae_status explains why
+    # ('ok' | 'pending' | 'unavailable').
+    pae: list[list[float]] | None = None
+    pae_status: str | None = Field(default=None, alias="paeStatus")
 
 
 class LigandIQScore(_LGModel):
@@ -1546,7 +1558,7 @@ class Mutation(_LGModel):
 class BiotinLinker(_LGModel):
     """A biotinylation linker/spacer option for BLI synthesis orders.
 
-    Mirrors ``LinkerConfig`` in ``server/linker-configuration.ts``.
+    Mirrors the platform's linker configuration.
     Used by :meth:`~ligandai.resources.synthesis.Synthesis.linker_options`,
     :meth:`~ligandai.resources.synthesis.Synthesis.recommend_linker`, and
     :meth:`~ligandai.resources.synthesis.Synthesis.generation_mask_guidance`.
@@ -1903,9 +1915,9 @@ class BatchFoldEvent(_LGModel):
     """A single per-peptide completion event from
     :meth:`~ligandai.resources.peptides.BatchFoldJob.stream`.
 
-    bd-f5rf1 (2026-05-17): one event is yielded as each sub-job becomes
-    terminal AND its structural payload has landed (durable contract — never
-    yields a "completed but PDB empty" event). For batches of N peptides,
+    One event is yielded as each sub-job becomes terminal AND its structural
+    payload has landed (durable contract — never yields a "completed but PDB
+    empty" event). For batches of N peptides,
     callers can pipeline scoring/visualization per-event instead of waiting
     for the whole batch.
 

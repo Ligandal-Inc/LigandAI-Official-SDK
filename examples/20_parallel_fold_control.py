@@ -1,9 +1,9 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """
-20 — Explicit parallel-GPU control for folding (Task J / P2.D).
+20 — Explicit parallel-GPU control for folding (the platform / P2.D).
 
 Demonstrates the new ``n_parallel_gpus=`` parameter on ``client.peptides.fold()``.
-The server validates against USER_GPU_LIMITS and returns HTTP 400 with the cap
+The server validates against tier GPU limits and returns HTTP 400 with the cap
 value when the request exceeds the caller's tier:
 
     free        → 1 GPU

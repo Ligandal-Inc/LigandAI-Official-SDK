@@ -28,9 +28,10 @@ from __future__ import annotations
 import warnings
 from datetime import datetime
 from pathlib import Path
+from collections.abc import AsyncIterator, Iterator
 from typing import Any, Callable, Literal
 
-from ligandai.errors import LigandAIError
+from ligandai.errors import LigandAICreditError, LigandAIError
 from ligandai.jobs import AsyncJob, Job
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
@@ -194,6 +195,14 @@ def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
             "pair_errors": pick("pair_errors", "pairErrors"),
             "warnings": pick("warnings"),
             "metadata": scoring.get("metadata") or scoring,
+            # fold confidence + PAE passthrough
+            "iptm": pick("iptm", "iPTM"),
+            "ptm": pick("ptm", "pTM"),
+            "ipsae": pick("ipsae", "iPSAE"),
+            "plddt_mean": pick("plddt_mean", "plddtMean", "mean_plddt"),
+            "foldJobId": pick("foldJobId", "fold_job_id"),
+            "pae": pick("pae"),
+            "paeStatus": pick("pae_status", "paeStatus"),
         }
     )
 
@@ -216,7 +225,7 @@ _TargetingStrategy = Literal["full_surface", "pocket_targeted"]
 # all authenticated tiers, including free, subject to credits and limits.
 _CyclicMode = Literal["none", "lactam", "disulfide", "head_tail_contact"]
 
-# Charge filtering mode applied by the filtered Modal worker.
+# Charge filtering mode applied by the filtered design worker.
 # - ``"off"`` — no charge filter (default behavior when chargeMode='off').
 # - ``"lt"`` — keep peptides with net charge < chargeValue.
 # - ``"gt"`` — keep peptides with net charge > chargeValue.
@@ -318,7 +327,7 @@ def _generation_body(
     halflife: _HalflifeTarget | None,
     halflife_strength: float,
     # Charge / solubility filtering (tier-gated; server activates filtered
-    # Modal worker when any non-default constraint is present).
+    # design worker when any non-default constraint is present).
     charge_mode: _ChargeMode | None,
     charge_value: float | None,
     charge_min: float | None,
@@ -515,6 +524,29 @@ def _generation_body(
     return body
 
 
+_VALID_FOLD_APPROACHES = ("boltz2_affinity", "esmfold2", "esmfold2_fast")
+
+
+def _resolve_fold_approach(fold_approach: str | None) -> str:
+    """Normalize / validate ``fold_approach`` before HTTP submit.
+
+    Default = ``"boltz2_affinity"`` — current production gold standard.
+    Aliases: ``"boltz2"`` and ``"boltz"`` collapse to ``"boltz2_affinity"``.
+    """
+    if fold_approach is None or fold_approach == "":
+        return "boltz2_affinity"
+    fa = str(fold_approach).strip().lower().replace("-", "_")
+    if fa in ("boltz2", "boltz", "boltz_2", "boltz_affinity"):
+        return "boltz2_affinity"
+    if fa == "esmfold":
+        return "esmfold2"
+    if fa not in _VALID_FOLD_APPROACHES:
+        raise ValueError(
+            f"fold_approach must be one of {_VALID_FOLD_APPROACHES}, got {fold_approach!r}"
+        )
+    return fa
+
+
 def _fold_body(
     sequences: list[Sequence | str | dict[str, Any]],
     *,
@@ -532,19 +564,47 @@ def _fold_body(
     step_scale: float | None = None,
     contribute_to_receptordb: bool | None = None,
     n_parallel_gpus: int | None = None,
+    # / approach selection
+    fold_approach: str | None = None,
+    num_seeds: int | None = None,
+    num_recycles: int | None = None,
+    return_pdb: bool | None = None,
 ) -> dict[str, Any]:
     """Build the body for ``POST /api/folding/predict``.
 
     Single sequence → ``{model, sequence}``. Multiple → ``{model, entities}``.
+
+    ``fold_approach`` selects the upstream design worker:
+      - ``"boltz2_affinity"`` (default) — gold-standard 2-chain Boltz-2 + affinity head
+      - ``"esmfold2"`` — single-sequence ESMFold2 on B200+ (~3-5 s/peptide)
+      - ``"esmfold2_fast"`` — LF-Pose v3 (50 ms warm-pool variant)
     """
+    approach = _resolve_fold_approach(fold_approach)
     normalized = [_norm_seq(s) for s in sequences]
+    # Effective trajectory count: prefer num_seeds when explicitly set,
+    # otherwise fall back to num_trajectories then diffusion_samples.
+    effective_samples = (
+        int(num_seeds) if num_seeds is not None
+        else (num_trajectories if num_trajectories is not None else diffusion_samples)
+    )
     body: dict[str, Any] = {
-        "model": "boltz2",
+        "model": approach,
+        "foldApproach": approach,
+        "fold_approach": approach,
         "gpuCount": gpu_count,
-        "diffusionSamples": num_trajectories if num_trajectories is not None else diffusion_samples,
+        "diffusionSamples": effective_samples,
         "templateMode": template_mode,
         "autoScore": auto_score,
     }
+    if num_seeds is not None:
+        body["numSeeds"] = int(num_seeds)
+        body["num_seeds"] = int(num_seeds)
+    if num_recycles is not None:
+        body["numRecycles"] = int(num_recycles)
+        body["num_recycles"] = int(num_recycles)
+    if return_pdb is not None:
+        body["returnPdb"] = bool(return_pdb)
+        body["return_pdb"] = bool(return_pdb)
     if sampling_steps is not None:
         body["samplingSteps"] = sampling_steps
     if recycling_steps is not None:
@@ -556,12 +616,12 @@ def _fold_body(
     if contribute_to_receptordb is not None:
         body["contributeToReceptordb"] = contribute_to_receptordb
         body["submitToCommunity"] = contribute_to_receptordb
-    # Task J — explicit parallel-GPU cap (tier-validated server-side via USER_GPU_LIMITS).
+    # explicit parallel-GPU cap (tier-validated server-side via tier GPU limits).
     # When None, the server picks a tier-appropriate default. When set above the
     # caller's tier cap the server returns 400 with the cap value in the error body.
     if n_parallel_gpus is not None:
         body["nParallelGpus"] = int(n_parallel_gpus)
-        # Mirror snake_case for FastAPI consumers
+        # Mirror snake_case for platform consumers
         body["n_parallel_gpus"] = int(n_parallel_gpus)
     if target_gene is not None:
         body["targetGeneName"] = target_gene
@@ -619,16 +679,112 @@ def _parse_generation(payload: dict[str, Any]) -> GenerationResult:
 
 
 def _parse_fold(payload: dict[str, Any]) -> FoldResult:
+    """Build a :class:`FoldResult` from a server status payload.
+
+    the parser is now durable about which keys it
+    inspects. The server may emit the PDB content at the top level, nested
+    under ``result``, or under ``output_data`` (gpu_jobs row shape). We probe
+    each one in priority order and surface :attr:`FoldResult.has_structure`
+    set True only when actual content was found.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+
+    # Server emits the fold result in three possible places: top-level (raw
+    # webhook), payload["result"] (folding_jobs endpoint), or
+    # payload["output_data"] (gpu_jobs row). Probe in priority order.
+    nested_candidates: list[dict[str, Any]] = []
+    for key in ("result", "output_data", "outputData"):
+        node = payload.get(key)
+        if isinstance(node, dict):
+            nested_candidates.append(node)
+
+    def _first(*keys: str) -> Any:
+        for src in (payload, *nested_candidates):
+            if not isinstance(src, dict):
+                continue
+            for k in keys:
+                v = src.get(k)
+                if v is not None and v != "":
+                    return v
+        return None
+
+    pdb_data = _first("pdbContent", "pdb_content", "pdbData", "pdb_data", "pdb")
+    pdb_url = _first("pdbUrl", "pdb_url")
+    cif_data = _first("cifContent", "cif_content", "cifData", "cif_data", "cif")
+    iptm = _first("iptm", "ipTM")
+    ipsae = _first("ipsae", "iPSAE")
+    # server emits both a scalar mean_plddt AND an
+    # array plddt (per-residue). FoldResult.plddt is a scalar — prefer the
+    # mean if available, fall back to mean(plddt-array), else None.
+    plddt_raw = _first("mean_plddt", "meanPlddt", "plddt")
+    if isinstance(plddt_raw, (int, float)):
+        plddt = float(plddt_raw)
+    elif isinstance(plddt_raw, list) and plddt_raw:
+        try:
+            plddt = sum(float(v) for v in plddt_raw) / len(plddt_raw)
+        except (TypeError, ValueError):
+            plddt = None
+    else:
+        plddt = None
+    ptm = _first("ptm")
+    ipae = _first("ipae")
+    chain_pair_iptm = _first("chainPairIptm", "chain_pair_iptm")
+    per_chain = _first("perChain", "per_chain", "per_chain_metrics")
+    pae_url = _first("paeUrl", "pae_url")
+    confidence = _first("confidence", "confidence_metrics", "confidenceMetrics")
+    metrics = _first("metrics") or {}
+    scores = _first("scores", "deltaforge", "deltaforge_score") or {}
+
+    def _to_float(v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    iptm = _to_float(iptm)
+    ipsae = _to_float(ipsae)
+    ptm = _to_float(ptm)
+    ipae = _to_float(ipae) if not isinstance(ipae, dict) else None
+
+    if not isinstance(metrics, dict):
+        metrics = {}
+    # Make headline metrics easy to subscript even when the server didn't pre-
+    # build the metrics dict.
+    metrics = dict(metrics)
+    for k, v in (
+        ("iptm", iptm), ("ipsae", ipsae), ("ptm", ptm),
+        ("mean_plddt", plddt), ("ipae", ipae),
+    ):
+        if v is not None and k not in metrics:
+            try:
+                metrics[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+
+    has_struct_flag = _first("hasStructure", "has_structure")
+    has_structure = bool(has_struct_flag) or bool(pdb_data) or bool(cif_data)
+
     return FoldResult.model_validate(
         {
-            "jobId": payload.get("jobId") or payload.get("id") or "",
-            "pdbUrl": payload.get("pdbUrl") or payload.get("pdb_url"),
-            "pdbData": payload.get("pdbData") or payload.get("pdb_data") or payload.get("pdb"),
-            "iptm": payload.get("iptm") or payload.get("ipTM"),
-            "ipsae": payload.get("ipsae"),
-            "plddt": payload.get("plddt"),
-            "ptm": payload.get("ptm"),
-            "chainPairIptm": payload.get("chainPairIptm") or payload.get("chain_pair_iptm"),
+            "jobId": payload.get("jobId") or payload.get("id") or _first("jobId", "id") or "",
+            "pdbUrl": pdb_url,
+            "pdbData": pdb_data,
+            "cifData": cif_data,
+            "hasStructure": has_structure,
+            "iptm": iptm,
+            "ipsae": ipsae,
+            "plddt": plddt,
+            "ptm": ptm,
+            "ipae": ipae,
+            "chainPairIptm": chain_pair_iptm,
+            "perChain": per_chain,
+            "paeUrl": pae_url,
+            "confidence": confidence if isinstance(confidence, dict) else None,
+            "metrics": metrics or None,
+            "scores": scores if isinstance(scores, dict) and scores else None,
         }
     )
 
@@ -787,7 +943,7 @@ class BatchFoldJob:
                     parser=_parse_fold,
                     status_path="/api/folding/jobs/{job_id}",
                     cancel_path="/api/folding/jobs/{job_id}",
-                    sse_path="/api/jobs/{job_id}/sse",
+                    sse_path="/api/folding/jobs/{job_id}/logs/stream",
                     initial={"id": jid, "type": "folding", "status": "queued"},
                 )
             )
@@ -940,6 +1096,141 @@ class BatchFoldJob:
         self._results = None
         return self.results
 
+    def stream(
+        self,
+        timeout: float = 7200.0,
+        poll_interval: float = 5.0,
+    ) -> "Iterator[BatchFoldEvent]":
+        """Yield one :class:`~ligandai.types.BatchFoldEvent` per sub-job as it
+        becomes terminal AND its structural payload has landed.
+
+        canonical streaming surface for batch folds.
+        Replaces the old pattern of ``[job.wait() for job in batch.sub_jobs]``
+        which serialized waits and missed the structural-payload landing race.
+
+        Each event carries the peptide index, peptide sequence, server job_id,
+        full PDB content, and confidence metrics so callers can pipeline
+        scoring/save-to-disk per-fold instead of waiting for the whole batch.
+
+        Parameters
+        ----------
+        timeout
+            Total wall-clock budget (seconds) for the whole batch. Raises
+            :class:`~ligandai.errors.LigandAITimeoutError` when the deadline
+            elapses with sub-jobs still pending.
+        poll_interval
+            Sleep between batch ticks (seconds).
+
+        Yields
+        ------
+        BatchFoldEvent
+            One per fully-resolved sub-job (or one per failed sub-job).
+
+        Example
+        -------
+        .. code-block:: python
+
+            batch = client.fold_batch(peptides=[P1, P2, P3], target=RECEPTOR)
+            for event in batch.stream():
+                if event.status == "succeeded":
+                    Path(f"./{event.record_id}.pdb").write_text(event.pdb_content)
+                    print(f"{event.peptide_sequence}: iptm={event.iptm:.2f}")
+        """
+        import time as _time
+        from datetime import datetime as _datetime, timezone as _timezone
+        from ligandai.errors import LigandAITimeoutError as _LigandAITimeoutError
+        from ligandai.jobs import _fold_has_durable_payload as _has_durable
+        from ligandai.types import BatchFoldEvent as _BatchFoldEvent
+
+        deadline = _time.monotonic() + timeout
+        emitted: set[int] = set()
+        total = len(self._sub_jobs)
+
+        while len(emitted) < total:
+            for idx, sub in enumerate(self._sub_jobs):
+                if idx in emitted:
+                    continue
+                meta = self._jobs_meta[idx] if idx < len(self._jobs_meta) else {}
+                record_id = (
+                    meta.get("record_id")
+                    or meta.get("recordId")
+                    or (sub.id if sub is not None else None)
+                )
+                peptide_sequence = (
+                    meta.get("peptide")
+                    or meta.get("peptide_sequence")
+                    or meta.get("sequence")
+                )
+                if sub is None:
+                    emitted.add(idx)
+                    yield _BatchFoldEvent.model_validate({
+                        "recordId": record_id,
+                        "jobId": meta.get("job_id") or meta.get("jobId") or "",
+                        "peptideIndex": idx,
+                        "peptideSequence": peptide_sequence,
+                        "status": "failed",
+                        "phase": "submit_failed",
+                        "timestamp": _datetime.now(_timezone.utc),
+                    })
+                    continue
+                try:
+                    sub.refresh()
+                except Exception:
+                    continue
+                if not sub.is_terminal:
+                    continue
+                durable_ok, _missing, _call_id = _has_durable(
+                    sub.info, sub.info.result if sub.info else None,
+                )
+                if sub.succeeded and not durable_ok:
+                    # Skip this tick — payload hasn't landed yet.
+                    continue
+                emitted.add(idx)
+                if sub.succeeded:
+                    try:
+                        fold = sub.results
+                    except Exception:
+                        fold = None
+                    yield _BatchFoldEvent.model_validate({
+                        "recordId": record_id,
+                        "jobId": sub.id,
+                        "peptideIndex": idx,
+                        "peptideSequence": peptide_sequence,
+                        "status": "succeeded",
+                        "pdbContent": getattr(fold, "pdb_data", None),
+                        "cifData": getattr(fold, "cif_data", None),
+                        "iptm": getattr(fold, "iptm", None),
+                        "ipsae": getattr(fold, "ipsae", None),
+                        "ipae": getattr(fold, "ipae", None),
+                        "ptm": getattr(fold, "ptm", None),
+                        "meanPlddt": getattr(fold, "plddt", None),
+                        "paeUrl": getattr(fold, "pae_url", None),
+                        "confidence": getattr(fold, "confidence", None),
+                        "perChain": getattr(fold, "per_chain", None),
+                        "phase": "complete",
+                        "timestamp": _datetime.now(_timezone.utc),
+                    })
+                else:
+                    yield _BatchFoldEvent.model_validate({
+                        "recordId": record_id,
+                        "jobId": sub.id,
+                        "peptideIndex": idx,
+                        "peptideSequence": peptide_sequence,
+                        "status": sub.status or "failed",
+                        "phase": "failed",
+                        "timestamp": _datetime.now(_timezone.utc),
+                    })
+            if len(emitted) >= total:
+                break
+            if _time.monotonic() > deadline:
+                pending = [i for i in range(total) if i not in emitted]
+                raise _LigandAITimeoutError(
+                    f"Batch {self._batch_id} did not complete streaming within "
+                    f"{timeout}s ({len(emitted)}/{total} folds emitted, "
+                    f"pending indices: {pending[:10]}{'...' if len(pending) > 10 else ''})"
+                )
+            _time.sleep(poll_interval)
+
     def cancel(self) -> int:
         """Cancel every still-running sub-job. Returns the number canceled."""
         n = 0
@@ -1004,7 +1295,7 @@ class AsyncBatchFoldJob:
                     parser=_parse_fold,
                     status_path="/api/folding/jobs/{job_id}",
                     cancel_path="/api/folding/jobs/{job_id}",
-                    sse_path="/api/jobs/{job_id}/sse",
+                    sse_path="/api/folding/jobs/{job_id}/logs/stream",
                     initial={"id": jid, "type": "folding", "status": "queued"},
                 )
             )
@@ -1180,7 +1471,7 @@ def _flatten_peptide(raw: dict[str, Any], gene: str | None = None) -> dict[str, 
         qs.get("ligandiq_pred_iptm"),
     )
     legacy_predicted_ptm = _first_present(raw.get("predicted_ptm"), qs.get("predicted_ptm"))
-    # Legacy production LigandIQ payloads normalize Modal's pred_iptm head into
+    # Legacy production LigandIQ payloads normalize the platform's pred_iptm head into
     # quality_scores.predicted_ptm. Expose it only as predicted_iptm; current
     # LigandIQ does not emit a distinct predicted pTM head.
     if predicted_iptm is None and (
@@ -1391,7 +1682,7 @@ class Peptides(Resource):
         halflife: _HalflifeTarget | None = None,
         halflife_strength: float = 2.0,
         # Charge / solubility filtering (server-tier gated; server activates
-        # filtered Modal worker when any non-default constraint is present).
+        # filtered design worker when any non-default constraint is present).
         charge_mode: _ChargeMode | None = None,
         charge_value: float | None = None,
         charge_min: float | None = None,
@@ -1623,19 +1914,136 @@ class Peptides(Resource):
         step_scale: float | None = None,
         contribute_to_receptordb: bool | None = None,
         n_parallel_gpus: int | None = None,
+        # Hardening kwargs
+        gpu: str | None = None,
+        force_resubmit: bool = False,
+        # ESMFold2 + approach selection
+        fold_approach: str | None = None,
+        num_seeds: int | None = None,
+        num_recycles: int | None = None,
+        return_pdb: bool | None = None,
     ) -> Job[FoldResult]:
-        """Submit a Boltz-2 folding job (monomer or multimer).
+        """Submit a folding job (monomer or multimer).
+
+        ``fold_approach`` (default ``"boltz2_affinity"``) selects the upstream
+        folding method:
+
+          - ``"boltz2_affinity"`` — 2-chain Boltz-2 with affinity
+          - ``"esmfold2"`` — single-sequence ESMFold2 on B200+ (~3-5 s/peptide)
+          - ``"esmfold2_fast"`` — fast warm-pool variant (~50 ms)
+
+        ``num_seeds`` / ``num_recycles`` / ``return_pdb`` are forwarded to the
+        folding method; ``num_recycles`` only affects ESMFold approaches.
 
         Args:
-            n_parallel_gpus: Concurrent fold-worker GPUs (Task J). When None
-                (default), the server uses the tier-default (free=1, basic=4,
+            n_parallel_gpus: Concurrent fold-worker GPUs. When None (default),
+                the platform uses the tier-default (free=1, basic=4,
                 academia=16, pro=25, enterprise=50). When set above the
-                caller's USER_GPU_LIMITS cap, the server returns HTTP 400 with
-                the cap value in the response body. Use estimate_fold_time() to
+                caller's tier cap, the platform returns HTTP 400 with the cap
+                value in the response body. Use estimate_fold_time() to
                 pre-compute the wall-clock impact.
+            gpu: GPU type. Only ``"b200_plus"`` is accepted; other GPU strings
+                raise :class:`~ligandai.errors.LigandAIInvalidConfig` BEFORE
+                any HTTP call. Distinct from ``gpu_count`` (slot count, not type).
+            force_resubmit: Bypass the local 24-hour dedupe and re-submit an
+                identical fold call. Default ``False`` — identical fold calls
+                return the cached :class:`~ligandai.jobs.Job` handle.
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
+        # SDK hardening pre-flight
+        from ligandai._hardening import (
+            attach_job_id,
+            build_fold_params_for_hash,
+            dedupe_lookup_cached,
+            enforce_concurrency,
+            estimate_single_fold_credits,
+            mark_failed,
+            preflight_credits,
+            receptor_seq_for_hash,
+            record_submission,
+            validate_gpu,
+        )
+        from ligandai._dedupe import compute_submission_hash
+
+        canonical_gpu = validate_gpu(gpu)
+        submitted_set = self._client.submitted_set if self._client is not None else None
+        credit_ledger = self._client.credit_ledger if self._client is not None else None
+        api_key_hash = self._client.api_key_hash if self._client is not None else ""
+
+        # Identity = concatenation of normalized sequences. For a 2-chain
+        # complex (receptor + peptide), this captures both. The first sequence
+        # is the receptor when len(sequences) >= 2.
+        normalized_seqs = [_norm_seq(s) for s in sequences]
+        seq_strings = [str(s.get("sequence", "")) for s in normalized_seqs]
+        if len(seq_strings) >= 2:
+            rec_for_hash = receptor_seq_for_hash(
+                target_gene=target_gene,
+                receptor_sequence=seq_strings[0],
+                receptor_pdb=None,
+            )
+            peptide_for_hash: str | list[str] = "|".join(seq_strings[1:])
+        else:
+            rec_for_hash = receptor_seq_for_hash(
+                target_gene=target_gene,
+                receptor_sequence=seq_strings[0] if seq_strings else None,
+                receptor_pdb=None,
+            )
+            peptide_for_hash = ""
+
+        sub_hash = compute_submission_hash(
+            peptide_seq=peptide_for_hash,
+            receptor_seq=rec_for_hash,
+            gpu=canonical_gpu,
+            params=build_fold_params_for_hash(
+                target_gene=target_gene,
+                diffusion_samples=(
+                    num_trajectories if num_trajectories is not None
+                    else diffusion_samples
+                ),
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                msa_enabled=msa_enabled,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                extra={"kind": "fold", "pegylation": bool(pegylation) if pegylation is not None else None},
+            ),
+        )
+
+        enforce_concurrency(self._client, submitted_set)
+
+        cached = dedupe_lookup_cached(
+            submitted_set,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            force_resubmit=force_resubmit,
+        )
+        if cached and cached.get("job_id"):
+            cached_job_id = str(cached["job_id"])
+            return Job(
+                self._transport,
+                cached_job_id,
+                job_type="folding",
+                parser=_parse_fold,
+                status_path="/api/folding/jobs/{job_id}",
+                cancel_path="/api/folding/jobs/{job_id}",
+                sse_path="/api/folding/jobs/{job_id}/logs/stream",
+                initial={"id": cached_job_id, "type": "folding", "status": "cached"},
+            )
+
+        # Single-fold cost: trajectories × 100 × max(1.0, steps/50)
+        effective_trajectories = int(
+            num_trajectories if num_trajectories is not None else diffusion_samples
+        )
+        estimated = estimate_single_fold_credits(
+            trajectories=effective_trajectories,
+            sampling_steps=sampling_steps,
+        )
+        balance_before, _ = preflight_credits(
+            self._client, estimated=estimated, kind="fold",
+        )
+
         body = _fold_body(
             sequences,
             auto_score=auto_score,
@@ -1652,11 +2060,44 @@ class Peptides(Resource):
             step_scale=step_scale,
             contribute_to_receptordb=contribute_to_receptordb,
             n_parallel_gpus=n_parallel_gpus,
+            fold_approach=fold_approach,
+            num_seeds=num_seeds,
+            num_recycles=num_recycles,
+            return_pdb=return_pdb,
         )
-        payload = self._transport.request("POST", "/api/folding/predict", json=body) or {}
+
+        record_submission(
+            submitted_set,
+            credit_ledger,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            kind="fold",
+            gpu=canonical_gpu,
+            estimated_credits=estimated,
+            balance_before=balance_before,
+            meta={"target_gene": target_gene, "chains": len(seq_strings)},
+        )
+
+        try:
+            payload = self._transport.request("POST", "/api/folding/predict", json=body) or {}
+        except Exception as exc:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason=type(exc).__name__,
+            )
+            raise
+
         job_id = payload.get("jobId") or payload.get("id") or ""
         if not job_id:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason="server_no_job_id",
+            )
             raise LigandAIError("Server did not return a jobId for fold", response=payload)
+        attach_job_id(
+            submitted_set, submission_hash=sub_hash,
+            api_key_hash=api_key_hash, job_id=job_id,
+        )
         return Job(
             self._transport,
             job_id,
@@ -1664,7 +2105,7 @@ class Peptides(Resource):
             parser=_parse_fold,
             status_path="/api/folding/jobs/{job_id}",
             cancel_path="/api/folding/jobs/{job_id}",
-            sse_path="/api/jobs/{job_id}/sse",
+            sse_path="/api/folding/jobs/{job_id}/logs/stream",
             initial={"id": job_id, "type": "folding", "status": "queued", **payload},
         )
 
@@ -1686,6 +2127,13 @@ class Peptides(Resource):
         n_parallel_gpus: int | None = None,
         session_id: str | None = None,
         contribute_to_receptordb: bool | None = None,
+        on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
+        # ─── hardening kwargs ────────────────────
+        # gpu: only "b200_plus" is accepted by the SDK; anything else raises
+        # LigandAIInvalidConfig BEFORE any HTTP call.
+        gpu: str | None = None,
+        # force_resubmit: bypass the local 24h dedupe and POST anyway.
+        force_resubmit: bool = False,
     ) -> BatchFoldJob:
         """Submit N peptides against a single fixed receptor for batch Boltz-2 folding.
 
@@ -1701,6 +2149,38 @@ class Peptides(Resource):
         multiplier of ``max(1.0, sampling_steps / 50)``. Total cost is
         charged upfront before any GPU work begins; HTTP 402 is raised when
         balance is insufficient.
+
+        Graceful credit-exhaustion (``on_credit_exhausted``)
+        ----------------------------------------------------
+        When the server rejects the batch with ``HTTP 402 INSUFFICIENT_CREDITS``,
+        the SDK raises :class:`~ligandai.errors.LigandAICreditError`. The error
+        instance carries the structured server response (``shortfall``,
+        ``recovery_url``, ``top_up_usd``, ``upgrade_url``) so callers can
+        prompt the user to top up.
+
+        Pass ``on_credit_exhausted=my_callback`` to handle the error inline
+        instead of having it bubble up. The callback receives ``(err, payload)``
+        where ``err`` is the :class:`LigandAICreditError` and ``payload`` is
+        the JSON body the SDK was about to POST. Return ``True`` to retry the
+        submission (after the user tops up); return ``False`` (or anything
+        falsy) to re-raise the original error. Example::
+
+            def topup_prompt(err, payload):
+                print(f"Need {err.shortfall:,} more credits (${err.top_up_usd}).")
+                print(f"Top up at: {err.recovery_url}")
+                input("Press Enter once topped up to resume...")
+                return True
+
+            job = client.peptides.fold_batch(
+                peptides=peps, target_gene="EGFR",
+                on_credit_exhausted=topup_prompt,
+            )
+
+        Because ``fold_batch`` is a single POST (the server dispatches all
+        peptide sub-jobs atomically), there is no "in-flight batch" to pause
+        — the entire request is rejected before any GPU work begins. The
+        callback simply gives the caller a clean hook to top up and retry
+        the same batch without restructuring their loop.
 
         Receptor (pass exactly one)
         ---------------------------
@@ -1762,6 +2242,94 @@ class Peptides(Resource):
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
+        # ─── SDK hardening pre-flight ──────────────
+        # 1) GPU type allowlist (raises LigandAIInvalidConfig if bad)
+        # 2) Local concurrency cap (raises LigandAIConcurrencyLimit)
+        # 3) Dedupe lookup (returns cached BatchFoldJob if recent match)
+        # 4) Credit pre-flight (raises LigandAIInsufficientCredits)
+        # 5) Record submission in submitted.db + credit_ledger.db
+        # Network POST only happens AFTER all five guards pass.
+        from ligandai._hardening import (
+            attach_job_id,
+            dedupe_lookup_cached,
+            enforce_concurrency,
+            estimate_fold_batch_credits,
+            mark_failed,
+            preflight_credits,
+            receptor_seq_for_hash,
+            record_submission,
+            validate_gpu,
+            build_fold_params_for_hash,
+        )
+        from ligandai._dedupe import compute_submission_hash
+
+        canonical_gpu = validate_gpu(gpu)
+        submitted_set = self._client.submitted_set if self._client is not None else None
+        credit_ledger = self._client.credit_ledger if self._client is not None else None
+        api_key_hash = self._client.api_key_hash if self._client is not None else ""
+
+        # Compute submission hash from the SAME inputs that determine result
+        # identity. Receptor identity uses sequence > pdb > gene.
+        rec_for_hash = receptor_seq_for_hash(
+            target_gene=target_gene,
+            receptor_sequence=receptor_sequence,
+            receptor_pdb=receptor_pdb,
+        )
+        sub_hash = compute_submission_hash(
+            peptide_seq=peptides,
+            receptor_seq=rec_for_hash,
+            gpu=canonical_gpu,
+            params=build_fold_params_for_hash(
+                target_gene=target_gene,
+                diffusion_samples=diffusion_samples,
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                msa_enabled=msa_enabled,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                extra={"kind": "fold_batch", "receptor_name": receptor_name},
+            ),
+        )
+
+        # 1) Concurrency cap (only after passing GPU validation; raises if full)
+        enforce_concurrency(self._client, submitted_set)
+
+        # 2) Dedupe — return cached batch handle if a recent identical
+        #    submission exists and force_resubmit was not requested.
+        cached = dedupe_lookup_cached(
+            submitted_set,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            force_resubmit=force_resubmit,
+        )
+        if cached and cached.get("job_id"):
+            # Reconstruct a thin BatchFoldJob from the cached batch_id. We
+            # cannot recover per-sub-job metadata, but the user can call
+            # .wait() / .results via the server status endpoint.
+            cached_batch_id = str(cached["job_id"])
+            return BatchFoldJob(
+                self._transport,
+                batch_id=cached_batch_id,
+                jobs=[],
+                total_cost_credits=int(cached.get("estimated_credits") or 0),
+                peptide_count=len(peptides),
+                trajectories_per_peptide=int(diffusion_samples),
+                receptor={"source": "cached"},
+                sampling_steps=int(sampling_steps),
+            )
+
+        # 3) Credit pre-flight — estimate locally, compare to balance, raise
+        #    LigandAIInsufficientCredits if short (skipped for unlimited tiers).
+        estimated = estimate_fold_batch_credits(
+            peptide_count=len(peptides),
+            trajectories=int(diffusion_samples),
+            sampling_steps=int(sampling_steps),
+        )
+        balance_before, _ = preflight_credits(
+            self._client, estimated=estimated, kind="fold_batch",
+        )
+
         body = _build_batch_fold_body(
             peptides=peptides,
             target_gene=target_gene,
@@ -1779,10 +2347,79 @@ class Peptides(Resource):
             session_id=session_id,
             contribute_to_receptordb=contribute_to_receptordb,
         )
-        payload = self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+
+        # 4) Record submission BEFORE the POST. If the POST fails we'll mark
+        #    the row 'failed' so the next attempt isn't blocked by dedupe.
+        record_submission(
+            submitted_set,
+            credit_ledger,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            kind="fold_batch",
+            gpu=canonical_gpu,
+            estimated_credits=estimated,
+            balance_before=balance_before,
+            meta={
+                "peptide_count": len(peptides),
+                "target_gene": target_gene,
+                "receptor_name": receptor_name,
+                "trajectories": int(diffusion_samples),
+                "sampling_steps": int(sampling_steps),
+            },
+        )
+
+        # retry-after-topup hook. The submission is a
+        # single POST; on HTTP 402 INSUFFICIENT_CREDITS, the SDK invokes the
+        # caller-supplied callback and, if it returns truthy, re-POSTs the
+        # same body once. One retry is intentional — repeated retries on a
+        # still-empty balance would just hammer the server. Callers wanting
+        # bounded retry loops should drive that from outside fold_batch.
+        try:
+            payload = self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except LigandAICreditError as cred_err:
+            if on_credit_exhausted is None:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted",
+                )
+                raise
+            try:
+                should_retry = bool(on_credit_exhausted(cred_err, body))
+            except Exception:
+                # Never let a callback exception swallow the original credit
+                # error — re-raise the credit error so the caller sees the
+                # actionable shortfall/recovery_url metadata.
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_callback_error",
+                )
+                raise cred_err from None
+            if not should_retry:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_no_retry",
+                )
+                raise
+            payload = self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except Exception as exc:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason=type(exc).__name__,
+            )
+            raise
         batch_id = payload.get("batch_id") or payload.get("batchId") or ""
         if not batch_id:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason="server_no_batch_id",
+            )
             raise LigandAIError("Server did not return a batch_id for fold_batch", response=payload)
+        # 5) Persist the batch_id onto the dedupe row so a repeat call returns
+        #    the cached handle.
+        attach_job_id(
+            submitted_set, submission_hash=sub_hash,
+            api_key_hash=api_key_hash, job_id=batch_id,
+        )
         return BatchFoldJob(
             self._transport,
             batch_id=batch_id,
@@ -1912,6 +2549,7 @@ class Peptides(Resource):
         scorer: _DeltaForgeScorer = "auto",
         aggregate_method: _DeltaForgeAggregateMethod = "boltzmann_parallel",
         include_features: bool = False,
+        include_pae: bool = False,
         fold_ipsae: float | None = None,
         fold_iptm: float | None = None,
         fold_ptm: float | None = None,
@@ -1927,6 +2565,13 @@ class Peptides(Resource):
         are forwarded to the production binder/non-binder gate; affinity
         ``dg``/``kd_nm`` still return independently when the gate calls
         ``not_binder``.
+
+        ``include_pae=True`` asks the server to attach the NxN PAE matrix
+        (Angstroms) on :attr:`DeltaForgeScore.pae` when a matching artifact is
+        available; otherwise ``pae`` is ``None`` and ``pae_status`` explains why
+        (``'pending'`` while a backend pull completes, ``'unavailable'`` when no
+        artifact exists for the uploaded structure). Credits are charged only on
+        a successful score.
         """
         if not pdb_content and not pdb_file:
             raise ValueError("Pass pdb_content= or pdb_file=")
@@ -1948,6 +2593,7 @@ class Peptides(Resource):
                 "scorer": scorer,
                 "aggregateMethod": aggregate_method,
                 "includeFeatures": include_features,
+                "includePae": include_pae,
                 "foldIpsae": fold_ipsae,
                 "foldIptm": fold_iptm,
                 "foldPtm": fold_ptm,
@@ -2252,7 +2898,7 @@ class Peptides(Resource):
         return [Peptide.model_validate(p) for p in items]
 
     # ------------------------------------------------------------------
-    # v0.2.0 surface — paid-only /api/v1/peptides/* (LIGANDAI_ALPHA_V2-afspr)
+    # v0.2.0 surface — paid-only /api/v1/peptides/*
     # ------------------------------------------------------------------
 
     def by_gene(
@@ -2384,7 +3030,7 @@ class Peptides(Resource):
           * ``client.peptides.list(program_id=42, min_ipsae=0.8)`` — explicit (NEW)
           * ``client.peptides.list(program_id=42, gene="EGFR")`` — both (NEW)
 
-        Andrew Keene's #1 bug: ``client.peptides.list(program_id)`` raised
+        a user's #1 bug: ``client.peptides.list(program_id)`` raised
         ``TypeError`` because the signature only took ``gene``. v0.5.0 accepts
         either by detecting the positional arg's type (str → gene, int →
         program_id) and exposes both as keyword args.
@@ -2461,7 +3107,7 @@ class Peptides(Resource):
     ) -> list[Peptide]:
         """``GET /api/v1/peptides/list?program_id=X`` — list peptides in a program.
 
-        Convenience method for the common Andrew-Keene-style query: "give me
+        Convenience method for the common a common query: "give me
         all peptides in program 42, optionally filtered by score thresholds."
 
         Args:
@@ -2805,10 +3451,110 @@ class AsyncPeptides(AsyncResource):
         step_scale: float | None = None,
         contribute_to_receptordb: bool | None = None,
         n_parallel_gpus: int | None = None,
+        # Hardening kwargs
+        gpu: str | None = None,
+        force_resubmit: bool = False,
+        # ESMFold2 + approach selection
+        fold_approach: str | None = None,
+        num_seeds: int | None = None,
+        num_recycles: int | None = None,
+        return_pdb: bool | None = None,
     ) -> AsyncJob[FoldResult]:
-        """Async sibling of :meth:`Peptides.fold`. See :meth:`Peptides.fold` for ``n_parallel_gpus`` semantics."""
+        """Async sibling of :meth:`Peptides.fold`. See :meth:`Peptides.fold` for
+        ``n_parallel_gpus`` semantics and the GPU / dedupe / credit pre-flight
+        hardening (gpu='b200_plus' only, 24h local dedupe).
+        """
         if self._client is not None:
             self._client._require_feature("predict_structure")
+        # Hardening pre-flight
+        from ligandai._hardening import (
+            attach_job_id,
+            build_fold_params_for_hash,
+            dedupe_lookup_cached,
+            enforce_concurrency,
+            estimate_single_fold_credits,
+            mark_failed,
+            preflight_credits,
+            receptor_seq_for_hash,
+            record_submission,
+            validate_gpu,
+        )
+        from ligandai._dedupe import compute_submission_hash
+
+        canonical_gpu = validate_gpu(gpu)
+        submitted_set = self._client.submitted_set if self._client is not None else None
+        credit_ledger = self._client.credit_ledger if self._client is not None else None
+        api_key_hash = self._client.api_key_hash if self._client is not None else ""
+
+        normalized_seqs = [_norm_seq(s) for s in sequences]
+        seq_strings = [str(s.get("sequence", "")) for s in normalized_seqs]
+        if len(seq_strings) >= 2:
+            rec_for_hash = receptor_seq_for_hash(
+                target_gene=target_gene,
+                receptor_sequence=seq_strings[0],
+                receptor_pdb=None,
+            )
+            peptide_for_hash: str | list[str] = "|".join(seq_strings[1:])
+        else:
+            rec_for_hash = receptor_seq_for_hash(
+                target_gene=target_gene,
+                receptor_sequence=seq_strings[0] if seq_strings else None,
+                receptor_pdb=None,
+            )
+            peptide_for_hash = ""
+
+        sub_hash = compute_submission_hash(
+            peptide_seq=peptide_for_hash,
+            receptor_seq=rec_for_hash,
+            gpu=canonical_gpu,
+            params=build_fold_params_for_hash(
+                target_gene=target_gene,
+                diffusion_samples=(
+                    num_trajectories if num_trajectories is not None
+                    else diffusion_samples
+                ),
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                msa_enabled=msa_enabled,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                extra={"kind": "fold", "pegylation": bool(pegylation) if pegylation is not None else None},
+            ),
+        )
+
+        enforce_concurrency(self._client, submitted_set)
+
+        cached = dedupe_lookup_cached(
+            submitted_set,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            force_resubmit=force_resubmit,
+        )
+        if cached and cached.get("job_id"):
+            cached_job_id = str(cached["job_id"])
+            return AsyncJob(
+                self._transport,
+                cached_job_id,
+                job_type="folding",
+                parser=_parse_fold,
+                status_path="/api/folding/jobs/{job_id}",
+                cancel_path="/api/folding/jobs/{job_id}",
+                sse_path="/api/folding/jobs/{job_id}/logs/stream",
+                initial={"id": cached_job_id, "type": "folding", "status": "cached"},
+            )
+
+        effective_trajectories = int(
+            num_trajectories if num_trajectories is not None else diffusion_samples
+        )
+        estimated = estimate_single_fold_credits(
+            trajectories=effective_trajectories,
+            sampling_steps=sampling_steps,
+        )
+        balance_before, _ = preflight_credits(
+            self._client, estimated=estimated, kind="fold",
+        )
+
         body = _fold_body(
             sequences,
             auto_score=auto_score,
@@ -2825,11 +3571,44 @@ class AsyncPeptides(AsyncResource):
             step_scale=step_scale,
             contribute_to_receptordb=contribute_to_receptordb,
             n_parallel_gpus=n_parallel_gpus,
+            fold_approach=fold_approach,
+            num_seeds=num_seeds,
+            num_recycles=num_recycles,
+            return_pdb=return_pdb,
         )
-        payload = await self._transport.request("POST", "/api/folding/predict", json=body) or {}
+
+        record_submission(
+            submitted_set,
+            credit_ledger,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            kind="fold",
+            gpu=canonical_gpu,
+            estimated_credits=estimated,
+            balance_before=balance_before,
+            meta={"target_gene": target_gene, "chains": len(seq_strings)},
+        )
+
+        try:
+            payload = await self._transport.request("POST", "/api/folding/predict", json=body) or {}
+        except Exception as exc:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason=type(exc).__name__,
+            )
+            raise
+
         job_id = payload.get("jobId") or payload.get("id") or ""
         if not job_id:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason="server_no_job_id",
+            )
             raise LigandAIError("Server did not return a jobId for fold", response=payload)
+        attach_job_id(
+            submitted_set, submission_hash=sub_hash,
+            api_key_hash=api_key_hash, job_id=job_id,
+        )
         return AsyncJob(
             self._transport,
             job_id,
@@ -2837,7 +3616,7 @@ class AsyncPeptides(AsyncResource):
             parser=_parse_fold,
             status_path="/api/folding/jobs/{job_id}",
             cancel_path="/api/folding/jobs/{job_id}",
-            sse_path="/api/jobs/{job_id}/sse",
+            sse_path="/api/folding/jobs/{job_id}/logs/stream",
             initial={"id": job_id, "type": "folding", "status": "queued", **payload},
         )
 
@@ -2859,15 +3638,92 @@ class AsyncPeptides(AsyncResource):
         n_parallel_gpus: int | None = None,
         session_id: str | None = None,
         contribute_to_receptordb: bool | None = None,
+        on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
+        # ─── hardening kwargs ────────────────────
+        gpu: str | None = None,
+        force_resubmit: bool = False,
     ) -> AsyncBatchFoldJob:
         """Async variant of :meth:`Peptides.fold_batch`.
 
-        See :meth:`Peptides.fold_batch` for receptor modes, FASTA support, and
-        billing details. Returns an :class:`AsyncBatchFoldJob` whose ``.wait()``
-        is a coroutine.
+        See :meth:`Peptides.fold_batch` for receptor modes, FASTA support,
+        billing, the ``on_credit_exhausted`` callback contract, and the
+        submission hardening (gpu='b200_plus' only, 24h dedupe, credit
+        pre-flight, tier concurrency cap).
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
+        # Hardening pre-flight
+        from ligandai._hardening import (
+            attach_job_id,
+            build_fold_params_for_hash,
+            dedupe_lookup_cached,
+            enforce_concurrency,
+            estimate_fold_batch_credits,
+            mark_failed,
+            preflight_credits,
+            receptor_seq_for_hash,
+            record_submission,
+            validate_gpu,
+        )
+        from ligandai._dedupe import compute_submission_hash
+
+        canonical_gpu = validate_gpu(gpu)
+        submitted_set = self._client.submitted_set if self._client is not None else None
+        credit_ledger = self._client.credit_ledger if self._client is not None else None
+        api_key_hash = self._client.api_key_hash if self._client is not None else ""
+
+        rec_for_hash = receptor_seq_for_hash(
+            target_gene=target_gene,
+            receptor_sequence=receptor_sequence,
+            receptor_pdb=receptor_pdb,
+        )
+        sub_hash = compute_submission_hash(
+            peptide_seq=peptides,
+            receptor_seq=rec_for_hash,
+            gpu=canonical_gpu,
+            params=build_fold_params_for_hash(
+                target_gene=target_gene,
+                diffusion_samples=diffusion_samples,
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                msa_enabled=msa_enabled,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                extra={"kind": "fold_batch", "receptor_name": receptor_name},
+            ),
+        )
+
+        enforce_concurrency(self._client, submitted_set)
+
+        cached = dedupe_lookup_cached(
+            submitted_set,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            force_resubmit=force_resubmit,
+        )
+        if cached and cached.get("job_id"):
+            cached_batch_id = str(cached["job_id"])
+            return AsyncBatchFoldJob(
+                self._transport,
+                batch_id=cached_batch_id,
+                jobs=[],
+                total_cost_credits=int(cached.get("estimated_credits") or 0),
+                peptide_count=len(peptides),
+                trajectories_per_peptide=int(diffusion_samples),
+                receptor={"source": "cached"},
+                sampling_steps=int(sampling_steps),
+            )
+
+        estimated = estimate_fold_batch_credits(
+            peptide_count=len(peptides),
+            trajectories=int(diffusion_samples),
+            sampling_steps=int(sampling_steps),
+        )
+        balance_before, _ = preflight_credits(
+            self._client, estimated=estimated, kind="fold_batch",
+        )
+
         body = _build_batch_fold_body(
             peptides=peptides,
             target_gene=target_gene,
@@ -2885,10 +3741,67 @@ class AsyncPeptides(AsyncResource):
             session_id=session_id,
             contribute_to_receptordb=contribute_to_receptordb,
         )
-        payload = await self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+
+        record_submission(
+            submitted_set,
+            credit_ledger,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            kind="fold_batch",
+            gpu=canonical_gpu,
+            estimated_credits=estimated,
+            balance_before=balance_before,
+            meta={
+                "peptide_count": len(peptides),
+                "target_gene": target_gene,
+                "receptor_name": receptor_name,
+                "trajectories": int(diffusion_samples),
+                "sampling_steps": int(sampling_steps),
+            },
+        )
+
+        # mirror the sync graceful-credit retry.
+        try:
+            payload = await self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except LigandAICreditError as cred_err:
+            if on_credit_exhausted is None:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted",
+                )
+                raise
+            try:
+                should_retry = bool(on_credit_exhausted(cred_err, body))
+            except Exception:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_callback_error",
+                )
+                raise cred_err from None
+            if not should_retry:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_no_retry",
+                )
+                raise
+            payload = await self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except Exception as exc:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason=type(exc).__name__,
+            )
+            raise
         batch_id = payload.get("batch_id") or payload.get("batchId") or ""
         if not batch_id:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason="server_no_batch_id",
+            )
             raise LigandAIError("Server did not return a batch_id for fold_batch", response=payload)
+        attach_job_id(
+            submitted_set, submission_hash=sub_hash,
+            api_key_hash=api_key_hash, job_id=batch_id,
+        )
         return AsyncBatchFoldJob(
             self._transport,
             batch_id=batch_id,
@@ -3011,6 +3924,7 @@ class AsyncPeptides(AsyncResource):
         scorer: _DeltaForgeScorer = "auto",
         aggregate_method: _DeltaForgeAggregateMethod = "boltzmann_parallel",
         include_features: bool = False,
+        include_pae: bool = False,
         fold_ipsae: float | None = None,
         fold_iptm: float | None = None,
         fold_ptm: float | None = None,
@@ -3038,6 +3952,7 @@ class AsyncPeptides(AsyncResource):
                 "scorer": scorer,
                 "aggregateMethod": aggregate_method,
                 "includeFeatures": include_features,
+                "includePae": include_pae,
                 "foldIpsae": fold_ipsae,
                 "foldIptm": fold_iptm,
                 "foldPtm": fold_ptm,
