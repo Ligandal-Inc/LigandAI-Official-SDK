@@ -1,6 +1,6 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """
-13 — Listing folded structures and pulling PDB content (Andrew Keene gap closure).
+13 — Listing folded structures and pulling PDB content (a user gap closure).
 
 Covers:
   client.structures.list(program_id=..., limit=..., offset=...)

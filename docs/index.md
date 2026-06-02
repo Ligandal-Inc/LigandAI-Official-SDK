@@ -24,7 +24,7 @@ not published and resolves to NXDOMAIN.
 For dev / on-prem deployments override explicitly:
 
 ```python
-client = LigandAI(api_key="...", base_url="http://localhost:5050")
+client = LigandAI(api_key="...", base_url="http://localhost:8000")
 ```
 
 ## Debugging

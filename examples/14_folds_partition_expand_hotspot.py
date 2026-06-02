@@ -1,6 +1,6 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """
-14 — Fold partitioning + hotspot expansion (Stream D + Task H1).
+14 — Fold partitioning + hotspot expansion (the platform + Task H1).
 
 Covers:
   client.folds.partition_by_hotspot(session_id, hotspots, pocket_residues)

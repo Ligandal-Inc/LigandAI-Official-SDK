@@ -66,10 +66,10 @@ def test_rate_limit_per_minute_by_tier() -> None:
 
 def test_max_peptides_per_generation_by_tier() -> None:
     assert LigandAI(api_key="lgai_free_x").max_peptides_per_generation == 10
-    assert LigandAI(api_key="lgai_basic_x").max_peptides_per_generation == 100
-    assert LigandAI(api_key="lgai_edu_x").max_peptides_per_generation == 300
-    assert LigandAI(api_key="lgai_pro_x").max_peptides_per_generation == 300
-    assert LigandAI(api_key="lgai_ent_x").max_peptides_per_generation == 1000
+    assert LigandAI(api_key="lgai_basic_x").max_peptides_per_generation == 1000
+    assert LigandAI(api_key="lgai_edu_x").max_peptides_per_generation == 5000
+    assert LigandAI(api_key="lgai_pro_x").max_peptides_per_generation == 5000
+    assert LigandAI(api_key="lgai_ent_x").max_peptides_per_generation == 25000
 
 
 def test_folding_gpu_caps_by_tier() -> None:
@@ -235,3 +235,62 @@ def test_top_level_fold_accepts_sequences_keyword(httpx_mock: HTTPXMock) -> None
 async def test_async_construct() -> None:
     async with AsyncLigandAI(api_key="lgai_pro_x") as c:
         assert c.tier == "pro"
+
+
+# ─── `client.credits` sentinel masking ────────────────────────
+
+
+def test_client_credits_property_masks_sentinel(httpx_mock: HTTPXMock) -> None:
+    """`client.credits` returns 0 (not the giant int) when server signals
+    is_unlimited. The full Credits object stays on ``client._credits`` for
+    callers who need to distinguish.
+    """
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/credits",
+        method="GET",
+        json={
+            "balance": 9_999_999_999_999_999,
+            "isUnlimited": True,
+            "tier": "superadmin",
+        },
+    )
+
+    assert c.credits == 0  # NOT the 1e16 sentinel
+    # Power users can still introspect the raw object
+    assert c._credits is not None
+    assert c._credits.is_unlimited is True
+    assert c._credits.balance == 9_999_999_999_999_999
+
+
+def test_client_credits_property_returns_real_balance(httpx_mock: HTTPXMock) -> None:
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/credits",
+        method="GET",
+        json={"balance": 4500, "tier": "academia"},
+    )
+
+    assert c.credits == 4500
+    assert c._credits is not None
+    # Either None (not surfaced) or False (explicitly not-unlimited)
+    assert not c._credits.is_unlimited
+    assert c._credits.balance == 4500
+
+
+def test_client_credits_property_masks_auto_detected_sentinel(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Server returns a giant balance with NO explicit isUnlimited flag.
+    The Credits model auto-flips is_unlimited=True at the 1e10 threshold;
+    `client.credits` should still mask it.
+    """
+    c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/credits",
+        method="GET",
+        json={"balance": 1_000_000_000_000, "tier": "pro"},  # 1e12, no flag
+    )
+
+    assert c.credits == 0  # masked despite missing isUnlimited
+    assert c._credits.is_unlimited is True

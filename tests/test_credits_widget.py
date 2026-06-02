@@ -4,7 +4,7 @@
 Covers:
   - _credits_to_usd conversion (100 cr = $0.01)
   - CreditsWidget round-trips through pydantic validation
-  - render_credits_widget renders Andre's Claude-Code-style layout
+  - render_credits_widget renders a compact billing layout
   - cmd_credits_widget normalizes /api/credits/balance payload
   - CLI argument parsing for credits / credits top-up / credits auto-reload
   - top-up < $25 rejected with exit code 2
@@ -98,7 +98,7 @@ class TestProgressBar:
         assert "█" not in bar
 
 
-# ── widget rendering matches Andre's screenshot shape ────────────────────────
+# ── widget rendering matches a screenshot shape ────────────────────────
 
 
 class TestRenderCreditsWidget:

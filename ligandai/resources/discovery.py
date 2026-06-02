@@ -87,6 +87,31 @@ class Discovery(Resource):
             self._transport.request("GET", f"/api/transcriptomics/gene-expression/{gene}") or {"gene": gene}
         )
 
+    def isoform_expression(
+        self,
+        gene: str,
+        top_n_isoforms: int = 10,
+        min_mean_tpm: float = 0.5,
+    ) -> dict[str, Any]:
+        """Per-isoform expression for a gene across HSWAE-2 contexts.
+
+        Enterprise / superadmin only — returns 403 with a friendly payload
+        otherwise. Cell-type-resolved when cell_isoform_specificity is
+        populated; falls back to tissue-resolved with `resolution` flag.
+
+        Returns the raw HSWAE-2 response dict (not a Pydantic model — the
+        shape is evolving as the cell_isoform_specificity populator rolls
+        out).
+        """
+        body = {
+            "gene": gene,
+            "top_n_isoforms": top_n_isoforms,
+            "min_mean_tpm": min_mean_tpm,
+        }
+        return self._transport.request(
+            "POST", "/api/transcriptomics/hswae/isoform-expression", json=body
+        ) or {"gene": gene, "isoforms": [], "resolution": "none"}
+
     def compare_groups(
         self,
         target_group: TargetGroup,

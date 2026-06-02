@@ -4,7 +4,7 @@
 Skipped unless ``LIGANDAI_TEST_API_KEY`` is set. To run against the dev server:
 
     LIGANDAI_TEST_API_KEY=lgai_pro_... \
-    LIGANDAI_TEST_BASE_URL=http://localhost:5050 \
+    LIGANDAI_TEST_BASE_URL=http://localhost:8000 \
     pytest tests/integration/ -v
 """
 
@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
 def live_client() -> LigandAI:
     return LigandAI(
         api_key=os.environ["LIGANDAI_TEST_API_KEY"],
-        base_url=os.environ.get("LIGANDAI_TEST_BASE_URL", "http://localhost:5050"),
+        base_url=os.environ.get("LIGANDAI_TEST_BASE_URL", "http://localhost:8000"),
         max_retries=2,
     )
 
@@ -61,7 +61,7 @@ def test_tier_detected(live_client: LigandAI) -> None:
 
 
 # ----------------------------------------------------------------------------
-# v0.2.0 paid-only /api/v1/peptides/* surface (LIGANDAI_ALPHA_V2-afspr)
+# v0.2.0 paid-only /api/v1/peptides/* surface
 # ----------------------------------------------------------------------------
 # These require a paid (pro+) test key. Skipped automatically on free keys
 # so a CI run that only has a free fixture key won't fail.

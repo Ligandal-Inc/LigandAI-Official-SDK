@@ -11,8 +11,8 @@ Construction
     # Or pass explicitly
     client = LigandAI(api_key="lgai_basic_AbC123...")
 
-    # Custom base URL (enterprise, on-prem, dev)
-    client = LigandAI(api_key="...", base_url="http://localhost:5050")
+    # Custom base URL (enterprise, on-prem, local dev)
+    client = LigandAI(api_key="...", base_url="http://localhost:8000")
 
 Tier detection
 --------------
@@ -63,6 +63,7 @@ from ligandai.resources.linker_modifications import (
 )
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
+from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
 from ligandai.resources.diseases import AsyncDiseases, Diseases
 from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
@@ -110,6 +111,15 @@ def _resolve_api_key(api_key: str | None) -> str | None:
     return os.environ.get("LIGANDAI_API_KEY") or os.environ.get("LIGANDAI_TEST_API_KEY")
 
 
+def _resolve_impersonation() -> str | None:
+    """Internal operator hook, resolved from the environment only.
+
+    Not part of the public client API. The platform independently authorizes
+    and scopes any privileged request, so this is inert for ordinary keys.
+    """
+    return os.environ.get("LIGANDAI_IMPERSONATE_USER") or None
+
+
 def _detect_tier(api_key: str | None) -> Tier | None:
     """Infer tier from key prefix without a network call.
 
@@ -144,7 +154,7 @@ class _ClientCommon:
         self._api_key = api_key
         self._tier = _detect_tier(api_key)
         self._base_url = base_url
-        # bd-qp82g (2026-05-17): lazy-initialized local dedupe + credit ledger.
+        # lazy-initialized local dedupe + credit ledger.
         # Anonymous / un-authenticated clients never touch ~/.ligandai/.
         self._submitted_set: SubmittedSet | None = None
         self._credit_ledger: CreditLedger | None = None
@@ -197,7 +207,7 @@ class _ClientCommon:
             return True
         return _tier_at_least(self._tier, required)
 
-    # ─── Local dedupe + credit-ledger access (bd-qp82g, 2026-05-17) ─────────
+    # ─── Local dedupe + credit-ledger access ─────────
 
     @property
     def submitted_set(self) -> "SubmittedSet":
@@ -302,17 +312,14 @@ class LigandAI(_ClientCommon):
         API key prefixed with ``lgai_<tier>_*``. Defaults to env var
         ``LIGANDAI_API_KEY`` (or ``LIGANDAI_TEST_API_KEY`` for tests).
     base_url
-        Override the default ``https://ligandai.com``. Useful for dev
-        (``http://localhost:5050``) or on-prem deployments. The platform
-        responds on the apex domain — ``api.ligandai.com`` is **not** a
-        published host, so do not point integrations there.
+        Override the default ``https://ligandai.com`` for local development or
+        on-prem deployments. The platform responds on the apex domain —
+        ``api.ligandai.com`` is **not** a published host, so do not point
+        integrations there.
     timeout
         Per-request timeout in seconds (default 60).
     max_retries
         Retries on 429/5xx/network errors (default 5).
-    impersonate_user
-        Superadmin-only. Sets ``X-Impersonate-User`` header. Server-gated to
-        localhost / VPN subnet 10.0.0.0.0/24.
     client_session_id
         Optional caller-provided run ID sent as
         ``X-LigandAI-Client-Session-Id`` for usage and credit attribution.
@@ -328,7 +335,6 @@ class LigandAI(_ClientCommon):
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        impersonate_user: str | None = None,
         client_session_id: str | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
@@ -342,7 +348,7 @@ class LigandAI(_ClientCommon):
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
-            impersonate_user=impersonate_user,
+            impersonate_user=_resolve_impersonation(),
             client_session_id=client_session_id,
             client=http_client,
         )
@@ -350,7 +356,7 @@ class LigandAI(_ClientCommon):
         # Resource namespaces
         self.account: Account = Account(self._transport)
         self.bivalent: Bivalent = Bivalent(self._transport, client=self)
-        # bd-dre-3dalk — linker_modifications + Mode B payload optimization.
+        # 3dalk — linker_modifications + Mode B payload optimization.
         self.linker_modifications: LinkerModifications = LinkerModifications(
             self._transport, client=self,
         )
@@ -360,11 +366,15 @@ class LigandAI(_ClientCommon):
         self.folds: Folds = Folds(self._transport, client=self)
         self.jobs: Jobs = Jobs(self._transport)
         self.goals: Goals = Goals(self._transport, client=self)
-        # Small-molecule Kd scoring (bd-dre-0meky) — free-tier accessible.
+        # Small-molecule Kd scoring — free-tier accessible.
         self.ligands: Ligands = Ligands(self._transport, client=self)
         self.memory: Memory = Memory(self._transport)
         self.msa: MSA = MSA(self._transport)
         self.peptides: Peptides = Peptides(self._transport, client=self)
+        # Singular alias: users (and AI assistants) reach for `client.peptide`.
+        self.peptide: Peptides = self.peptides
+        # DeltaForge scoring namespace (score_pdb / score_fold / batch_score_fold).
+        self.deltaforge: DeltaForge = DeltaForge(self._transport, client=self)
         self.programs: Programs = Programs(self._transport)
         self.proteins: Proteins = Proteins(self._transport)
         self.receptors: Receptors = Receptors(self._transport)
@@ -415,7 +425,7 @@ class LigandAI(_ClientCommon):
         inspect the returned :class:`~ligandai.types.Credits.is_unlimited`
         attribute, or read ``client._credits.is_unlimited`` after a refresh.
 
-        bd-yifvw.2 (2026-05-17): the previous behavior surfaced the raw
+        the previous behavior surfaced the raw
         sentinel as the int return value, which produced confusing
         "implausible credits balance" warnings even on legitimately-resolved
         superadmin accounts AND a far more confusing display for non-
@@ -535,13 +545,13 @@ class LigandAI(_ClientCommon):
         Submit N peptides against one fixed receptor for batch Boltz-2 folding.
         See :meth:`Peptides.fold_batch` for full parameter docs and examples.
 
-        bd-qp82g (2026-05-17): the SDK pre-validates ``gpu`` / ``gpu_type``
+        the SDK pre-validates ``gpu`` / ``gpu_type``
         kwargs and rejects anything other than ``"b200_plus"`` before
         delegating. Multi-GPU (2x/4x/8x), bare B200, H100, A100, etc. raise
         :class:`~ligandai.errors.LigandAIInvalidConfig` without a network
         round-trip.
         """
-        # bd-qp82g: pre-flight GPU validation BEFORE any HTTP work. The
+        # pre-flight GPU validation BEFORE any HTTP work. The
         # remaining kwargs are forwarded to Peptides.fold_batch which performs
         # its own dedupe + credit + concurrency checks.
         from ligandai._hardening import extract_and_validate_gpu
@@ -563,12 +573,12 @@ class LigandAI(_ClientCommon):
         - ``client.fold(target_sequence, peptide_sequence)`` for a two-chain
           complex fold
 
-        bd-qp82g (2026-05-17): the SDK pre-validates ``gpu`` / ``gpu_type``
+        the SDK pre-validates ``gpu`` / ``gpu_type``
         kwargs and rejects anything other than ``"b200_plus"`` BEFORE
         delegating. Multi-GPU (2x/4x/8x), bare B200, H100, A100, etc. raise
         :class:`~ligandai.errors.LigandAIInvalidConfig`.
         """
-        # bd-qp82g: pre-flight GPU validation BEFORE any HTTP work.
+        # pre-flight GPU validation BEFORE any HTTP work.
         from ligandai._hardening import extract_and_validate_gpu
         extract_and_validate_gpu(kwargs)
         sequences = kwargs.pop("sequences", None)
@@ -626,7 +636,6 @@ class AsyncLigandAI(_ClientCommon):
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        impersonate_user: str | None = None,
         client_session_id: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -640,14 +649,14 @@ class AsyncLigandAI(_ClientCommon):
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
-            impersonate_user=impersonate_user,
+            impersonate_user=_resolve_impersonation(),
             client_session_id=client_session_id,
             client=http_client,
         )
 
         self.account: AsyncAccount = AsyncAccount(self._transport)
         self.bivalent: AsyncBivalent = AsyncBivalent(self._transport, client=self)
-        # bd-dre-3dalk — linker_modifications + Mode B payload optimization.
+        # 3dalk — linker_modifications + Mode B payload optimization.
         self.linker_modifications: AsyncLinkerModifications = AsyncLinkerModifications(
             self._transport, client=self,
         )
@@ -657,11 +666,14 @@ class AsyncLigandAI(_ClientCommon):
         self.folds: AsyncFolds = AsyncFolds(self._transport, client=self)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
         self.goals: AsyncGoals = AsyncGoals(self._transport, client=self)
-        # Small-molecule Kd scoring (bd-dre-0meky) — free-tier accessible.
+        # Small-molecule Kd scoring — free-tier accessible.
         self.ligands: AsyncLigands = AsyncLigands(self._transport, client=self)
         self.memory: AsyncMemory = AsyncMemory(self._transport)
         self.msa: AsyncMSA = AsyncMSA(self._transport)
         self.peptides: AsyncPeptides = AsyncPeptides(self._transport, client=self)
+        # singular alias + DeltaForge scoring namespace.
+        self.peptide: AsyncPeptides = self.peptides
+        self.deltaforge: AsyncDeltaForge = AsyncDeltaForge(self._transport, client=self)
         self.programs: AsyncPrograms = AsyncPrograms(self._transport)
         self.proteins: AsyncProteins = AsyncProteins(self._transport)
         self.receptors: AsyncReceptors = AsyncReceptors(self._transport)
@@ -686,7 +698,7 @@ class AsyncLigandAI(_ClientCommon):
     async def fold_batch(self, peptides: list[str], **kwargs: Any) -> Any:
         """Async convenience wrapper for :meth:`AsyncPeptides.fold_batch`.
 
-        bd-qp82g (2026-05-17): GPU pre-validation runs before delegation —
+        GPU pre-validation runs before delegation —
         passing ``gpu="b200_2x"`` etc. raises
         :class:`~ligandai.errors.LigandAIInvalidConfig` without a round-trip.
         """

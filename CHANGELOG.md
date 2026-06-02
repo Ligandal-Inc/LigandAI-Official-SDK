@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-05-31
+
+### Added — `fold_approach` + ESMFold2 parameters
+
+`Peptides.fold()` (sync + async) now accepts:
+
+- `fold_approach`: one of `"boltz2_affinity"` (default), `"esmfold2"`,
+  `"esmfold2_fast"`. Aliases `"boltz2"` / `"boltz"` / `"esmfold"` collapse to
+  the canonical names. The platform dispatches to the matching folding method.
+- `num_seeds`: explicit seed count; overrides `num_trajectories` /
+  `diffusion_samples` when set.
+- `num_recycles`: ESMFold-specific recycle steps (1-4 typical). Ignored by
+  Boltz-2 approaches.
+- `return_pdb`: when true, includes the PDB string in the fold result
+  payload (size-bounded by the platform).
+
+### Notes
+
+- All new kwargs are optional; existing callers are unaffected.
+
 ## [0.6.2] - 2026-05-30
 
 ### Fixed — `__version__` was not bumped in 0.6.0 / 0.6.1
@@ -30,7 +50,7 @@ resolution to a specific isoform, species, or PDB code:
 struct = client.structures.get("KRAS")
 
 # Specific isoform
-struct = client.structures.get("CLDN18", isoform=2)        # CLDN18.2
+struct = client.structures.get("CLDN18", isoform=2) # CLDN18.2
 
 # Specific PDB code
 struct = client.structures.get("KRAS", pdb_code="6VG2")
@@ -43,7 +63,7 @@ struct = client.structures.get("CD8A", declared_gene_set=["CD8A", "CD8B"])
 ```
 
 When any of these kwargs is given, the request is routed through the full
-FastAPI structure resolver (which honors them); when none are given, the
+platform structure resolver (which honors them); when none are given, the
 original fast SDK path (ReceptorDB → UniProt → RCSB) is preserved verbatim.
 
 #### New enumeration methods
@@ -89,18 +109,17 @@ implemented on both `Structures` and `AsyncStructures`.
 
 ## [0.5.7] - 2026-05-17
 
-### Fixed — `Job.wait` / `BatchFoldJob.stream` durable contract (`bd-f5rf1`)
+### Fixed — `Job.wait` / `BatchFoldJob.stream` durable contract
 
-Triggered by the 2026-05-17 PPB-ext fold-recovery run: 116/245 folds had
-`status='completed'` returned by the server but `folding_jobs.result` held
-only the Modal spawn-ACK (`{call_id, message, spawned, status}`) instead of
-the real fold result. The legacy SDK `Job.wait()` returned success on outer
-status and downstream code saw `pdb_data=None`, `iptm=None`, `pdb_written=False`.
+Triggered by a fold-recovery run where some folds had `status='completed'`
+returned by the platform but the stored result held only the spawn
+acknowledgement (`{call_id, message, spawned, status}`) instead of the real
+fold result. The legacy SDK `Job.wait()` returned success on outer status and
+downstream code saw `pdb_data=None`, `iptm=None`, `pdb_written=False`.
 
-Root cause was a server-side regression in `/api/folding/submit` (spawn-ACK
-posted to the local webhook as a successful completion) — fixed in tandem
-in `LIGANDAI_ALPHA_V2`. The SDK now refuses to silently propagate that
-state regardless of the server's behavior.
+Root cause was a platform-side regression (spawn acknowledgement recorded as a
+successful completion) — fixed on the platform. The SDK now refuses to
+silently propagate that state regardless of the platform's behavior.
 
 #### `Job.wait(durable=True)` (new default)
 
@@ -109,7 +128,7 @@ state regardless of the server's behavior.
 - When the deadline elapses without durable data, raises a new
   `LigandAIWaitTimeout` carrying the captured `call_id`, missing-field
   list, and last server state — callers can pass that `call_id` to
-  `client.folds.recover_from_modal(job_id)` to pull the result from Modal.
+  `client.folds.recover(job_id)` to pull the result from the platform.
 - Opt-out: `wait(durable=False)` keeps the legacy fast-but-permissive
   behavior for advanced users running custom recovery loops.
 
@@ -122,12 +141,12 @@ state regardless of the server's behavior.
   `pdb_content`, `cif_data`, `iptm`, `ipsae`, `ipae`, `ptm`, `mean_plddt`,
   `pae_url`, `confidence`, `per_chain`, `phase`, `timestamp`.
 
-#### `client.folds.recover_from_modal(job_id)` (new)
+#### `client.folds.recover(job_id)` (new)
 
-- Hits the new server endpoint `POST /api/folding/jobs/:jobId/recover-from-modal`
-  which calls `FunctionCall.from_id(call_id).get(0)` against Modal and
-  replays the result through the local fold webhook so canonicalization,
-  chain-mapping, DB persistence, and SSE broadcast all run unchanged.
+- Asks the platform to re-fetch the result for a job whose result callback
+  never landed, then replays it through the platform's finalization so
+  canonicalization, chain-mapping, persistence, and SSE broadcast all run
+  unchanged.
 - When `wait=True` (default), polls the status endpoint until the structure
   lands or `timeout` elapses.
 
@@ -163,12 +182,12 @@ state regardless of the server's behavior.
 
 ## [0.5.6] - 2026-05-17
 
-### Hardening — GPU allowlist + local dedupe + credit pre-flight (`bd-qp82g`)
+### Hardening — GPU allowlist + local dedupe + credit pre-flight
 
-Triggered by the 2026-05-17 PPB-ext duplicate-submission incident: an SDK
-caller submitted 130 duplicate fold batches on identical `record_id`s
-through `Peptides.fold_batch(...)`, burning ~$50-100 of redundant Modal
-compute before the server-side concurrency limiter rejected the rest at
+Triggered by a duplicate-submission incident: an SDK caller submitted many
+duplicate fold batches on identical `record_id`s through
+`Peptides.fold_batch(...)`, burning redundant compute before the platform's
+concurrency limiter rejected the rest at
 ~399 / 716 folds. Root cause: the SDK had no client-side dedupe, no GPU
 allowlist, and no local credit pre-flight; it cheerfully forwarded every
 call to the server.
@@ -185,13 +204,9 @@ submission.
   `"b200_8x"`, bare `"b200"`, `"h100"`, `"a100"`, `"l40s"`, `"cpu"`, or
   any other value raises `LigandAIInvalidConfig` BEFORE the request hits
   the wire.
-- The multi-GPU B200 variants (`predict_structure_from_entities_b200_2x/4x/8x`
-  in `modal_workers/fold-multimer.py`) remain available for internal
-  pipeline jobs but are unreachable through the public SDK.
-- Defense in depth: the FastAPI backend `compute-guard.assert_public_gpu_type()`
-  and the Express `/v1/folding/predict-batch` zod schema also reject any
-  non-`b200_plus` value (HTTP 400) so a custom non-SDK client cannot bypass
-  the SDK.
+- Multi-GPU B200 variants are not reachable through the public SDK.
+- Defense in depth: the platform also rejects any non-`b200_plus` value
+  (HTTP 400) so a custom non-SDK client cannot bypass the SDK guard.
 
 #### Local dedupe (`~/.ligandai/submitted.db`)
 
@@ -222,7 +237,7 @@ submission.
 
 - `fold_batch(...)` estimates cost locally as
   `ceil(peptide_count × trajectories × 100 × max(1.0, sampling_steps / 50))`
-  (mirrors `internal-routes.ts`).
+  .
 - `fold(...)` estimates `trajectories × 100 × max(1.0, sampling_steps / 50)`.
 - Both compare against `client.credits` and raise
   `LigandAIInsufficientCredits` (with `required` / `available` /
@@ -253,13 +268,11 @@ All four subclass `LigandAIError` and are re-exported from `ligandai`.
 
 #### Backend defense in depth
 
-- `/opt/app/LIGANDAI_ALPHA_V2/fastapi_backend/middleware/compute-guard.py`:
-  new `assert_public_gpu_type(gpu_type, *, job_type)` helper rejects any
-  non-`b200_plus` value with HTTP 400 / `code: "GPU_TYPE_REJECTED"`.
-- `/opt/app/LIGANDAI_ALPHA_V2/server/internal-routes.ts`:
-  the `/v1/folding/predict-batch` zod schema now declares
-  `gpu_type: z.enum(['b200_plus']).optional()` so any other value fails
-  parse-time validation.
+- The platform rejects any non-`b200_plus` GPU value with HTTP 400 /
+  `code: "GPU_TYPE_REJECTED"`.
+- The `/v1/folding/predict-batch` request schema only accepts
+  `gpu_type: "b200_plus"` (optional), so any other value fails validation
+  before reaching compute.
 
 #### Tests
 
@@ -392,7 +405,7 @@ Tier-open like `by_gene()`. Backed by `GET /api/v1/peptides/by-pdb`.
 `peptides.search(plddt_min=...)` was sending the param as `pldd_min`
 (missing the second `t`) since 0.5.1, so the server ignored it and
 returned peptides below the requested pLDDT floor. Single-character
-typo at `ligandai/resources/peptides.py:1404`. Verified by re-running
+typo at the SDK source. Verified by re-running
 a known-fail query (BMPR1A `plddt_min=0.92` → previously returned 142
 peps, several with pLDDT 0.78; now returns 38 peps, all ≥ 0.92).
 
@@ -425,8 +438,8 @@ a one-step download:
 ```python
 peps = client.peptides.search(gene="BMPR1A", super_elite=True, limit=5)
 for p in peps:
-    print(p.pdb_url)                            # "/api/v1/structures/12345/pdb"
-    pdb_bytes = client.peptides.download_pdb(   # raw bytes
+    print(p.pdb_url) # "/api/v1/structures/12345/pdb"
+    pdb_bytes = client.peptides.download_pdb( # raw bytes
         p.peptide_id, save_to=f"{p.peptide_id}.pdb"
     )
 ```
@@ -481,16 +494,16 @@ results = client.peptides.search(
     ipsae_min=0.80, iptm_min=0.85, plddt_min=0.85,
     kd_max=1e-7, dg_max=-8.0, binder_pct_min=0.7,
     length_min=20, length_max=40,
-    super_elite=True,                          # combined gate
-    hotspot_residues=["A:60", "A:62"],         # PDB numbering, chain:resi
-    hotspot_hit=True,                          # require contact
+    super_elite=True, # combined gate
+    hotspot_residues=["A:60", "A:62"], # PDB numbering, chain:resi
+    hotspot_hit=True, # require contact
     pocket_residues=["A:55","A:56","A:67"],
-    pocket_hit=True,                           # hotspot OR pocket
+    pocket_hit=True, # hotspot OR pocket
     contact_distance_a=5.0,
     stability_grade=["A", "B"],
     immuno_grade=["A", "B"],
     conformation="monomer_C",
-    pdb_id="9MIR",                             # PDB-scoped filter
+    pdb_id="9MIR", # PDB-scoped filter
     sort="ipsae", order="desc",
     limit=25,
 )
@@ -573,7 +586,7 @@ PDB and fold-session sources (`session_id=`).
 
 ## [0.5.0] - 2026-05-07
 
-### Added — Andrew Keene SDK gaps (`peptides.list(program_id)` and friends)
+### Added — SDK gaps (`peptides.list(program_id)` and friends)
 
 The SDK now exposes the program-scoped peptide and structure listings that
 SDK users have been asking for. Every new method handles 402 (paid-tier
@@ -599,7 +612,7 @@ required) by raising the new `LigandAIUpgradeRequired` exception.
   Use `structures.get_pdb(structure_id)` to fetch the PDB content.
 - **`structures.get_pdb(structure_id)`** — `GET /api/v1/structures/:id/pdb`.
   Returns the raw PDB text. Free-tier callers receive polyalanine
-  (sidechains stripped, `REMARK   1` redaction header inserted at top);
+  (sidechains stripped, `REMARK 1` redaction header inserted at top);
   paid-tier callers receive full atomic detail.
 
 ### Added — `LigandAIUpgradeRequired` (alias for `LigandAIPaidTierRequired`)
@@ -684,7 +697,7 @@ trial-without-card users.
   are passed, the server now auto-includes every residue within this radius
   of any hotspot atom in the design pocket. Defaults to 6.0 Å. Pass 0 to use
   the literal residues only. Fixes "I gave you a hotspot but the peptide
-  bound to the opposite face" (issue dre-2026-05-07-hotspots).
+  bound to the opposite face" (an internal issue).
 - Auto-strategy: when ``target_residues`` are non-empty and
   ``targeting_strategy`` is not explicitly set, the SDK now sends
   ``targeting_strategy="pocket_targeted"`` instead of the previous silent
@@ -795,8 +808,8 @@ trial-without-card users.
   code, the SDK still raises `LigandAITierError`. Otherwise (pilot allowlists,
   ownership checks) it raises the new `LigandAIForbidden` carrying the server's
   actual `error_code` (e.g. `pilot_restricted`) and message. This stops the
-  SDK from telling Andrew Keene (basic tier) that "Pro tier required, you're on
-  free" when he hits an internal-only AutoResearch pilot endpoint.
+  SDK from telling a basic-tier user that "Pro tier required, you're on
+  free" when they hit a restricted pilot endpoint.
 
 ### Added
 - `LigandAIForbidden` exception for honest 403 reporting (exposes `reason` from
@@ -943,7 +956,7 @@ All four types are now exported at the package top level.
   installs would fail their first request.
 - **`jobs.TERMINAL_STATUSES`** now includes `generation_complete` and
   `fold_complete`. Previously, `Job.wait()` would hang forever on jobs whose
-  Modal callbacks emit those terminal events.
+  async result callbacks emit those terminal events.
 - **`jobs.SUCCESS_STATUSES`** mirrors the same additions.
 - **`Job` / `AsyncJob`** now accept an optional `result_loader` callback
   (sync or async) for deferred result hydration, plus improved `session_id`
@@ -957,7 +970,7 @@ All four types are now exported at the package top level.
 "comprehensive generation parameter coverage"; this 0.3.0 layers the v1
 peptide surface and the publish blockers on top.)
 
-### Added — paid-only `/api/v1/peptides/*` surface (LIGANDAI_ALPHA_V2-afspr)
+### Added — paid-only `/api/v1/peptides/*` surface
 
 - **`Peptides.by_gene(...)`** and **`AsyncPeptides.by_gene(...)`** — gene-level
   peptide aggregation across all of the caller's sessions and programs. Wraps
@@ -997,12 +1010,11 @@ peptide surface and the publish blockers on top.)
     SDK error mapper routes that response to `LigandAIPaidTierRequired`
     (instead of `LigandAICreditError`), so callers can `except` the right
     subclass.
-  - This is per the policy in
-    `/home/user/.claude/projects/-home-dre/memory/feedback_api_paid_only.md`:
-    free users cannot use the SDK / `/api/v1/*` — those routes are
-    monetized; the web UI is the free-tier acquisition channel.
+  - This reflects platform policy: free users cannot use the SDK /
+    `/api/v1/*` — those routes are monetized; the web UI is the free-tier
+    acquisition channel.
 
-### Changed — cysteine controls promoted from `extra` to typed kwargs (LIGANDAI_ALPHA_V2-lgxh7)
+### Changed — cysteine controls promoted from `extra` to typed kwargs
 
 The previous SDK accepted cysteine / cyclic controls only via `extra={...}`
 passthrough. They are now first-class typed kwargs on `Peptides.generate()`:
@@ -1033,7 +1045,7 @@ documents the typing migration policy.)
   `stabilityModules`. Requires pro+ tier.
 - **Charge / solubility filtering** — four new params: `charge_mode`
   (`"off"` / `"lt"` / `"gt"` / `"between"`), `charge_value`, `charge_min`,
-  `charge_max`, `min_solubility`. Server activates the filtered Modal worker when
+  `charge_max`, `min_solubility`. Server activates the filtered design worker when
   any non-default constraint is present and the user is on a pro+ tier.
 - **Cyclization** (`cyclic_mode`, `cyclic_strength`, `strict_recombinant`,
   `dual_fold_viz`): `"disulfide"` (primary recombinant-shippable, terminal Cys-Cys),
@@ -1084,7 +1096,7 @@ population coverage), and `cyclic_mode` (which cyclization constraint was active
 
 - Expose legacy LigandIQ `quality_scores.predicted_ptm` values as
   `Peptide.predicted_iptm` when explicit `predicted_iptm` is absent, matching
-  production where Modal `pred_iptm` was normalized to `predicted_ptm`.
+  production where the compute backend `pred_iptm` was normalized to `predicted_ptm`.
 
 ## [0.1.6] - 2026-04-30
 

@@ -1,6 +1,6 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """
-12 — Peptide listing, search, and retrieval (closes Andrew Keene's gaps).
+12 — Peptide listing, search, and retrieval (closes a user's gaps).
 
 Covers:
   client.peptides.list(program_id=..., gene=..., min_iptm=..., max_kd=...)

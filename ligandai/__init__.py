@@ -69,7 +69,7 @@ from ligandai.peptide_viewer import (
     write_dashboard,
 )
 from ligandai.receptordb import AsyncReceptorDBClient, ReceptorDBClient
-# bd-dre-3dalk — linker modifications + payload optimization (pro+ tier).
+# 3dalk — linker modifications + payload optimization (pro+ tier).
 from ligandai.resources.linker_modifications import (
     AsyncLinkerModifications,
     CovalentAttachment,

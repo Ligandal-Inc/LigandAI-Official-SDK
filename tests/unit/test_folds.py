@@ -1,5 +1,5 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
-"""Tests for ligandai.resources.folds (Stream D / W4 + b73dt phase C δ)."""
+"""Tests for ligandai.resources.folds (the platform / + b73dt phase C δ)."""
 
 from __future__ import annotations
 
@@ -254,3 +254,126 @@ def test_fold_result_pae_matrix_uri_round_trips() -> None:
     assert fr.peptide_interface_iptm == 0.81
     assert fr.pae_matrix_uri == "pae://abc123:0"
     assert fr.fold_metric_details["overall"]["iptm"] == 0.74
+
+
+# ─── fold_batch graceful credit-exhaustion retry ──────────────
+
+
+def test_fold_batch_on_credit_exhausted_retries_after_topup(
+    httpx_mock: HTTPXMock, client: LigandAI
+) -> None:
+    """First POST returns 402 INSUFFICIENT_CREDITS; the callback returns True;
+    second POST returns the batch payload. The SDK exposes the structured
+    LigandAICreditError to the callback before retrying.
+    """
+    from ligandai.errors import LigandAICreditError
+
+    base_402_payload = {
+        "error": "Insufficient credits",
+        "code": "INSUFFICIENT_CREDITS",
+        "message": "Insufficient credits to dispatch this batch. Top up to continue.",
+        "creditsRequired": 1000,
+        "creditsAvailable": 200,
+        "shortfall": 800,
+        "topup": 10,
+        "recoveryUrl": "/account/billing?recovery=insufficient_credits&source=fold_batch&topup=10",
+        "upgradeUrl": "https://ligandai.com/pricing",
+    }
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/folding/predict-batch",
+        method="POST",
+        status_code=402,
+        json=base_402_payload,
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/folding/predict-batch",
+        method="POST",
+        status_code=200,
+        json={
+            "batch_id": "batch_demo",
+            "jobs": [],
+            "total_cost_credits": 1000,
+            "peptide_count": 3,
+            "trajectories_per_peptide": 1,
+            "sampling_steps": 50,
+            "receptor": {"gene": "EGFR"},
+        },
+    )
+
+    captured: dict = {}
+
+    def cb(err: LigandAICreditError, payload: dict) -> bool:
+        captured["err_type"] = type(err).__name__
+        captured["shortfall"] = err.shortfall
+        captured["recovery_url"] = err.recovery_url
+        captured["top_up_usd"] = err.top_up_usd
+        captured["payload_peptide_count"] = len(payload.get("peptides", []))
+        return True  # retry
+
+    job = client.peptides.fold_batch(
+        peptides=["ACDEFGHIK", "WYLKPRSTV", "MNPQRSTAV"],
+        target_gene="EGFR",
+        on_credit_exhausted=cb,
+    )
+
+    # Callback fired with the structured CreditError
+    assert captured["err_type"] == "LigandAICreditError"
+    assert captured["shortfall"] == 800
+    assert captured["recovery_url"].startswith("/account/billing")
+    assert captured["top_up_usd"] == 10
+    assert captured["payload_peptide_count"] == 3
+    # Retry succeeded → batch dispatched
+    assert job.batch_id == "batch_demo"
+
+
+def test_fold_batch_on_credit_exhausted_no_retry_when_callback_returns_false(
+    httpx_mock: HTTPXMock, client: LigandAI
+) -> None:
+    """Callback returns False → the original LigandAICreditError is re-raised
+    and no second POST is fired."""
+    from ligandai.errors import LigandAICreditError
+
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/folding/predict-batch",
+        method="POST",
+        status_code=402,
+        json={
+            "error": "Insufficient credits",
+            "code": "INSUFFICIENT_CREDITS",
+            "creditsRequired": 1000,
+            "creditsAvailable": 0,
+            "shortfall": 1000,
+            "recoveryUrl": "/account/billing?recovery=insufficient_credits",
+        },
+    )
+
+    with pytest.raises(LigandAICreditError) as exc_info:
+        client.peptides.fold_batch(
+            peptides=["ACDEFGHIK"],
+            target_gene="EGFR",
+            on_credit_exhausted=lambda err, body: False,
+        )
+    assert exc_info.value.shortfall == 1000
+    assert exc_info.value.recovery_url is not None
+
+
+def test_fold_batch_credit_error_without_callback_raises(
+    httpx_mock: HTTPXMock, client: LigandAI
+) -> None:
+    """No callback → original behavior: raise LigandAICreditError."""
+    from ligandai.errors import LigandAICreditError
+
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/folding/predict-batch",
+        method="POST",
+        status_code=402,
+        json={
+            "error": "Insufficient credits",
+            "creditsRequired": 100,
+            "creditsAvailable": 50,
+            "shortfall": 50,
+        },
+    )
+
+    with pytest.raises(LigandAICreditError):
+        client.peptides.fold_batch(peptides=["ACDEFGHIK"], target_gene="EGFR")

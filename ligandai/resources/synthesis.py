@@ -224,7 +224,7 @@ class Synthesis(Resource):
             or {"id": experiment_id, "status": "submitted"}
         )
 
-    # -- BLI linker recommendation (server/linker-configuration.ts) -----------
+    # -- BLI linker recommendation -------------------------------------------
 
     def linker_options(self) -> list[BiotinLinker]:
         """Return all available BLI biotinylation linker options.

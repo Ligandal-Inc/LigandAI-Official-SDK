@@ -7,13 +7,8 @@ token, and auto-refreshes from the server when the supply runs low.
 
 Hash parity note
 ----------------
-The canonical hash function here is the byte-for-byte Python mirror of Track
-D's TypeScript ``canonicalTargetHash`` (require-scoped-key.ts line 176):
-
-    const canonical = (seq || '').replace(/\\s+/g, '').toUpperCase();
-    return crypto.createHash('sha256').update(canonical).digest('hex');
-
-and its FastAPI mirror (scoped_key.py line 121):
+The canonical hash function here is a byte-for-byte mirror of the platform's
+target-sequence hash: strip whitespace, uppercase, then SHA-256 the result:
 
     canonical = "".join((seq or "").split()).upper()
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -291,23 +286,19 @@ class KeyWallet:
 
         logger.debug("Wallet refreshed; %d JWTs loaded", len(new_wallets))
 
-    # ─── Hash helpers (hash parity with Track D) ─────────────────────────────
+    # ─── Hash helpers (hash parity with the platform) ─────────────────────────────
 
     @staticmethod
     def canonicalize_target(seq: str) -> str:
-        """Strip whitespace, uppercase, remove non-amino-acid characters.
+        """Strip whitespace and uppercase the sequence.
 
-        This is the exact Python mirror of Track D's TypeScript:
-
-            const canonical = (seq || '').replace(/\\s+/g, '').toUpperCase();
-
-        and the FastAPI scoped_key.py mirror:
+        Mirrors the platform's canonicalization:
 
             canonical = "".join((seq or "").split()).upper()
 
         Only whitespace is stripped — non-amino-acid characters (digits,
-        dashes, etc.) are **retained** to preserve exact server-side parity.
-        The server hashes the sequence after only whitespace removal.
+        dashes, etc.) are **retained** to preserve exact platform parity.
+        The platform hashes the sequence after only whitespace removal.
         """
         return "".join((seq or "").split()).upper()
 
@@ -315,8 +306,7 @@ class KeyWallet:
     def compute_target_hash(cls, seq: str) -> str:
         """SHA-256 hex digest of the canonicalized target sequence.
 
-        Byte-for-byte matches ``canonicalTargetHash`` in
-        ``server/middleware/require-scoped-key.ts``.
+        Byte-for-byte matches the platform's target-sequence hash.
         """
         canonical = cls.canonicalize_target(seq)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

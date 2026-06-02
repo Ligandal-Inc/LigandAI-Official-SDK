@@ -131,7 +131,6 @@ class Structures(Resource):
 
     # ------------------------------------------------------------------
     # v0.5.0 — fold-structure listing endpoints
-    # (LIGANDAI_ALPHA_V2-vzkei.3 / Andrew Keene SDK gaps)
     # ------------------------------------------------------------------
     def list(
         self,

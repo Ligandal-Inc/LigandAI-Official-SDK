@@ -1,15 +1,13 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
-"""UniProt info, variants, glycosylation, and custom protein uploads."""
+"""UniProt info, variants, and custom protein uploads."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     DisorderProfile,
-    GlycosylationData,
     ProteinInfo,
     ProteinVariant,
     ReceptorIntelligence,
@@ -19,8 +17,7 @@ from ligandai.types import (
 
 
 class Proteins(Resource):
-    """``/api/protein-info/*``, ``/api/receptor-topology``, ``/api/protein-variants/*``,
-    ``/api/internal-module/*``, ``/api/user-proteins/*``."""
+    """Protein info, receptor topology, variants, and custom protein uploads."""
 
     def info(
         self,
@@ -64,22 +61,6 @@ class Proteins(Resource):
             raise ValueError("Pass gene= or genes=")
         return ReceptorIntelligence.model_validate(
             self._transport.request("GET", f"/api/receptor-intelligence/{gene}") or {"gene": gene}
-        )
-
-    def check_glycosylation(
-        self,
-        gene: str,
-        tissue: str | None = None,
-        site_type: Literal["N-linked", "O-linked"] | None = None,
-    ) -> GlycosylationData:
-        params: dict[str, object] = {}
-        if tissue is not None:
-            params["tissue"] = tissue
-        if site_type is not None:
-            params["site_type"] = site_type
-        return GlycosylationData.model_validate(
-            self._transport.request("GET", f"/api/internal-module/sites/{gene}", params=params)
-            or {"gene": gene}
         )
 
     def variants(
@@ -134,10 +115,7 @@ class Proteins(Resource):
         ext = path.suffix.lower()
         mime = "chemical/x-mmcif" if ext in (".cif", ".mmcif") else "chemical/x-pdb"
         with path.open("rb") as f:
-            # Server uses multer.any() — field name "files" (plural) is the
-            # canonical name on the platform UI; the server accepts "file"
-            # too, but we stick with "files" to match the UI contract and
-            # avoid confusion in network logs.
+            # The platform expects the multipart field name "files" (plural).
             files = {"files": (path.name, f, mime)}
             data = {"gene": gene}
             if custom_name is not None:
@@ -196,22 +174,6 @@ class AsyncProteins(AsyncResource):
             raise ValueError("Pass gene= or genes=")
         return ReceptorIntelligence.model_validate(
             await self._transport.request("GET", f"/api/receptor-intelligence/{gene}") or {"gene": gene}
-        )
-
-    async def check_glycosylation(
-        self,
-        gene: str,
-        tissue: str | None = None,
-        site_type: Literal["N-linked", "O-linked"] | None = None,
-    ) -> GlycosylationData:
-        params: dict[str, object] = {}
-        if tissue is not None:
-            params["tissue"] = tissue
-        if site_type is not None:
-            params["site_type"] = site_type
-        return GlycosylationData.model_validate(
-            await self._transport.request("GET", f"/api/internal-module/sites/{gene}", params=params)
-            or {"gene": gene}
         )
 
     async def variants(

@@ -7,10 +7,10 @@ from ligandai import LigandAI
 client = LigandAI(api_key="lgai_basic_...")
 
 # 2. Read from env var
-client = LigandAI()  # reads $LIGANDAI_API_KEY
+client = LigandAI() # reads $LIGANDAI_API_KEY
 
 # 3. Custom base URL
-client = LigandAI(api_key="...", base_url="http://localhost:5050")
+client = LigandAI(api_key="...", base_url="http://localhost:8000")
 ```
 
 ## Tier prefixes
@@ -41,9 +41,9 @@ and synthesis calls may return an upgrade or buy-credits response even when the
 key itself is valid.
 
 Free users can use quality-guided generation up to 10 peptides, 10 folds, 3
-targets, and 1 folding GPU. Basic users can generate up to 100 peptides and use
-up to 4 folding GPUs. Academia and pro users can generate up to 300 peptides;
-enterprise users can generate up to 1000. Immunogenicity guidance, serum
+targets, and 1 folding GPU. Basic users can generate up to 1000 peptides and use
+up to 4 folding GPUs. Academia and pro users can generate up to 5000 peptides;
+enterprise users can generate up to 25000. Immunogenicity guidance, serum
 stability guidance, and logits-style outputs require academia, pro, or
 enterprise access.
 
@@ -62,7 +62,7 @@ The `ReceptorDBClient` allows browse-only access without a key:
 ```python
 from ligandai import ReceptorDBClient
 
-client = ReceptorDBClient()  # no key — browse-only
+client = ReceptorDBClient() # no key — browse-only
 hits = client.search("EGFR")
 client.download_pdb(hits[0].complex_id, "egfr.pdb")
 ```

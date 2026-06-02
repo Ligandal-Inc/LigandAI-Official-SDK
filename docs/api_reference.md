@@ -81,7 +81,7 @@ Error codes: `E001`, `404` (program not found).
 
 ### `GET /api/v1/peptides/list`
 
-The endpoint Andrew Keene needed: list peptides by program_id. v0.5.0+.
+list peptides by program_id. v0.5.0+.
 
 Query params:
 - `program_id` _(int, optional)_ — restrict to one program (Layer-4 db id).
@@ -151,6 +151,25 @@ DeltaForge scoring returns affinity (`dg`, `kd_nm`) separately from the
 structure/energy binder call (`predicted_binder`, `predicted_binder_call`,
 `predicted_non_binder_reasons`). A complex can therefore retain a predicted Kd
 while still being called `not_binder` by the joint structural gate.
+
+### DeltaForge scoring endpoints (`client.deltaforge`)
+
+Auth: `Authorization: Bearer <api_key>`. Scorer selected server-side with
+`scorer="auto"`; the model that ran is on `scorer_version`. Credits charged on
+SUCCESS only. There is **no** `/api/binder-scoring/deltaforge` path (404) — use
+these:
+
+| Method | Endpoint | Body | Notes |
+|---|---|---|---|
+| `deltaforge.score_pdb` | `POST /api/v1/deltaforge/score-pdb` | `pdbContent`/`pdb_file`, `receptorChains`, `peptideChain`, `scorer`, `aggregateMethod`, `includeFeatures`, `includePae`, `fold*` | score arbitrary PDB |
+| `deltaforge.score_fold` | `POST /api/v1/deltaforge/score-fold` | `foldJobId`, `scorer?`, `aggregateMethod?`, `includeFeatures?`, `includePae?`, `receptorChains?`, `peptideChain?` | score an existing fold; metrics auto-forwarded |
+| `deltaforge.batch_score_fold` | `POST /api/v1/deltaforge/batch-score-fold` | `foldJobIds: [...]`, `scorer?`, `includePae?` | per-binder results + `errors[]`; `?format=csv` for CSV |
+
+`score_fold` / `batch_score_fold` always return the fold confidence metrics
+(`iptm`, `ptm`, `ipsae`, `plddt_mean`) alongside affinity. `iPTM` is generally
+more reliable than `iPSAE`. With `includePae=true`, the NxN PAE matrix
+(Angstroms) is attached on `pae` when resolvable; otherwise `pae` is `null` and
+`pae_status` is `pending` (a backend pull is in progress) or `unavailable`.
 
 **Hotspot/pocket coverage** (uses migration 085 `peptide_residue_contacts`):
 - `hotspot_residues=A:60,A:62` — chain:resi list (PDB numbering, comma-sep)
@@ -294,7 +313,7 @@ Resolves the best structure for a gene through the full 6-tier hierarchy
 (PDB-with-EC-ligand → Boltz-2 high-quality → standard PDB multimer →
 lower-quality Boltz-2/PDB monomer → experimental monomer → AlphaFold).
 Backwards-compatible: no kwargs = human default fast path; any kwarg
-routes through the full FastAPI resolver.
+routes through the full platform resolver.
 
 **Query params (all optional):**
 
@@ -333,10 +352,10 @@ Enumerate UniProt isoforms for a gene.
 ```python
 isoforms = client.structures.list_isoforms("CLDN18")
 # → [
-#     {"id": "P56856",   "name": "CLD18_HUMAN", "sequence_length": 261, "is_canonical": True,  "isoform_number": 1},
-#     {"id": "P56856-1", "name": "A1",          "sequence_length": None, "is_canonical": False, "isoform_number": 1},
-#     {"id": "P56856-2", "name": "A2",          "sequence_length": None, "is_canonical": False, "isoform_number": 2},
-#   ]
+# {"id": "P56856", "name": "CLD18_HUMAN", "sequence_length": 261, "is_canonical": True, "isoform_number": 1},
+# {"id": "P56856-1", "name": "A1", "sequence_length": None, "is_canonical": False, "isoform_number": 1},
+# {"id": "P56856-2", "name": "A2", "sequence_length": None, "is_canonical": False, "isoform_number": 2},
+# ]
 ```
 
 Returns `{gene, isoforms: [...], count}`. Empty list if the gene has no
@@ -349,10 +368,10 @@ Enumerate species in which this gene has a reviewed UniProt entry.
 ```python
 species = client.structures.list_species("KRAS")
 # → [
-#     {"taxid": 9606,  "species": "human", "organism_name": "Homo sapiens",        "common_name": "Human", "accession": "P01116"},
-#     {"taxid": 10090, "species": "mouse", "organism_name": "Mus musculus",        "common_name": "Mouse", "accession": "P32883"},
-#     {"taxid": 10116, "species": "rat",   "organism_name": "Rattus norvegicus",   "common_name": "Rat",   "accession": "P08644"},
-#   ]
+# {"taxid": 9606, "species": "human", "organism_name": "Homo sapiens", "common_name": "Human", "accession": "P01116"},
+# {"taxid": 10090, "species": "mouse", "organism_name": "Mus musculus", "common_name": "Mouse", "accession": "P32883"},
+# {"taxid": 10116, "species": "rat", "organism_name": "Rattus norvegicus", "common_name": "Rat", "accession": "P08644"},
+# ]
 ```
 
 Use the returned `species` value as the `species=` kwarg on `get()`.
@@ -399,7 +418,7 @@ Returns:
 ### `GET /api/v1/structures/:id/pdb`
 
 Returns the PDB text body. Free tier sees polyalanine (sidechains
-stripped, `REMARK   1` redaction header inserted at top); paid tier sees
+stripped, `REMARK 1` redaction header inserted at top); paid tier sees
 the full atomic data.
 
 Response headers expose the redaction state:
@@ -421,7 +440,7 @@ Error codes: `E001`, `E014`, `E429`, `402 upgrade_required`,
 `402 insufficient credits` (returned with `error: "insufficient_credits"`,
 not `upgrade_required`).
 
-## Linker modifications + Mode B payload optimization (pro+ / academia+; bd-dre-3dalk)
+## Linker modifications + Mode B payload optimization (pro+ / academia+)
 
 | Endpoint | Method | Tier | SDK |
 |----------|--------|------|-----|

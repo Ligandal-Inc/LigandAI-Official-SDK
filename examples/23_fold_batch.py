@@ -23,7 +23,7 @@ covers the whole batch.
 Run with:
     LIGANDAI_API_KEY=lgai_pro_... python 23_fold_batch.py
 Optional:
-    LIGANDAI_BASE_URL=http://localhost:5050 python 23_fold_batch.py    # dev
+    LIGANDAI_BASE_URL=http://localhost:8000 python 23_fold_batch.py # dev
     LIGANDAI_BATCH_MODE=fasta python 23_fold_batch.py                  # FASTA input
 """
 
@@ -37,7 +37,7 @@ from ligandai import LigandAI
 from ligandai.errors import LigandAIError
 
 
-# A handful of real Andre-designed EGFR peptides from the v6.5_ET autoresearch
+# A handful of real EGFR peptides from the v6.5_ET autoresearch
 # elite set — short enough to fold fast and realistic for a smoke test.
 EGFR_CANDIDATES = [
     "DPVQETICKAHGNRWQVDKLLNCEL",

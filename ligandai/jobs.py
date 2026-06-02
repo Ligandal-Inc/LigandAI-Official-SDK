@@ -27,8 +27,10 @@ from ligandai._fold_time_model import estimate_fold_time, format_eta
 from ligandai._http import AsyncHTTPTransport, HTTPTransport, parse_sse_data
 from ligandai.errors import (
     LigandAIError,
+    LigandAIIncompleteResult,
     LigandAIJobError,
     LigandAITimeoutError,
+    LigandAIWaitTimeout,
 )
 from ligandai.types import JobEvent, JobInfo
 
@@ -38,6 +40,103 @@ TERMINAL_STATUSES = frozenset({
     "generation_complete", "fold_complete",
 })
 SUCCESS_STATUSES = frozenset({"complete", "completed", "generation_complete", "fold_complete"})
+
+# Durable-success keys to look for in a fold result. When
+# ``Job.wait(durable=True)`` is set (the default), the SDK refuses to return a
+# "succeeded" Job whose result payload contains none of these — that state
+# means the result callback never landed (status flipped to "completed" at
+# spawn time with only ``{call_id, message, spawned}`` persisted as result).
+_FOLD_PDB_KEYS = ("pdbContent", "pdb_content", "pdb_data", "pdbData", "pdb")
+_FOLD_CIF_KEYS = ("cifContent", "cif_content", "cif_data", "cifData", "cif")
+_FOLD_HAS_STRUCT_KEYS = ("hasStructure", "has_structure")
+_FOLD_SPAWN_ONLY_KEYS = frozenset({"call_id", "job_id", "message", "spawned", "status"})
+
+
+def _fold_has_durable_payload(info: "JobInfo", payload: dict[str, Any] | None) -> tuple[bool, list[str], str | None]:
+    """Inspect a fold-job result payload to decide whether it carries durable
+    structural data, or whether ``status='completed'`` is reporting prematurely.
+
+    Returns
+    -------
+    (durable, missing_fields, call_id)
+        ``durable`` — True when ``pdb_content`` (or ``cif_content``) is non-empty,
+        OR when the server explicitly set ``has_structure=True``.
+        ``missing_fields`` — names of the keys the SDK looked for and did not
+        find. Empty when durable.
+        ``call_id`` — compute call id when present in the partial result
+        (so callers can hit the recovery endpoint with it).
+    """
+    result = (payload or {}) if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        result = {}
+
+    # Server top-level may also carry hasStructure / pdbContent — pull both.
+    extras = (getattr(info, "model_extra", None) or {}) if info is not None else {}
+    has_struct_flags: list[bool] = []
+    for src in (result, extras):
+        if not isinstance(src, dict):
+            continue
+        for k in _FOLD_HAS_STRUCT_KEYS:
+            v = src.get(k)
+            if isinstance(v, bool):
+                has_struct_flags.append(v)
+
+    pdb_found = False
+    cif_found = False
+    for src in (result, extras):
+        if not isinstance(src, dict):
+            continue
+        for k in _FOLD_PDB_KEYS:
+            v = src.get(k)
+            if isinstance(v, str) and v.strip():
+                pdb_found = True
+                break
+        for k in _FOLD_CIF_KEYS:
+            v = src.get(k)
+            if isinstance(v, str) and v.strip():
+                cif_found = True
+                break
+
+    server_has_struct = any(has_struct_flags) if has_struct_flags else None
+
+    # Durable iff we have actual structural content OR the server explicitly
+    # acknowledges it (which only happens after the webhook has landed and
+    # rebuilt the canonicalized result).
+    if pdb_found or cif_found:
+        return True, [], None
+    if server_has_struct is True:
+        # Server flipped has_structure=True without the SDK seeing the content —
+        # this means the result is in gpu_jobs.output_data and we'd need a richer
+        # status fetch. Treat as durable to avoid infinite loops; the
+        # result_loader (if installed) will hydrate the content next.
+        return True, [], None
+
+    call_id = None
+    if isinstance(result, dict):
+        cid = result.get("call_id") or result.get("callId")
+        if isinstance(cid, str):
+            call_id = cid
+
+    missing: list[str] = []
+    if not pdb_found:
+        missing.append("pdb_data")
+    if not cif_found:
+        missing.append("cif_data")
+    if server_has_struct is False:
+        missing.append("has_structure")
+    return False, missing, call_id
+
+
+def _result_payload_is_spawn_ack_only(payload: dict[str, Any] | None) -> bool:
+    """Heuristic: a result dict containing only the spawn-acknowledgement keys
+    (``call_id``, ``job_id``, ``message``, ``spawned``, ``status``) means the
+    result callback never landed."""
+    if not isinstance(payload, dict) or not payload:
+        return False
+    keys = {k for k in payload.keys() if k}
+    if not keys:
+        return False
+    return keys.issubset(_FOLD_SPAWN_ONLY_KEYS) and "call_id" in keys
 ResultLoader = Callable[[JobInfo], dict[str, Any] | None]
 AsyncResultLoader = Callable[[JobInfo], Awaitable[dict[str, Any] | None] | dict[str, Any] | None]
 
@@ -175,7 +274,7 @@ class Job(Generic[T]):
         return _merge_result_payload(payload, loaded)
 
     def _compute_eta_seconds(self) -> float | None:
-        """Task I — best-effort fold ETA from the job info.
+        """best-effort fold ETA from the job info.
 
         Returns None when the necessary fields aren't present (e.g. generation
         jobs, where the fit doesn't apply). For fold jobs, falls back to
@@ -238,6 +337,8 @@ class Job(Generic[T]):
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECS,
         on_progress: Callable[[JobInfo], None] | None = None,
         save_to: str | None = None,
+        *,
+        durable: bool = True,
     ) -> T:
         """Block until the job completes (or raises) and return the parsed result.
 
@@ -248,13 +349,41 @@ class Job(Generic[T]):
                 ``summary.json`` to that directory. Prints a one-line confirmation.
                 Pass an empty string to use the SDK default
                 ``./ligandai_runs/<session_id>/``.
+            durable: When True (default), ``wait()`` does NOT return until the
+                result payload carries durable structural data (``pdb_data``
+                non-empty OR ``has_structure`` true) for fold jobs. This guards
+                against the case where ``status='completed'`` is reported with
+                only the spawn acknowledgement (``{call_id, message, spawned}``)
+                stored as result — i.e. the result callback never landed. Pass
+                ``durable=False`` to opt back into the fast-but-permissive
+                behavior.
+
+                When ``durable=True`` and ``timeout`` elapses with no PDB,
+                raises :class:`~ligandai.errors.LigandAIWaitTimeout` carrying
+                the captured ``call_id`` so callers can hit the
+                ``/recover-from-modal`` endpoint manually.
         """
         deadline = time.monotonic() + timeout
-        # Task I — compute one-shot fold ETA up front so on_progress can report it.
+        # compute one-shot fold ETA up front so on_progress can report it.
         # We probe the job info for protein_length / num_trajectories / n_parallel_gpus;
         # missing fields fall back to typical defaults (L=300, traj=1, gpus=1).
         eta_seconds = self._compute_eta_seconds() if self._job_type == "folding" else None
         wait_start = time.monotonic()
+
+        def _maybe_emit_progress() -> None:
+            if not on_progress:
+                return
+            if eta_seconds is not None:
+                elapsed = time.monotonic() - wait_start
+                remaining = max(eta_seconds - elapsed, 0)
+                try:
+                    self._info.__dict__.setdefault("eta_seconds", remaining)
+                    self._info.__dict__["eta_seconds"] = remaining
+                    self._info.__dict__["eta_human"] = format_eta(remaining)
+                except Exception:
+                    pass
+            on_progress(self._info)
+
         while not self.is_terminal:
             if time.monotonic() > deadline:
                 raise LigandAITimeoutError(
@@ -262,19 +391,7 @@ class Job(Generic[T]):
                     f"(last status: {self.status})"
                 )
             self.refresh()
-            if on_progress:
-                # Annotate the JobInfo extras with ETA (non-destructive — UI consumers
-                # can read it; legacy callbacks see no shape change).
-                if eta_seconds is not None:
-                    elapsed = time.monotonic() - wait_start
-                    remaining = max(eta_seconds - elapsed, 0)
-                    try:
-                        self._info.__dict__.setdefault("eta_seconds", remaining)
-                        self._info.__dict__["eta_seconds"] = remaining
-                        self._info.__dict__["eta_human"] = format_eta(remaining)
-                    except Exception:
-                        pass
-                on_progress(self._info)
+            _maybe_emit_progress()
             if self.is_terminal:
                 break
             time.sleep(poll_interval)
@@ -284,6 +401,43 @@ class Job(Generic[T]):
                 job_id=self._job_id,
                 job_status=self.status,
             )
+
+        # Durable-success contract for fold jobs. Outer status="completed" can
+        # fire BEFORE the result callback posts the real PDB payload — the SDK
+        # must NOT return until pdb_data lands, otherwise calling code sees
+        # iptm=None and pdb_written=False. Re-poll until durable OR the caller's
+        # timeout elapses.
+        if durable and self._job_type == "folding":
+            last_call_id: str | None = None
+            last_missing: list[str] = []
+            while True:
+                durable_ok, missing, call_id = _fold_has_durable_payload(
+                    self._info, self._info.result if self._info else None,
+                )
+                if durable_ok:
+                    break
+                last_call_id = call_id or last_call_id
+                last_missing = missing or last_missing
+                if time.monotonic() > deadline:
+                    raise LigandAIWaitTimeout(
+                        (
+                            f"Job {self._job_id} reported status={self.status!r} "
+                            f"but structural payload never landed within {timeout}s "
+                            f"(missing fields: {missing or last_missing}). "
+                            "This usually means the result callback did not fire — "
+                            "use client.folds.recover(job_id) or pass "
+                            "durable=False to opt out."
+                        ),
+                        job_id=self._job_id,
+                        job_status=self.status,
+                        missing_fields=last_missing,
+                        call_id=last_call_id,
+                        server_state=(self._info.result or {}) if self._info else None,
+                    )
+                _maybe_emit_progress()
+                time.sleep(max(poll_interval, 1.0))
+                self.refresh()
+
         result = self.results
         if save_to is not None and hasattr(result, "save_to"):
             try:
@@ -301,34 +455,86 @@ class Job(Generic[T]):
     def stream(self) -> Iterator[JobEvent]:
         """Stream live progress events via SSE.
 
-        If the job has no SSE endpoint, falls back to polling and yielding a
-        synthetic event per status change.
+        when SSE returns 404 (the legacy SDK pointed
+        ``Job.stream()`` at ``/api/jobs/{id}/sse`` which never existed on the
+        server), we transparently fall back to polling the status endpoint
+        and yielding synthetic events. The caller sees the same
+        :class:`~ligandai.types.JobEvent` stream either way.
+
+        For fold jobs the stream now also yields a terminal ``"complete"``
+        event whose ``payload`` is the durable result dict — so callers that
+        do ``for event in job.stream(): ...`` get the PDB content immediately
+        in the final tick without needing a separate ``job.results`` call.
         """
         if self._sse_path:
             path = self._sse_path.format(job_id=self._job_id)
-            for line in self._transport.stream_lines("GET", path):
-                data = parse_sse_data(line)
-                if data is None:
-                    continue
-                yield JobEvent.model_validate(_normalize_event_payload(data))
-        else:
-            last_status = self.status
-            while not self.is_terminal:
+            try:
+                for line in self._transport.stream_lines("GET", path):
+                    data = parse_sse_data(line)
+                    if data is None:
+                        continue
+                    yield JobEvent.model_validate(_normalize_event_payload(data))
+                # The SSE endpoint closed cleanly. Refresh once and emit a
+                # terminal event so consumers see the durable payload.
                 self.refresh()
-                if self.status != last_status or self.progress is not None:
-                    yield JobEvent.model_validate(
-                        {
-                            "eventType": "progress",
-                            "stage": self._job_type,
-                            "message": self.status,
-                            "progress": self.progress,
-                            "payload": self._info.model_dump(),
-                        }
+                yield JobEvent.model_validate(
+                    {
+                        "eventType": "complete" if self.succeeded else "failed",
+                        "stage": self._job_type,
+                        "message": self.status,
+                        "progress": 1.0 if self.succeeded else self.progress,
+                        "payload": self._info.model_dump(),
+                    }
+                )
+                return
+            except LigandAIError as sse_err:
+                # legacy server doesn't expose this SSE path — fall
+                # back to polling. Future server versions will route the
+                # `/logs/stream` endpoint through here.
+                if getattr(sse_err, "status_code", None) == 404:
+                    pass
+                else:
+                    raise
+
+        last_status = self.status
+        last_progress = self.progress
+        while True:
+            self.refresh()
+            if (
+                self.status != last_status
+                or (self.progress is not None and self.progress != last_progress)
+            ):
+                yield JobEvent.model_validate(
+                    {
+                        "eventType": "progress",
+                        "stage": self._job_type,
+                        "message": self.status,
+                        "progress": self.progress,
+                        "payload": self._info.model_dump(),
+                    }
+                )
+                last_status = self.status
+                last_progress = self.progress
+            if self.is_terminal:
+                # For fold jobs, additionally wait for the durable payload.
+                if self._job_type == "folding":
+                    durable_ok, _, _ = _fold_has_durable_payload(
+                        self._info, self._info.result if self._info else None,
                     )
-                    last_status = self.status
-                if self.is_terminal:
-                    break
-                time.sleep(DEFAULT_POLL_INTERVAL_SECS)
+                    if not durable_ok and self.succeeded:
+                        time.sleep(max(DEFAULT_POLL_INTERVAL_SECS, 1.0))
+                        continue
+                yield JobEvent.model_validate(
+                    {
+                        "eventType": "complete" if self.succeeded else "failed",
+                        "stage": self._job_type,
+                        "message": self.status,
+                        "progress": 1.0 if self.succeeded else self.progress,
+                        "payload": self._info.model_dump(),
+                    }
+                )
+                break
+            time.sleep(DEFAULT_POLL_INTERVAL_SECS)
 
 
 class AsyncJob(Generic[T]):
@@ -428,7 +634,11 @@ class AsyncJob(Generic[T]):
         timeout: float = DEFAULT_JOB_TIMEOUT_SECS,
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECS,
         on_progress: Callable[[JobInfo], None] | None = None,
+        *,
+        durable: bool = True,
     ) -> T:
+        """Async sibling of :meth:`Job.wait`. See :meth:`Job.wait` for full
+        ``durable=True`` semantics."""
         deadline = time.monotonic() + timeout
         while not self.is_terminal:
             if time.monotonic() > deadline:
@@ -448,6 +658,39 @@ class AsyncJob(Generic[T]):
                 job_id=self._job_id,
                 job_status=self.status,
             )
+
+        if durable and self._job_type == "folding":
+            last_call_id: str | None = None
+            last_missing: list[str] = []
+            while True:
+                durable_ok, missing, call_id = _fold_has_durable_payload(
+                    self._info, self._info.result if self._info else None,
+                )
+                if durable_ok:
+                    break
+                last_call_id = call_id or last_call_id
+                last_missing = missing or last_missing
+                if time.monotonic() > deadline:
+                    raise LigandAIWaitTimeout(
+                        (
+                            f"Job {self._job_id} reported status={self.status!r} "
+                            f"but structural payload never landed within {timeout}s "
+                            f"(missing fields: {missing or last_missing}). "
+                            "This usually means the result callback did not fire — "
+                            "use client.folds.recover(job_id) or pass "
+                            "durable=False to opt out."
+                        ),
+                        job_id=self._job_id,
+                        job_status=self.status,
+                        missing_fields=last_missing,
+                        call_id=last_call_id,
+                        server_state=(self._info.result or {}) if self._info else None,
+                    )
+                if on_progress:
+                    on_progress(self._info)
+                await asyncio.sleep(max(poll_interval, 1.0))
+                await self.refresh()
+
         return await self.async_results()
 
     async def async_results(self) -> T:
@@ -480,31 +723,70 @@ class AsyncJob(Generic[T]):
         return _merge_result_payload(payload, loaded)
 
     async def stream(self) -> AsyncIterator[JobEvent]:
+        """Async sibling of :meth:`Job.stream`."""
         if self._sse_path:
             path = self._sse_path.format(job_id=self._job_id)
-            async for line in self._transport.stream_lines("GET", path):
-                data = parse_sse_data(line)
-                if data is None:
-                    continue
-                yield JobEvent.model_validate(_normalize_event_payload(data))
-        else:
-            last_status = self.status
-            while not self.is_terminal:
+            try:
+                async for line in self._transport.stream_lines("GET", path):
+                    data = parse_sse_data(line)
+                    if data is None:
+                        continue
+                    yield JobEvent.model_validate(_normalize_event_payload(data))
                 await self.refresh()
-                if self.status != last_status or self.progress is not None:
-                    yield JobEvent.model_validate(
-                        {
-                            "eventType": "progress",
-                            "stage": self._job_type,
-                            "message": self.status,
-                            "progress": self.progress,
-                            "payload": self._info.model_dump(),
-                        }
+                yield JobEvent.model_validate(
+                    {
+                        "eventType": "complete" if self.succeeded else "failed",
+                        "stage": self._job_type,
+                        "message": self.status,
+                        "progress": 1.0 if self.succeeded else self.progress,
+                        "payload": self._info.model_dump(),
+                    }
+                )
+                return
+            except LigandAIError as sse_err:
+                if getattr(sse_err, "status_code", None) == 404:
+                    pass
+                else:
+                    raise
+
+        last_status = self.status
+        last_progress = self.progress
+        while True:
+            await self.refresh()
+            if (
+                self.status != last_status
+                or (self.progress is not None and self.progress != last_progress)
+            ):
+                yield JobEvent.model_validate(
+                    {
+                        "eventType": "progress",
+                        "stage": self._job_type,
+                        "message": self.status,
+                        "progress": self.progress,
+                        "payload": self._info.model_dump(),
+                    }
+                )
+                last_status = self.status
+                last_progress = self.progress
+            if self.is_terminal:
+                if self._job_type == "folding":
+                    durable_ok, _, _ = _fold_has_durable_payload(
+                        self._info, self._info.result if self._info else None,
                     )
-                    last_status = self.status
-                if self.is_terminal:
-                    break
-                await asyncio.sleep(DEFAULT_POLL_INTERVAL_SECS)
+                    if not durable_ok and self.succeeded:
+                        await asyncio.sleep(max(DEFAULT_POLL_INTERVAL_SECS, 1.0))
+                        continue
+                yield JobEvent.model_validate(
+                    {
+                        "eventType": "complete" if self.succeeded else "failed",
+                        "stage": self._job_type,
+                        "message": self.status,
+                        "progress": 1.0 if self.succeeded else self.progress,
+                        "payload": self._info.model_dump(),
+                    }
+                )
+                break
+            await asyncio.sleep(DEFAULT_POLL_INTERVAL_SECS)
 
 
 # -- Helpers -----------------------------------------------------------------
@@ -519,7 +801,10 @@ def _normalize_job_payload(
 
     - Generation: ``{job_id, status, progress, result?}``
     - Folding (PTF): ``{job_id, status, progress_percent?, results?}``
-    - Modal callback: ``{jobId, status, ...}``
+    - Folding (PTF): also returns top-level ``hasStructure`` flag — copied
+      into ``result`` so :func:`_fold_has_durable_payload` can see it without
+      re-parsing the raw response shape.
+    - Async result callback: ``{jobId, status, ...}``
 
     We pick the right field on a best-effort basis without rejecting unknown
     keys (they remain in the JobInfo's ``extra``).
@@ -545,6 +830,35 @@ def _normalize_job_payload(
         err = payload.get("error_message") or payload.get("error")
         if isinstance(err, str):
             out["errorMessage"] = err
+
+    # bubble the top-level hasStructure / modalStage
+    # flags down INTO the result dict so durable-success checks can see them
+    # regardless of which shape the server returned. The fold-jobs endpoint
+    # emits hasStructure at the top level (see foldingJobsDb.get), but the
+    # SDK's JobInfo.result is the canonical field that downstream parsers
+    # read. Without this propagation, durable=True would loop forever waiting
+    # on a flag stashed in JobInfo.model_extra that the result-merge path
+    # never touches.
+    has_struct = payload.get("hasStructure")
+    if has_struct is None:
+        has_struct = payload.get("has_structure")
+    modal_stage = payload.get("modalStage") or payload.get("modal_stage")
+    if has_struct is not None or modal_stage is not None:
+        existing = out.get("result")
+        if isinstance(existing, dict):
+            merged = dict(existing)
+        elif existing is None:
+            merged = {}
+        else:
+            # Result is a list or scalar — preserve it under a key so we don't
+            # silently lose the data, but DO NOT clobber.
+            merged = {"_legacy_result": existing}
+        if has_struct is not None and "hasStructure" not in merged and "has_structure" not in merged:
+            merged["hasStructure"] = bool(has_struct)
+        if modal_stage is not None and "modalStage" not in merged and "modal_stage" not in merged:
+            merged["modalStage"] = modal_stage
+        out["result"] = merged
+
     return out
 
 

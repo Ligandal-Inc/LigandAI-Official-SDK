@@ -62,6 +62,36 @@ def test_credit_error_has_balance_fields() -> None:
     )
     assert err.required == 1000
     assert err.available == 50
+    # shortfall derived when required+available known and the
+    # server didn't send an explicit shortfall.
+    assert err.shortfall == 950
+    # Other recovery fields default to None when not supplied.
+    assert err.recovery_url is None
+    assert err.top_up_usd is None
+    assert err.upgrade_url is None
+
+
+def test_credit_error_carries_recovery_metadata() -> None:
+    """graceful credit-exhaustion UX surface."""
+    err = LigandAICreditError(
+        "Insufficient credits",
+        required=10_000,
+        available=200,
+        shortfall=9_800,
+        recovery_url="/account/billing?recovery=insufficient_credits&source=fold_batch&topup=99",
+        top_up_usd=99,
+        upgrade_url="https://ligandai.com/pricing",
+    )
+    assert err.shortfall == 9_800
+    assert err.recovery_url.startswith("/account/billing")
+    assert err.top_up_usd == 99
+    assert err.upgrade_url == "https://ligandai.com/pricing"
+
+
+def test_credit_error_shortfall_never_negative() -> None:
+    """If somehow available > required, derived shortfall should clamp to 0."""
+    err = LigandAICreditError("weird", required=10, available=999)
+    assert err.shortfall == 0
 
 
 def test_rate_limit_error_has_retry_after() -> None:
@@ -137,6 +167,58 @@ def test_error_from_response_extracts_credit_fields() -> None:
     assert isinstance(err, LigandAICreditError)
     assert err.required == 500
     assert err.available == 25
+
+
+def test_error_from_response_402_structured_insufficient_credits() -> None:
+    """server returns structured INSUFFICIENT_CREDITS payload
+    matching the platform + the patched /v1/folding/predict-batch
+    response. The SDK wires every field onto LigandAICreditError so callers
+    can render a top-off CTA.
+    """
+    err = error_from_response(
+        402,
+        {
+            "error": "Insufficient credits",
+            "code": "INSUFFICIENT_CREDITS",
+            "message": "Insufficient credits to dispatch this batch. Top up to continue.",
+            "creditsRequired": 10_000,
+            "creditsAvailable": 200,
+            "shortfall": 9_800,
+            "topup": 99,
+            "recoveryUrl": "/account/billing?recovery=insufficient_credits&source=fold_batch&topup=99",
+            "upgradeUrl": "https://ligandai.com/pricing",
+        },
+    )
+    assert isinstance(err, LigandAICreditError)
+    assert err.required == 10_000
+    assert err.available == 200
+    assert err.shortfall == 9_800
+    assert err.top_up_usd == 99
+    assert err.recovery_url is not None
+    assert "/account/billing" in err.recovery_url
+    assert err.upgrade_url == "https://ligandai.com/pricing"
+    # status + code preserved on the base class
+    assert err.status_code == 402
+    assert err.code == "INSUFFICIENT_CREDITS"
+
+
+def test_error_from_response_402_legacy_shape_still_works() -> None:
+    """Pre-patch /v1/folding/predict-batch sent only `required` + message.
+    The SDK derives shortfall from required+available when the server omits it.
+    """
+    err = error_from_response(
+        402,
+        {
+            "error": "Insufficient credits",
+            "required": 5_000,
+            "available": 100,
+            "message": "Purchase more credits at ligandai.com/credits",
+        },
+    )
+    assert isinstance(err, LigandAICreditError)
+    assert err.shortfall == 4_900  # derived
+    assert err.recovery_url is None
+    assert err.top_up_usd is None
 
 
 def test_error_from_response_with_retry_after() -> None:
