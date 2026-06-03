@@ -56,7 +56,10 @@ from ligandai.types import (
 # against an allowlist and returns 400 for unknown entries — keep this in sync.
 _IncludeField = Literal["pocket_features", "interface", "pdb"]
 _ALLOWED_INCLUDE: frozenset[str] = frozenset({"pocket_features", "interface", "pdb"})
-_DeltaForgeScorer = Literal["auto", "current", "v10", "v10_2", "unified"]
+# ``esm_augmented`` is a selectively-unlocked, entitlement-gated scorer (per-account
+# allowlist or superadmin). Passing it without the grant returns 403
+# (ESM_SCORER_ENTITLEMENT_REQUIRED); the default ``v10_2`` scores on your tier.
+_DeltaForgeScorer = Literal["auto", "current", "v10", "v10_2", "unified", "esm_augmented"]
 _DeltaForgeAggregateMethod = Literal["boltzmann_parallel", "best_pair", "mean_pair"]
 
 # Cysteine-control keys that used to be passed via ``extra={...}`` and are now
