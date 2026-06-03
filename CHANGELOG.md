@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.4] - 2026-06-02
+
+### Maintenance
+
+- Consolidated changelog: backfilled the `[0.6.1]` entry (below) so the
+  `0.6.1 → 0.6.4` history is complete and contiguous.
+- Packaging and metadata hygiene. No public API changes since 0.6.3 —
+  upgrading from any 0.6.x release is a drop-in; existing callers are
+  unaffected.
+
 ## [0.6.3] - 2026-05-31
 
 ### Added — `fold_approach` + ESMFold2 parameters
@@ -37,6 +47,16 @@ kwargs on `structures.get`, `list_isoforms`, `list_species`) — only the
 introspectable `ligandai.__version__` attribute was wrong. This release
 fixes the version string and republishes; no functional changes from
 0.6.0.
+
+## [0.6.1] - 2026-05-30
+
+### Republish of 0.6.0 (no functional change)
+
+A packaging republish of the 0.6.0 code with no API changes. As documented
+under 0.6.2, `ligandai.__version__` was not bumped in this release and still
+reported `"0.5.7"`; the wheel itself contains the full 0.6.0 feature set
+(`structures.get` isoform / species / PDB-code kwargs, `list_isoforms`,
+`list_species`). The version-string fix shipped in 0.6.2.
 
 ## [0.6.0] - 2026-05-30
 
