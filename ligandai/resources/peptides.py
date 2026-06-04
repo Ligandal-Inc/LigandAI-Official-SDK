@@ -572,6 +572,7 @@ def _fold_body(
     num_seeds: int | None = None,
     num_recycles: int | None = None,
     return_pdb: bool | None = None,
+    use_potentials: bool | None = None,
 ) -> dict[str, Any]:
     """Build the body for ``POST /api/folding/predict``.
 
@@ -581,6 +582,12 @@ def _fold_body(
       - ``"boltz2_affinity"`` (default) — gold-standard 2-chain Boltz-2 + affinity head
       - ``"esmfold2"`` — single-sequence ESMFold2 on B200+ (~3-5 s/peptide)
       - ``"esmfold2_fast"`` — LF-Pose v3 (50 ms warm-pool variant)
+
+    ``use_potentials`` opts into Boltz-2 physics-based steering potentials
+    (boltz ``--use_potentials``; default OFF). When True the body carries both
+    ``usePotentials`` and ``use_potentials`` so either casing reaches the platform.
+    When None/False the key is omitted entirely — byte-for-byte identical body for
+    existing callers. Boltz-2 path only; ignored by ESMFold approaches.
     """
     approach = _resolve_fold_approach(fold_approach)
     normalized = [_norm_seq(s) for s in sequences]
@@ -608,6 +615,11 @@ def _fold_body(
     if return_pdb is not None:
         body["returnPdb"] = bool(return_pdb)
         body["return_pdb"] = bool(return_pdb)
+    # Physics-based steering potentials — opt-in only. Emit both casings so the
+    # Express proxy and FastAPI (AliasChoices) accept it. Omitted when None/False.
+    if use_potentials:
+        body["usePotentials"] = True
+        body["use_potentials"] = True
     if sampling_steps is not None:
         body["samplingSteps"] = sampling_steps
     if recycling_steps is not None:
@@ -647,6 +659,15 @@ def _fold_body(
                 "sequence": s["sequence"],
                 **({"name": s["name"]} if "name" in s else {}),
                 **({"geneName": s["geneName"]} if "geneName" in s else {}),
+                # Forward peptide / no-MSA flags so the server skips MSA prefetch
+                # for de novo binder chains. Without these the platform would POST
+                # the orphan peptide to the local MSA service, which rejects it as
+                # "Degenerate MSA: only 1 sequence" after a wasted mmseqs search.
+                # bd-LIGANDAI_ALPHA_V2-5319n.
+                **({"isPeptide": True} if (s.get("isPeptide") or s.get("is_peptide")) else {}),
+                **({"is_peptide": True} if (s.get("isPeptide") or s.get("is_peptide")) else {}),
+                **({"use_msa": False} if s.get("use_msa") is False else {}),
+                **({"role": s["role"]} if "role" in s else {}),
             }
             for i, s in enumerate(normalized)
         ]
@@ -857,6 +878,9 @@ def _build_batch_fold_body(
     n_parallel_gpus: int | None,
     session_id: str | None,
     contribute_to_receptordb: bool | None,
+    num_trajectories: int | None = None,
+    msa_depth: int | None = None,
+    use_potentials: bool | None = None,
 ) -> dict[str, Any]:
     """Construct the POST /api/v1/folding/predict-batch JSON body."""
     receptor_specified = [v for v in (target_gene, receptor_pdb, receptor_sequence) if v]
@@ -893,6 +917,15 @@ def _build_batch_fold_body(
         body["session_id"] = session_id
     if contribute_to_receptordb is not None:
         body["contribute_to_receptordb"] = bool(contribute_to_receptordb)
+    if num_trajectories is not None:
+        body["num_trajectories"] = int(num_trajectories)
+    if msa_depth is not None:
+        body["msa_depth"] = int(msa_depth)
+    # Physics-based steering potentials — opt-in only. Emit both casings; omitted
+    # when None/False so existing batch submissions hash/serialize identically.
+    if use_potentials:
+        body["use_potentials"] = True
+        body["usePotentials"] = True
     return body
 
 
@@ -1925,6 +1958,7 @@ class Peptides(Resource):
         num_seeds: int | None = None,
         num_recycles: int | None = None,
         return_pdb: bool | None = None,
+        use_potentials: bool | None = None,
     ) -> Job[FoldResult]:
         """Submit a folding job (monomer or multimer).
 
@@ -1951,6 +1985,12 @@ class Peptides(Resource):
             force_resubmit: Bypass the local 24-hour dedupe and re-submit an
                 identical fold call. Default ``False`` — identical fold calls
                 return the cached :class:`~ligandai.jobs.Job` handle.
+            use_potentials: Opt into Boltz-2 physics-based steering potentials
+                (boltz ``--use_potentials``; inference-time FK steering + physical
+                guidance during diffusion). Default ``None``/``False`` = off,
+                reproducing current behavior. May improve physical validity of the
+                predicted complex at a modest speed cost. Boltz-2 path only —
+                ignored by ESMFold approaches.
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
@@ -2010,7 +2050,13 @@ class Peptides(Resource):
                 msa_enabled=msa_enabled,
                 glycosylation=glycosylation,
                 template_mode=template_mode,
-                extra={"kind": "fold", "pegylation": bool(pegylation) if pegylation is not None else None},
+                extra={
+                    "kind": "fold",
+                    "pegylation": bool(pegylation) if pegylation is not None else None,
+                    # Only include the potentials key when ON, so a default (off)
+                    # fold hashes identically to pre-feature submissions (dedupe-stable).
+                    **({"use_potentials": True} if use_potentials else {}),
+                },
             ),
         )
 
@@ -2067,6 +2113,7 @@ class Peptides(Resource):
             num_seeds=num_seeds,
             num_recycles=num_recycles,
             return_pdb=return_pdb,
+            use_potentials=use_potentials,
         )
 
         record_submission(
@@ -2130,6 +2177,9 @@ class Peptides(Resource):
         n_parallel_gpus: int | None = None,
         session_id: str | None = None,
         contribute_to_receptordb: bool | None = None,
+        num_trajectories: int | None = None,
+        msa_depth: int | None = None,
+        use_potentials: bool | None = None,
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
         # ─── hardening kwargs ────────────────────
         # gpu: only "b200_plus" is accepted by the SDK; anything else raises
@@ -2291,7 +2341,13 @@ class Peptides(Resource):
                 msa_enabled=msa_enabled,
                 glycosylation=glycosylation,
                 template_mode=template_mode,
-                extra={"kind": "fold_batch", "receptor_name": receptor_name},
+                extra={
+                    "kind": "fold_batch",
+                    "receptor_name": receptor_name,
+                    # Only present when ON so default batches hash unchanged.
+                    **({"use_potentials": True} if use_potentials else {}),
+                    **({"msa_depth": int(msa_depth)} if msa_depth is not None else {}),
+                },
             ),
         )
 
@@ -2349,6 +2405,9 @@ class Peptides(Resource):
             n_parallel_gpus=n_parallel_gpus,
             session_id=session_id,
             contribute_to_receptordb=contribute_to_receptordb,
+            num_trajectories=num_trajectories,
+            msa_depth=msa_depth,
+            use_potentials=use_potentials,
         )
 
         # 4) Record submission BEFORE the POST. If the POST fails we'll mark
@@ -3462,6 +3521,7 @@ class AsyncPeptides(AsyncResource):
         num_seeds: int | None = None,
         num_recycles: int | None = None,
         return_pdb: bool | None = None,
+        use_potentials: bool | None = None,
     ) -> AsyncJob[FoldResult]:
         """Async sibling of :meth:`Peptides.fold`. See :meth:`Peptides.fold` for
         ``n_parallel_gpus`` semantics and the GPU / dedupe / credit pre-flight
@@ -3522,7 +3582,13 @@ class AsyncPeptides(AsyncResource):
                 msa_enabled=msa_enabled,
                 glycosylation=glycosylation,
                 template_mode=template_mode,
-                extra={"kind": "fold", "pegylation": bool(pegylation) if pegylation is not None else None},
+                extra={
+                    "kind": "fold",
+                    "pegylation": bool(pegylation) if pegylation is not None else None,
+                    # Only include the potentials key when ON, so a default (off)
+                    # fold hashes identically to pre-feature submissions (dedupe-stable).
+                    **({"use_potentials": True} if use_potentials else {}),
+                },
             ),
         )
 
@@ -3578,6 +3644,7 @@ class AsyncPeptides(AsyncResource):
             num_seeds=num_seeds,
             num_recycles=num_recycles,
             return_pdb=return_pdb,
+            use_potentials=use_potentials,
         )
 
         record_submission(
@@ -3641,6 +3708,9 @@ class AsyncPeptides(AsyncResource):
         n_parallel_gpus: int | None = None,
         session_id: str | None = None,
         contribute_to_receptordb: bool | None = None,
+        num_trajectories: int | None = None,
+        msa_depth: int | None = None,
+        use_potentials: bool | None = None,
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
         # ─── hardening kwargs ────────────────────
         gpu: str | None = None,
@@ -3693,7 +3763,13 @@ class AsyncPeptides(AsyncResource):
                 msa_enabled=msa_enabled,
                 glycosylation=glycosylation,
                 template_mode=template_mode,
-                extra={"kind": "fold_batch", "receptor_name": receptor_name},
+                extra={
+                    "kind": "fold_batch",
+                    "receptor_name": receptor_name,
+                    # Only present when ON so default batches hash unchanged.
+                    **({"use_potentials": True} if use_potentials else {}),
+                    **({"msa_depth": int(msa_depth)} if msa_depth is not None else {}),
+                },
             ),
         )
 
@@ -3743,6 +3819,9 @@ class AsyncPeptides(AsyncResource):
             n_parallel_gpus=n_parallel_gpus,
             session_id=session_id,
             contribute_to_receptordb=contribute_to_receptordb,
+            num_trajectories=num_trajectories,
+            msa_depth=msa_depth,
+            use_potentials=use_potentials,
         )
 
         record_submission(

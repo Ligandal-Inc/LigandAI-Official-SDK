@@ -590,10 +590,24 @@ class LigandAI(_ClientCommon):
         if peptide is not None:
             if target is None or not isinstance(target, str):
                 raise ValueError("target must be the receptor sequence when peptide is provided.")
+            # Flag the peptide chain so the server never prefetches an MSA for it.
+            # De novo binders are orphan sequences — the local MSA service rejects
+            # them as "Degenerate MSA: only 1 sequence" after a wasted mmseqs
+            # search, which contributed to a concurrent-search saturation. The
+            # receptor (chain A) still gets its MSA; the peptide is folded with
+            # msa:empty by the worker. bd-LIGANDAI_ALPHA_V2-5319n.
             return self.peptides.fold(
                 sequences=[
                     {"sequence": target, "chainId": "A", "name": "target"},
-                    {"sequence": peptide, "chainId": "B", "name": "peptide"},
+                    {
+                        "sequence": peptide,
+                        "chainId": "B",
+                        "name": "peptide",
+                        "type": "protein",
+                        "isPeptide": True,
+                        "is_peptide": True,
+                        "use_msa": False,
+                    },
                 ],
                 **kwargs,
             )
