@@ -583,11 +583,13 @@ def _fold_body(
       - ``"esmfold2"`` — single-sequence ESMFold2 on B200+ (~3-5 s/peptide)
       - ``"esmfold2_fast"`` — LF-Pose v3 (50 ms warm-pool variant)
 
-    ``use_potentials`` opts into Boltz-2 physics-based steering potentials
-    (boltz ``--use_potentials``; default OFF). When True the body carries both
-    ``usePotentials`` and ``use_potentials`` so either casing reaches the platform.
-    When None/False the key is omitted entirely — byte-for-byte identical body for
-    existing callers. Boltz-2 path only; ignored by ESMFold approaches.
+    ``use_potentials`` controls Boltz-2 physics-based steering potentials
+    (boltz ``--use_potentials``). Platform default is now ON
+    (bd-LIGANDAI_ALPHA_V2-j2kc5). When True/False the body carries both
+    ``usePotentials`` and ``use_potentials`` (either casing reaches the platform) so
+    the caller's choice is explicit and overrides the server default. When None the
+    key is omitted and the server's default (ON) applies. Boltz-2 path only; ignored
+    by ESMFold approaches.
     """
     approach = _resolve_fold_approach(fold_approach)
     normalized = [_norm_seq(s) for s in sequences]
@@ -615,11 +617,12 @@ def _fold_body(
     if return_pdb is not None:
         body["returnPdb"] = bool(return_pdb)
         body["return_pdb"] = bool(return_pdb)
-    # Physics-based steering potentials — opt-in only. Emit both casings so the
-    # Express proxy and FastAPI (AliasChoices) accept it. Omitted when None/False.
-    if use_potentials:
-        body["usePotentials"] = True
-        body["use_potentials"] = True
+    # Physics-based steering potentials. Platform default ON (bd-..-j2kc5). Emit both
+    # casings so the Express proxy + FastAPI (AliasChoices) accept it. Explicit True OR
+    # False is forwarded (lets a caller override the server default); only None omits.
+    if use_potentials is not None:
+        body["usePotentials"] = bool(use_potentials)
+        body["use_potentials"] = bool(use_potentials)
     if sampling_steps is not None:
         body["samplingSteps"] = sampling_steps
     if recycling_steps is not None:
@@ -921,11 +924,11 @@ def _build_batch_fold_body(
         body["num_trajectories"] = int(num_trajectories)
     if msa_depth is not None:
         body["msa_depth"] = int(msa_depth)
-    # Physics-based steering potentials — opt-in only. Emit both casings; omitted
-    # when None/False so existing batch submissions hash/serialize identically.
-    if use_potentials:
-        body["use_potentials"] = True
-        body["usePotentials"] = True
+    # Physics-based steering potentials. Platform default ON (bd-..-j2kc5). Explicit
+    # True OR False forwarded (overrides server default); only None omits the key.
+    if use_potentials is not None:
+        body["use_potentials"] = bool(use_potentials)
+        body["usePotentials"] = bool(use_potentials)
     return body
 
 
@@ -1958,7 +1961,7 @@ class Peptides(Resource):
         num_seeds: int | None = None,
         num_recycles: int | None = None,
         return_pdb: bool | None = None,
-        use_potentials: bool | None = None,
+        use_potentials: bool | None = True,
     ) -> Job[FoldResult]:
         """Submit a folding job (monomer or multimer).
 
@@ -2055,7 +2058,7 @@ class Peptides(Resource):
                     "pegylation": bool(pegylation) if pegylation is not None else None,
                     # Only include the potentials key when ON, so a default (off)
                     # fold hashes identically to pre-feature submissions (dedupe-stable).
-                    **({"use_potentials": True} if use_potentials else {}),
+                    **({"use_potentials": bool(use_potentials)} if use_potentials is not None else {}),
                 },
             ),
         )
@@ -2179,7 +2182,7 @@ class Peptides(Resource):
         contribute_to_receptordb: bool | None = None,
         num_trajectories: int | None = None,
         msa_depth: int | None = None,
-        use_potentials: bool | None = None,
+        use_potentials: bool | None = True,
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
         # ─── hardening kwargs ────────────────────
         # gpu: only "b200_plus" is accepted by the SDK; anything else raises
@@ -2345,7 +2348,7 @@ class Peptides(Resource):
                     "kind": "fold_batch",
                     "receptor_name": receptor_name,
                     # Only present when ON so default batches hash unchanged.
-                    **({"use_potentials": True} if use_potentials else {}),
+                    **({"use_potentials": bool(use_potentials)} if use_potentials is not None else {}),
                     **({"msa_depth": int(msa_depth)} if msa_depth is not None else {}),
                 },
             ),
@@ -3521,7 +3524,7 @@ class AsyncPeptides(AsyncResource):
         num_seeds: int | None = None,
         num_recycles: int | None = None,
         return_pdb: bool | None = None,
-        use_potentials: bool | None = None,
+        use_potentials: bool | None = True,
     ) -> AsyncJob[FoldResult]:
         """Async sibling of :meth:`Peptides.fold`. See :meth:`Peptides.fold` for
         ``n_parallel_gpus`` semantics and the GPU / dedupe / credit pre-flight
@@ -3587,7 +3590,7 @@ class AsyncPeptides(AsyncResource):
                     "pegylation": bool(pegylation) if pegylation is not None else None,
                     # Only include the potentials key when ON, so a default (off)
                     # fold hashes identically to pre-feature submissions (dedupe-stable).
-                    **({"use_potentials": True} if use_potentials else {}),
+                    **({"use_potentials": bool(use_potentials)} if use_potentials is not None else {}),
                 },
             ),
         )
@@ -3710,7 +3713,7 @@ class AsyncPeptides(AsyncResource):
         contribute_to_receptordb: bool | None = None,
         num_trajectories: int | None = None,
         msa_depth: int | None = None,
-        use_potentials: bool | None = None,
+        use_potentials: bool | None = True,
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
         # ─── hardening kwargs ────────────────────
         gpu: str | None = None,
@@ -3767,7 +3770,7 @@ class AsyncPeptides(AsyncResource):
                     "kind": "fold_batch",
                     "receptor_name": receptor_name,
                     # Only present when ON so default batches hash unchanged.
-                    **({"use_potentials": True} if use_potentials else {}),
+                    **({"use_potentials": bool(use_potentials)} if use_potentials is not None else {}),
                     **({"msa_depth": int(msa_depth)} if msa_depth is not None else {}),
                 },
             ),
