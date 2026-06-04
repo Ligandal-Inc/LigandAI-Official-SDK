@@ -114,7 +114,9 @@ class TestBasicTierCap:
                         diffusion_samples=1, sampling_steps=50,
                         recycling_steps=None, step_scale=None,
                         msa_enabled=None, glycosylation=None, template_mode=False,
-                        extra={"kind": "fold_batch", "receptor_name": None},
+                        # use_potentials defaults True on fold_batch (bd-j2kc5), so the
+                        # recorded submission hash carries it — mirror that here.
+                        extra={"kind": "fold_batch", "receptor_name": None, "use_potentials": True},
                     ),
                 )
                 c.submitted_set.mark_completed(h, c.api_key_hash, actual_credits=100)

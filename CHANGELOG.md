@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.4] - 2026-06-04
+
+### Changed (behavior) — generation + folding now default to physics-potentials ON
+
+`use_potentials` (Boltz-2 physics-based steering potentials, `--use_potentials`)
+now defaults to **ON** on `Peptides.fold()` and `Peptides.fold_batch()` (and
+across the platform's generation + folding entry points). Steering nudges the
+diffusion sampler toward physically valid geometry (bond lengths, clashes,
+stereochemistry) at a modest speed cost. Pass `use_potentials=False` to opt out
+for raw throughput. When the parameter is omitted the platform default (ON)
+applies; passing an explicit `True`/`False` always overrides the server default.
+
+### Added — grouped batch fold + per-entity MSA control
+
+`Peptides.fold_batch()` (sync + async) gains a `groups=` parameter — an
+alternative to the flat `peptides=[...]` + single-receptor form. Each group is
+one fold job structured as a `target{partners}` complex, with the MSA toggle
+settable **independently at both levels**:
+
+- per **target/receptor** — a protein; `use_msa` defaults **True**;
+- per **co-folding partner** — a `"peptide"` (`use_msa` default **False**) or a
+  `"protein"` partner (`use_msa` default **True**, may request its own MSA). An
+  explicit `use_msa` always wins.
+
+```python
+batch = client.peptides.fold_batch(groups=[
+    {"target": {"gene": "EGFR", "use_msa": True},
+     "partners": [
+         {"sequence": "ACDEFGHIK", "type": "peptide"},               # no MSA
+         {"sequence": PARTNER_PROTEIN, "type": "protein", "use_msa": True},  # MSA
+     ]},
+    {"target": {"sequence": RECEPTOR_SEQ},
+     "partners": [{"sequence": "WYLKPRSTV", "type": "peptide"}]},
+    {"target": {"pdb": "receptors/my_target.pdb"},
+     "partners": [{"sequence": "MNPQRSTAV", "type": "peptide"}]},
+], diffusion_samples=4)
+```
+
+Each group becomes one fold job whose chains are `[target = chain A,
+partner₁ = chain B, …]`. Per-entity `use_msa` / `isPeptide` flags route
+end-to-end: peptide / `use_msa=False` chains fold with `msa: empty` and are
+**never** sent to the MSA service; receptor / MSA-flagged protein partners get a
+real MSA. `peptides=` and `groups=` are mutually exclusive. The flat form is
+unchanged — existing callers are unaffected. Grouped billing charges per group
+(one complex fold). A `"protein"` partner with an explicit `use_msa=False` is
+now folded without an MSA (the worker MSA_GUARD honors the explicit opt-out
+instead of force-enabling MSA).
+
+### Added — peptide-MSA prefetch guard
+
+De novo peptide / binder chains (flagged `isPeptide` / `is_peptide` /
+`role∈{peptide,binder}` or `use_msa=False`) are no longer POSTed to the MSA
+search service during the upstream prefetch — they have no homologs and the
+worker already folds them with `msa: empty`. Receptors and MSA-flagged protein
+partners are prefetched as before (flag-driven, not length-based).
+
+### Fixed — batch fold now honors all Boltz-2 parameters
+
+The batch-fold path previously dropped `use_potentials` /
+`sampling_steps` / `recycling_steps` / `num_trajectories` / `msa_depth` on the
+way to the worker. These are now threaded through (configurable
+`sampling_steps` / `num_trajectories` / `recycling_steps` / `msa_depth`) and the
+per-peptide chain B is flagged `isPeptide` / `use_msa=False` so the de novo
+peptide is not wastefully sent to the MSA service.
+
+### Notes
+
+- All new kwargs are optional and additive; the flat `fold_batch(peptides=...)`
+  form and existing `fold()` callers are byte-for-byte unaffected unless they
+  newly rely on the steering-potentials default.
+
 ## [0.6.3] - 2026-05-31
 
 ### Added — `fold_approach` + ESMFold2 parameters

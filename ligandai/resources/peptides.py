@@ -932,6 +932,200 @@ def _build_batch_fold_body(
     return body
 
 
+# ─── Grouped batch fold (v0.6.4) ─────────────────────────────────────────────
+#
+# bd-LIGANDAI_ALPHA_V2-wymqb. The legacy ``fold_batch(peptides=[...],
+# target_gene=...)`` form folds N bare peptides against ONE receptor, all de
+# novo (no peptide MSA). The grouped form lets each fold job be a
+# ``target{partners}`` complex with MSA control settable independently at BOTH
+# levels:
+#
+#   * per target/receptor (a protein; default MSA ON), AND
+#   * per co-folding partner — a PEPTIDE (default NO MSA) or a PROTEIN (may
+#     request its OWN MSA).
+#
+# Multiple groups per batch; each group becomes one fold job whose ``entities``
+# array is [target=chain A, partner1=chain B, partner2=chain C, ...]. The
+# per-entity ``use_msa`` / ``isPeptide`` / ``role`` flags are honored end-to-end
+# by the Express route, the BullMQ MSA prefetch, and the Boltz-2 worker
+# MSA_GUARD (peptide / use_msa=False → ``msa: empty``; receptor / MSA-flagged
+# protein partner → MSA passthrough or ``--use_msa_server``).
+
+# Partner entity ``type`` values accepted by the grouped API. A "peptide"
+# defaults to NO MSA; a "protein" partner defaults to MSA ON (like a target).
+_PARTNER_TYPES: frozenset[str] = frozenset({"peptide", "protein"})
+
+
+def _normalize_group_target(target: Any, *, group_index: int) -> dict[str, Any]:
+    """Normalize one group's ``target`` spec into a wire entity dict.
+
+    Accepts a dict with exactly one of ``gene`` / ``sequence`` / ``pdb`` and an
+    optional ``use_msa`` (default True — a target is a protein/receptor) and
+    ``name``. The returned dict is the chain-A entity descriptor the server
+    resolves into the receptor sequence.
+    """
+    if not isinstance(target, dict):
+        raise TypeError(
+            f"groups[{group_index}]['target'] must be a dict with one of "
+            f"gene=/sequence=/pdb=, got {type(target).__name__}"
+        )
+    modes = [k for k in ("gene", "sequence", "pdb") if target.get(k)]
+    if len(modes) != 1:
+        raise ValueError(
+            f"groups[{group_index}]['target'] must specify exactly one of "
+            f"'gene', 'sequence', or 'pdb' (got: {modes or 'none'})"
+        )
+    use_msa = target.get("use_msa")
+    out: dict[str, Any] = {
+        # A target is always a protein receptor — chain A.
+        "type": "protein",
+        # MSA defaults ON for a target/receptor unless explicitly disabled.
+        "use_msa": True if use_msa is None else bool(use_msa),
+    }
+    if target.get("gene"):
+        out["gene"] = str(target["gene"])
+    elif target.get("sequence"):
+        out["sequence"] = str(target["sequence"])
+    elif target.get("pdb"):
+        # Resolve a path → content once, mirroring _resolve_receptor_pdb_arg.
+        out["pdb"] = _resolve_receptor_pdb_arg(str(target["pdb"]))
+    if target.get("name"):
+        out["name"] = str(target["name"])
+    return out
+
+
+def _normalize_group_partner(partner: Any, *, group_index: int, partner_index: int) -> dict[str, Any]:
+    """Normalize one partner into a wire entity dict with explicit MSA flags.
+
+    A partner is a co-folding chain. ``type`` ∈ {"peptide", "protein"}; a bare
+    string is treated as a peptide. Default ``use_msa``: peptide → False,
+    protein → True. An explicit ``use_msa`` always wins. Peptide chains (or any
+    chain with ``use_msa=False``) carry ``isPeptide``/``role='peptide'`` so the
+    MSA prefetch guard and worker MSA_GUARD skip the MSA search.
+    """
+    if isinstance(partner, str):
+        partner = {"sequence": partner, "type": "peptide"}
+    if not isinstance(partner, dict):
+        raise TypeError(
+            f"groups[{group_index}]['partners'][{partner_index}] must be a dict "
+            f"or sequence string, got {type(partner).__name__}"
+        )
+    seq = partner.get("sequence") or partner.get("seq")
+    if not seq or not isinstance(seq, str) or not seq.strip():
+        raise ValueError(
+            f"groups[{group_index}]['partners'][{partner_index}] needs a non-empty "
+            f"'sequence'"
+        )
+    ptype = str(partner.get("type") or "peptide").strip().lower()
+    if ptype not in _PARTNER_TYPES:
+        raise ValueError(
+            f"groups[{group_index}]['partners'][{partner_index}]['type'] must be one "
+            f"of {sorted(_PARTNER_TYPES)}, got {ptype!r}"
+        )
+    is_peptide = ptype == "peptide"
+    explicit_msa = partner.get("use_msa")
+    # Default: peptide → no MSA, protein → MSA. Explicit value overrides.
+    use_msa = (not is_peptide) if explicit_msa is None else bool(explicit_msa)
+    out: dict[str, Any] = {
+        "type": "protein",  # Boltz-2 entity type; a peptide is a short protein chain
+        "sequence": seq.strip(),
+        "use_msa": use_msa,
+    }
+    # Flag peptide / no-MSA chains so the prefetch guard + worker MSA_GUARD skip
+    # them. A protein partner that the caller explicitly opted OUT of MSA also
+    # gets the no-MSA flag (use_msa=False is itself a guard signal), but is NOT
+    # labelled a peptide.
+    if is_peptide:
+        out["isPeptide"] = True
+        out["is_peptide"] = True
+        out["role"] = "peptide"
+    if partner.get("name"):
+        out["name"] = str(partner["name"])
+    return out
+
+
+def _normalize_fold_groups(groups: Any) -> list[dict[str, Any]]:
+    """Normalize the ``groups=`` argument into the wire ``groups`` array.
+
+    Each group → ``{"target": {...}, "partners": [{...}, ...]}`` with chain IDs
+    assigned A (target), then B, C, ... for partners.
+    """
+    if not isinstance(groups, list) or not groups:
+        raise ValueError("groups must be a non-empty list of {target, partners} dicts")
+    normalized: list[dict[str, Any]] = []
+    for gi, group in enumerate(groups):
+        if not isinstance(group, dict):
+            raise TypeError(
+                f"groups[{gi}] must be a dict with 'target' and 'partners', "
+                f"got {type(group).__name__}"
+            )
+        target = _normalize_group_target(group.get("target"), group_index=gi)
+        raw_partners = group.get("partners")
+        if not isinstance(raw_partners, list) or not raw_partners:
+            raise ValueError(
+                f"groups[{gi}]['partners'] must be a non-empty list (at least one "
+                f"co-folding partner)"
+            )
+        target = {**target, "chainId": "A"}
+        partners: list[dict[str, Any]] = []
+        for pi, partner in enumerate(raw_partners):
+            ent = _normalize_group_partner(partner, group_index=gi, partner_index=pi)
+            # Chain B, C, D, ... for partners.
+            ent = {**ent, "chainId": chr(ord("B") + pi)}
+            partners.append(ent)
+        normalized.append({"target": target, "partners": partners})
+    return normalized
+
+
+def _build_grouped_batch_fold_body(
+    *,
+    groups: list[dict[str, Any]],
+    diffusion_samples: int,
+    sampling_steps: int,
+    recycling_steps: int | None,
+    step_scale: float | None,
+    glycosylation: bool | None,
+    template_mode: bool,
+    n_parallel_gpus: int | None,
+    session_id: str | None,
+    contribute_to_receptordb: bool | None,
+    num_trajectories: int | None = None,
+    msa_depth: int | None = None,
+    use_potentials: bool | None = None,
+) -> dict[str, Any]:
+    """Construct the grouped POST /api/v1/folding/predict-batch JSON body.
+
+    The body carries a top-level ``groups`` array (the normalized per-entity
+    target/partners spec). The shared Boltz-2 knobs apply to every group.
+    """
+    body: dict[str, Any] = {
+        "groups": _normalize_fold_groups(groups),
+        "diffusion_samples": int(diffusion_samples),
+        "sampling_steps": int(sampling_steps),
+        "template_mode": bool(template_mode),
+    }
+    if recycling_steps is not None:
+        body["recycling_steps"] = int(recycling_steps)
+    if step_scale is not None:
+        body["step_scale"] = float(step_scale)
+    if glycosylation is not None:
+        body["glycosylation"] = bool(glycosylation)
+    if n_parallel_gpus is not None:
+        body["n_parallel_gpus"] = int(n_parallel_gpus)
+    if session_id is not None:
+        body["session_id"] = session_id
+    if contribute_to_receptordb is not None:
+        body["contribute_to_receptordb"] = bool(contribute_to_receptordb)
+    if num_trajectories is not None:
+        body["num_trajectories"] = int(num_trajectories)
+    if msa_depth is not None:
+        body["msa_depth"] = int(msa_depth)
+    if use_potentials is not None:
+        body["use_potentials"] = bool(use_potentials)
+        body["usePotentials"] = bool(use_potentials)
+    return body
+
+
 class BatchFoldJob:
     """A batch of N peptide-receptor fold jobs submitted by ``Peptides.fold_batch``.
 
@@ -2164,8 +2358,9 @@ class Peptides(Resource):
 
     def fold_batch(
         self,
-        peptides: list[str],
+        peptides: list[str] | None = None,
         *,
+        groups: list[dict[str, Any]] | None = None,
         target_gene: str | None = None,
         receptor_pdb: str | None = None,
         receptor_sequence: str | None = None,
@@ -2191,7 +2386,45 @@ class Peptides(Resource):
         # force_resubmit: bypass the local 24h dedupe and POST anyway.
         force_resubmit: bool = False,
     ) -> BatchFoldJob:
-        """Submit N peptides against a single fixed receptor for batch Boltz-2 folding.
+        """Submit a batch of Boltz-2 folds — either N peptides vs one receptor,
+        or N grouped ``target{partners}`` complexes with per-entity MSA control.
+
+        ``POST /api/v1/folding/predict-batch``
+
+        Two mutually-exclusive input forms (pass exactly one):
+
+        **1. Flat form (``peptides=`` + one receptor)** — backward compatible.
+        Each peptide folds as a 2-chain complex (chain A = receptor, chain B =
+        de novo peptide, no peptide MSA). See the receptor / FASTA notes below.
+
+        **2. Grouped form (``groups=``)** — each group is one fold job with a
+        ``target`` (a protein/receptor) and one or more co-folding ``partners``.
+        MSA is settable independently at BOTH levels:
+
+        - per **target/receptor** — a protein; ``use_msa`` defaults **True**;
+        - per **partner** — a ``"peptide"`` (``use_msa`` default **False**) or a
+          ``"protein"`` (``use_msa`` default **True**, may request its own MSA).
+
+        Example (grouped)::
+
+            job = client.peptides.fold_batch(groups=[
+                {"target": {"gene": "EGFR", "use_msa": True},
+                 "partners": [
+                     {"sequence": "ACDEFGHIK", "type": "peptide"},        # no MSA
+                     {"sequence": "MKLVAA...", "type": "protein", "use_msa": True},  # MSA
+                 ]},
+                {"target": {"sequence": "MEEPQS..."},
+                 "partners": [{"sequence": "WYLKPRSTV", "type": "peptide"}]},
+            ], diffusion_samples=4, use_potentials=True)
+            results = job.wait()
+
+        Each group becomes one fold job whose ``entities`` array is
+        ``[target=chain A, partner1=chain B, partner2=chain C, ...]``. The
+        per-entity ``use_msa`` / ``isPeptide`` flags route end-to-end: peptide /
+        ``use_msa=False`` chains fold with ``msa: empty``; receptor /
+        MSA-flagged protein partners get MSA passthrough (``--use_msa_server``).
+        ⛔ A chain flagged peptide / ``use_msa=False`` is NEVER sent to the MSA
+        service. (bd-LIGANDAI_ALPHA_V2-wymqb, relates 5319n.)
 
         ``POST /api/v1/folding/predict-batch``
 
@@ -2298,6 +2531,32 @@ class Peptides(Resource):
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
+        # ─── Form selection: flat (peptides=) XOR grouped (groups=) ──────────
+        if (peptides is None) == (groups is None):
+            raise ValueError(
+                "Pass exactly one of peptides=[...] (flat: N peptides vs one "
+                "receptor) or groups=[...] (grouped: target{partners} complexes "
+                "with per-entity MSA control)."
+            )
+        if groups is not None:
+            return self._fold_batch_grouped(
+                groups=groups,
+                diffusion_samples=diffusion_samples,
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                n_parallel_gpus=n_parallel_gpus,
+                session_id=session_id,
+                contribute_to_receptordb=contribute_to_receptordb,
+                num_trajectories=num_trajectories,
+                msa_depth=msa_depth,
+                use_potentials=use_potentials,
+                on_credit_exhausted=on_credit_exhausted,
+                gpu=gpu,
+                force_resubmit=force_resubmit,
+            )
         # ─── SDK hardening pre-flight ──────────────
         # 1) GPU type allowlist (raises LigandAIInvalidConfig if bad)
         # 2) Local concurrency cap (raises LigandAIConcurrencyLimit)
@@ -2491,6 +2750,196 @@ class Peptides(Resource):
             jobs=payload.get("jobs") or [],
             total_cost_credits=int(payload.get("total_cost_credits") or 0),
             peptide_count=int(payload.get("peptide_count") or 0),
+            trajectories_per_peptide=int(payload.get("trajectories_per_peptide") or diffusion_samples),
+            receptor=payload.get("receptor"),
+            sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
+        )
+
+    def _fold_batch_grouped(
+        self,
+        *,
+        groups: list[dict[str, Any]],
+        diffusion_samples: int,
+        sampling_steps: int,
+        recycling_steps: int | None,
+        step_scale: float | None,
+        glycosylation: bool | None,
+        template_mode: bool,
+        n_parallel_gpus: int | None,
+        session_id: str | None,
+        contribute_to_receptordb: bool | None,
+        num_trajectories: int | None,
+        msa_depth: int | None,
+        use_potentials: bool | None,
+        on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None,
+        gpu: str | None,
+        force_resubmit: bool,
+    ) -> BatchFoldJob:
+        """Grouped fold_batch submission (one fold job per group).
+
+        Mirrors the flat-form hardening pre-flight (GPU allowlist → concurrency
+        → dedupe → credit pre-flight → record), but the unit of cost is the
+        GROUP (one complex fold) rather than the single peptide. Billing:
+        100 cr/group/trajectory × max(1.0, sampling_steps/50), matching the
+        server-side computation for the grouped envelope.
+        """
+        from ligandai._hardening import (
+            attach_job_id,
+            build_fold_params_for_hash,
+            dedupe_lookup_cached,
+            enforce_concurrency,
+            estimate_fold_batch_credits,
+            mark_failed,
+            preflight_credits,
+            record_submission,
+            validate_gpu,
+        )
+        from ligandai._dedupe import compute_submission_hash
+
+        canonical_gpu = validate_gpu(gpu)
+        submitted_set = self._client.submitted_set if self._client is not None else None
+        credit_ledger = self._client.credit_ledger if self._client is not None else None
+        api_key_hash = self._client.api_key_hash if self._client is not None else ""
+
+        # Build the wire body (also validates / normalizes groups up-front).
+        body = _build_grouped_batch_fold_body(
+            groups=groups,
+            diffusion_samples=diffusion_samples,
+            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps,
+            step_scale=step_scale,
+            glycosylation=glycosylation,
+            template_mode=template_mode,
+            n_parallel_gpus=n_parallel_gpus,
+            session_id=session_id,
+            contribute_to_receptordb=contribute_to_receptordb,
+            num_trajectories=num_trajectories,
+            msa_depth=msa_depth,
+            use_potentials=use_potentials,
+        )
+        normalized_groups = body["groups"]
+        group_count = len(normalized_groups)
+
+        # Dedupe / hash from the normalized groups + shared params. Reuse the
+        # generic submission-hash machinery: the "peptide" axis is the JSON of
+        # every group's entity sequences, the "receptor" axis is the kind tag.
+        import json as _json
+        group_signature = _json.dumps(normalized_groups, sort_keys=True)
+        sub_hash = compute_submission_hash(
+            peptide_seq=[group_signature],
+            receptor_seq="grouped_batch_fold",
+            gpu=canonical_gpu,
+            params=build_fold_params_for_hash(
+                target_gene=None,
+                diffusion_samples=diffusion_samples,
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                msa_enabled=None,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                extra={
+                    "kind": "fold_batch_grouped",
+                    "group_count": group_count,
+                    **({"use_potentials": bool(use_potentials)} if use_potentials is not None else {}),
+                    **({"msa_depth": int(msa_depth)} if msa_depth is not None else {}),
+                },
+            ),
+        )
+
+        enforce_concurrency(self._client, submitted_set)
+
+        cached = dedupe_lookup_cached(
+            submitted_set,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            force_resubmit=force_resubmit,
+        )
+        if cached and cached.get("job_id"):
+            return BatchFoldJob(
+                self._transport,
+                batch_id=str(cached["job_id"]),
+                jobs=[],
+                total_cost_credits=int(cached.get("estimated_credits") or 0),
+                peptide_count=group_count,
+                trajectories_per_peptide=int(diffusion_samples),
+                receptor={"source": "cached"},
+                sampling_steps=int(sampling_steps),
+            )
+
+        # Credit pre-flight — cost unit is the group (one complex fold).
+        estimated = estimate_fold_batch_credits(
+            peptide_count=group_count,
+            trajectories=int(num_trajectories or diffusion_samples),
+            sampling_steps=int(sampling_steps),
+        )
+        balance_before, _ = preflight_credits(
+            self._client, estimated=estimated, kind="fold_batch",
+        )
+
+        record_submission(
+            submitted_set,
+            credit_ledger,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            kind="fold_batch_grouped",
+            gpu=canonical_gpu,
+            estimated_credits=estimated,
+            balance_before=balance_before,
+            meta={
+                "group_count": group_count,
+                "trajectories": int(num_trajectories or diffusion_samples),
+                "sampling_steps": int(sampling_steps),
+            },
+        )
+
+        try:
+            payload = self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except LigandAICreditError as cred_err:
+            if on_credit_exhausted is None:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted",
+                )
+                raise
+            try:
+                should_retry = bool(on_credit_exhausted(cred_err, body))
+            except Exception:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_callback_error",
+                )
+                raise cred_err from None
+            if not should_retry:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_no_retry",
+                )
+                raise
+            payload = self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except Exception as exc:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason=type(exc).__name__,
+            )
+            raise
+        batch_id = payload.get("batch_id") or payload.get("batchId") or ""
+        if not batch_id:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason="server_no_batch_id",
+            )
+            raise LigandAIError("Server did not return a batch_id for fold_batch", response=payload)
+        attach_job_id(
+            submitted_set, submission_hash=sub_hash,
+            api_key_hash=api_key_hash, job_id=batch_id,
+        )
+        return BatchFoldJob(
+            self._transport,
+            batch_id=batch_id,
+            jobs=payload.get("jobs") or [],
+            total_cost_credits=int(payload.get("total_cost_credits") or 0),
+            peptide_count=int(payload.get("peptide_count") or group_count),
             trajectories_per_peptide=int(payload.get("trajectories_per_peptide") or diffusion_samples),
             receptor=payload.get("receptor"),
             sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
@@ -3695,8 +4144,9 @@ class AsyncPeptides(AsyncResource):
 
     async def fold_batch(
         self,
-        peptides: list[str],
+        peptides: list[str] | None = None,
         *,
+        groups: list[dict[str, Any]] | None = None,
         target_gene: str | None = None,
         receptor_pdb: str | None = None,
         receptor_sequence: str | None = None,
@@ -3721,13 +4171,40 @@ class AsyncPeptides(AsyncResource):
     ) -> AsyncBatchFoldJob:
         """Async variant of :meth:`Peptides.fold_batch`.
 
-        See :meth:`Peptides.fold_batch` for receptor modes, FASTA support,
-        billing, the ``on_credit_exhausted`` callback contract, and the
-        submission hardening (gpu='b200_plus' only, 24h dedupe, credit
-        pre-flight, tier concurrency cap).
+        Supports both the flat ``peptides=`` + receptor form and the grouped
+        ``groups=`` ``target{partners}`` form with per-entity MSA control. See
+        :meth:`Peptides.fold_batch` for the full contract (receptor modes, FASTA
+        support, the grouped API, billing, the ``on_credit_exhausted`` callback,
+        and the submission hardening).
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
+        # Form selection: flat (peptides=) XOR grouped (groups=).
+        if (peptides is None) == (groups is None):
+            raise ValueError(
+                "Pass exactly one of peptides=[...] (flat: N peptides vs one "
+                "receptor) or groups=[...] (grouped: target{partners} complexes "
+                "with per-entity MSA control)."
+            )
+        if groups is not None:
+            return await self._fold_batch_grouped(
+                groups=groups,
+                diffusion_samples=diffusion_samples,
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                n_parallel_gpus=n_parallel_gpus,
+                session_id=session_id,
+                contribute_to_receptordb=contribute_to_receptordb,
+                num_trajectories=num_trajectories,
+                msa_depth=msa_depth,
+                use_potentials=use_potentials,
+                on_credit_exhausted=on_credit_exhausted,
+                gpu=gpu,
+                force_resubmit=force_resubmit,
+            )
         # Hardening pre-flight
         from ligandai._hardening import (
             attach_job_id,
@@ -3893,6 +4370,184 @@ class AsyncPeptides(AsyncResource):
             jobs=payload.get("jobs") or [],
             total_cost_credits=int(payload.get("total_cost_credits") or 0),
             peptide_count=int(payload.get("peptide_count") or 0),
+            trajectories_per_peptide=int(payload.get("trajectories_per_peptide") or diffusion_samples),
+            receptor=payload.get("receptor"),
+            sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
+        )
+
+    async def _fold_batch_grouped(
+        self,
+        *,
+        groups: list[dict[str, Any]],
+        diffusion_samples: int,
+        sampling_steps: int,
+        recycling_steps: int | None,
+        step_scale: float | None,
+        glycosylation: bool | None,
+        template_mode: bool,
+        n_parallel_gpus: int | None,
+        session_id: str | None,
+        contribute_to_receptordb: bool | None,
+        num_trajectories: int | None,
+        msa_depth: int | None,
+        use_potentials: bool | None,
+        on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None,
+        gpu: str | None,
+        force_resubmit: bool,
+    ) -> AsyncBatchFoldJob:
+        """Async grouped fold_batch submission. See :meth:`Peptides._fold_batch_grouped`."""
+        from ligandai._hardening import (
+            attach_job_id,
+            build_fold_params_for_hash,
+            dedupe_lookup_cached,
+            enforce_concurrency,
+            estimate_fold_batch_credits,
+            mark_failed,
+            preflight_credits,
+            record_submission,
+            validate_gpu,
+        )
+        from ligandai._dedupe import compute_submission_hash
+
+        canonical_gpu = validate_gpu(gpu)
+        submitted_set = self._client.submitted_set if self._client is not None else None
+        credit_ledger = self._client.credit_ledger if self._client is not None else None
+        api_key_hash = self._client.api_key_hash if self._client is not None else ""
+
+        body = _build_grouped_batch_fold_body(
+            groups=groups,
+            diffusion_samples=diffusion_samples,
+            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps,
+            step_scale=step_scale,
+            glycosylation=glycosylation,
+            template_mode=template_mode,
+            n_parallel_gpus=n_parallel_gpus,
+            session_id=session_id,
+            contribute_to_receptordb=contribute_to_receptordb,
+            num_trajectories=num_trajectories,
+            msa_depth=msa_depth,
+            use_potentials=use_potentials,
+        )
+        normalized_groups = body["groups"]
+        group_count = len(normalized_groups)
+
+        import json as _json
+        group_signature = _json.dumps(normalized_groups, sort_keys=True)
+        sub_hash = compute_submission_hash(
+            peptide_seq=[group_signature],
+            receptor_seq="grouped_batch_fold",
+            gpu=canonical_gpu,
+            params=build_fold_params_for_hash(
+                target_gene=None,
+                diffusion_samples=diffusion_samples,
+                sampling_steps=sampling_steps,
+                recycling_steps=recycling_steps,
+                step_scale=step_scale,
+                msa_enabled=None,
+                glycosylation=glycosylation,
+                template_mode=template_mode,
+                extra={
+                    "kind": "fold_batch_grouped",
+                    "group_count": group_count,
+                    **({"use_potentials": bool(use_potentials)} if use_potentials is not None else {}),
+                    **({"msa_depth": int(msa_depth)} if msa_depth is not None else {}),
+                },
+            ),
+        )
+
+        enforce_concurrency(self._client, submitted_set)
+
+        cached = dedupe_lookup_cached(
+            submitted_set,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            force_resubmit=force_resubmit,
+        )
+        if cached and cached.get("job_id"):
+            return AsyncBatchFoldJob(
+                self._transport,
+                batch_id=str(cached["job_id"]),
+                jobs=[],
+                total_cost_credits=int(cached.get("estimated_credits") or 0),
+                peptide_count=group_count,
+                trajectories_per_peptide=int(diffusion_samples),
+                receptor={"source": "cached"},
+                sampling_steps=int(sampling_steps),
+            )
+
+        estimated = estimate_fold_batch_credits(
+            peptide_count=group_count,
+            trajectories=int(num_trajectories or diffusion_samples),
+            sampling_steps=int(sampling_steps),
+        )
+        balance_before, _ = preflight_credits(
+            self._client, estimated=estimated, kind="fold_batch",
+        )
+
+        record_submission(
+            submitted_set,
+            credit_ledger,
+            submission_hash=sub_hash,
+            api_key_hash=api_key_hash,
+            kind="fold_batch_grouped",
+            gpu=canonical_gpu,
+            estimated_credits=estimated,
+            balance_before=balance_before,
+            meta={
+                "group_count": group_count,
+                "trajectories": int(num_trajectories or diffusion_samples),
+                "sampling_steps": int(sampling_steps),
+            },
+        )
+
+        try:
+            payload = await self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except LigandAICreditError as cred_err:
+            if on_credit_exhausted is None:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted",
+                )
+                raise
+            try:
+                should_retry = bool(on_credit_exhausted(cred_err, body))
+            except Exception:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_callback_error",
+                )
+                raise cred_err from None
+            if not should_retry:
+                mark_failed(
+                    submitted_set, submission_hash=sub_hash,
+                    api_key_hash=api_key_hash, reason="credit_exhausted_no_retry",
+                )
+                raise
+            payload = await self._transport.request("POST", "/api/v1/folding/predict-batch", json=body) or {}
+        except Exception as exc:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason=type(exc).__name__,
+            )
+            raise
+        batch_id = payload.get("batch_id") or payload.get("batchId") or ""
+        if not batch_id:
+            mark_failed(
+                submitted_set, submission_hash=sub_hash,
+                api_key_hash=api_key_hash, reason="server_no_batch_id",
+            )
+            raise LigandAIError("Server did not return a batch_id for fold_batch", response=payload)
+        attach_job_id(
+            submitted_set, submission_hash=sub_hash,
+            api_key_hash=api_key_hash, job_id=batch_id,
+        )
+        return AsyncBatchFoldJob(
+            self._transport,
+            batch_id=batch_id,
+            jobs=payload.get("jobs") or [],
+            total_cost_credits=int(payload.get("total_cost_credits") or 0),
+            peptide_count=int(payload.get("peptide_count") or group_count),
             trajectories_per_peptide=int(payload.get("trajectories_per_peptide") or diffusion_samples),
             receptor=payload.get("receptor"),
             sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
