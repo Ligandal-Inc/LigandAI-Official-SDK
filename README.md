@@ -562,6 +562,47 @@ serve_dashboard(handle, open_browser=True)
 Terminal rendering can also launch ProteinView by Tristan Farmer / 001TMF,
 MIT License: https://github.com/001TMF/ProteinView.
 
+## Ensemble co-fold across engines (v0.6.7+)
+
+`client.peptides.cofold(chains, engines=[...])` folds the **same** complex on
+1–4 structure-prediction engines in parallel — each on its own single-B200
+container — and returns a per-engine record (best-of canonical scores plus
+ranges) with an optional DeltaForge score on each engine's best structure.
+Available engines: `esmfold2`, `boltz2` (default), `protenix`, `openfold3`.
+
+Each engine reports its confidences (iPSAE / iPTM / pLDDT) in its **own native
+scale** — raw scores are never rescaled or normalized across engines, and
+DeltaForge ΔG likewise varies by engine. Compare engines on within-engine
+percentile, not by transforming one engine's raw numbers onto another's.
+
+MSA is a single **shared** control (`shared_msa="auto"` computes OUR-OWN MSA
+once on the receptor chains and hands the same alignment to every engine;
+`"none"` runs single-sequence). MSA keys are rejected in `per_engine` — it is
+never per-engine, and never an external/public MSA server.
+
+```python
+job = client.peptides.cofold(
+    chains=[
+        {"chain": "A", "sequence": "RECEPTOR_SEQ_HERE", "kind": "receptor"},
+        {"chain": "B", "sequence": "BINDER_SEQ_HERE", "kind": "peptide"},
+    ],
+    engines=["boltz2", "protenix", "openfold3"],
+    shared_msa="auto",          # OUR-OWN MSA, computed once, shared across engines
+    run_deltaforge=True,
+    gene="EGFR",
+)
+result = job.wait(timeout=1800)
+for name, rec in result["engines"].items():
+    print(name, rec["best"]["iptm"], rec["best"]["ipsae"])
+print(result["billing"]["total_credits"])
+```
+
+Ensemble billing is **per engine per trajectory** (summed): esmfold2 16,
+boltz2 50, protenix 20, openfold3 130 credits/trajectory, with a 5% / 10% / 15%
+bundle discount for 2 / 3 / 4 engines and a 50-credit minimum per job. Any tier
+(including free) may submit as long as the balance is positive; a zero-balance
+caller gets HTTP 402. `GET /api/v1/cofold/engines` lists engines and defaults.
+
 ## Guidance Modules (v0.2.0+)
 
 Quality-guided generation is available to all authenticated tiers, including
