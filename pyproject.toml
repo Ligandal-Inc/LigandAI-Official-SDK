@@ -80,6 +80,8 @@ include = [
     "/ligandai",
     "/tests",
     "/examples",
+    "/skills",
+    "/.claude/skills",
     "/README.md",
     "/LICENSE",
     "/CHANGELOG.md",
