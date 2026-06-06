@@ -361,6 +361,13 @@ def _generation_body(
     fold_engines: list[str] | None,
     fold_per_engine: dict[str, Any] | None,
     fold_shared_msa: str | dict[str, Any] | None,
+    # Cascade auto-fold (v0.6.7) — Boltz-2 stage-1 gate -> ensemble of ipSAE/ipTM
+    # winners. Emits foldCascade/cascadeGate* ONLY when fold_cascade is truthy;
+    # absent otherwise (legacy bytes preserved). Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+    fold_cascade: bool,
+    cascade_gate_metric: str,
+    cascade_gate_threshold: float | None,
+    cascade_gate_top_n: int | None,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
     # Auto-resolve targeting_strategy when not explicitly set:
@@ -565,6 +572,34 @@ def _generation_body(
                 raise TypeError(
                     "fold_shared_msa must be a str ('auto'|'none') or a dict"
                 )
+
+    # Cascade auto-fold (v0.6.7). Stage 1 folds the stratified top-N peptides on
+    # Boltz-2 ONLY; the ipSAE/ipTM winners then run the OTHER selected engines
+    # (the ensemble MINUS boltz2 — boltz2 is reused from stage 1, never re-folded).
+    # Cascade REQUIRES boltz2 in fold_engines (it is the stage-1 gate). Keys are
+    # emitted ONLY when fold_cascade is truthy; absent otherwise (legacy bytes
+    # preserved). Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+    if fold_cascade:
+        _norm_cascade_engines = _cofold_normalize_engines(fold_engines or [])
+        if "boltz2" not in _norm_cascade_engines:
+            raise ValueError(
+                "fold_cascade requires 'boltz2' in fold_engines — Boltz-2 is the "
+                "stage-1 gate whose ipSAE/ipTM winners advance to the ensemble."
+            )
+        _gate_metric = str(cascade_gate_metric or "ipsae").strip().lower()
+        if _gate_metric not in ("ipsae", "iptm"):
+            raise ValueError(
+                "cascade_gate_metric must be 'ipsae' or 'iptm'"
+            )
+        body["foldCascade"] = True
+        body["cascadeGateMetric"] = _gate_metric
+        if cascade_gate_threshold is not None:
+            body["cascadeGateThreshold"] = float(cascade_gate_threshold)
+        if cascade_gate_top_n is not None:
+            _top_n = int(cascade_gate_top_n)
+            if _top_n <= 0:
+                raise ValueError("cascade_gate_top_n must be a positive integer")
+            body["cascadeGateTopN"] = _top_n
 
     if extra:
         body.update(extra)
@@ -2118,9 +2153,22 @@ class Peptides(Resource):
         fold_engines: list[str] | None = None,
         fold_per_engine: dict[str, Any] | None = None,
         fold_shared_msa: str | dict[str, Any] | None = None,
+        # Cascade auto-fold (v0.6.7). Default off = legacy behaviour. When True,
+        # fold the top-N peptides on Boltz-2 FIRST, then run the OTHER selected
+        # engines ONLY on the Boltz-2 ipSAE/ipTM winners (boltz2 is reused, never
+        # re-folded). Requires boltz2 in fold_engines. camelCase aliases accepted;
+        # snake_case wins on conflict. Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+        fold_cascade: bool = False,
+        cascade_gate_metric: str = "ipsae",
+        cascade_gate_threshold: float | None = 0.67,
+        cascade_gate_top_n: int | None = None,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
+        foldCascade: bool | None = None,
+        cascadeGateMetric: str | None = None,
+        cascadeGateThreshold: float | None = None,
+        cascadeGateTopN: int | None = None,
         **extra: Any,
     ) -> Job[GenerationResult]:
         """Submit a peptide generation job. Returns a :class:`Job`.
@@ -2226,11 +2274,40 @@ class Peptides(Resource):
                 the receptor chains and hand the same MSA to every engine, the
                 default; ``"none"`` = single-sequence for every engine) or a dict
                 ``{"mode": "auto"|"none"}``. NEVER an external/public MSA server.
+            fold_cascade: Opt-in CASCADE auto-fold. ``False`` (default) keeps the
+                ensemble/legacy behaviour. When ``True``, the stratified top-N
+                peptides are folded on **Boltz-2 first**; the Boltz-2 winners (by
+                ``cascade_gate_metric``) then run the OTHER selected engines
+                (``fold_engines`` MINUS ``boltz2``). Boltz-2 is reused from stage 1,
+                NEVER re-folded — so it is charged once (stage 1) and only the
+                winners incur the additional ensemble cost. Requires ``boltz2`` in
+                ``fold_engines`` (it is the stage-1 gate); raises ``ValueError``
+                otherwise.
+            cascade_gate_metric: Winner-selection metric — ``"ipsae"`` (default)
+                or ``"iptm"``. Applied to each peptide's stage-1 Boltz-2 fold.
+            cascade_gate_threshold: Winners are stage-1 Boltz-2 folds with the gate
+                metric ``>=`` this value (default ``0.67``). ``None`` disables the
+                threshold filter (use ``cascade_gate_top_n`` alone).
+            cascade_gate_top_n: When set, take the top-N by gate metric among the
+                threshold-passers. If the threshold filter yields ZERO winners but
+                ``cascade_gate_top_n`` is set, fall back to the top-N by metric
+                IGNORING the threshold (so an ensemble always runs on the best N).
         """
         # Resolve camelCase aliases — snake_case wins when both are supplied.
         fold_engines = fold_engines if fold_engines is not None else foldEngines
         fold_per_engine = fold_per_engine if fold_per_engine is not None else foldPerEngine
         fold_shared_msa = fold_shared_msa if fold_shared_msa is not None else foldSharedMsa
+        # Cascade aliases — snake wins. ``fold_cascade`` defaults to False (not
+        # None), so only override from the camelCase alias when the snake value
+        # was left at its default AND a camelCase value was supplied.
+        if not fold_cascade and foldCascade is not None:
+            fold_cascade = bool(foldCascade)
+        if cascade_gate_metric == "ipsae" and cascadeGateMetric is not None:
+            cascade_gate_metric = cascadeGateMetric
+        if cascade_gate_threshold == 0.67 and cascadeGateThreshold is not None:
+            cascade_gate_threshold = cascadeGateThreshold
+        if cascade_gate_top_n is None and cascadeGateTopN is not None:
+            cascade_gate_top_n = cascadeGateTopN
         if self._client is not None:
             self._client._require_feature("generate_peptides")
             if _requests_advanced_guidance(
@@ -2301,6 +2378,10 @@ class Peptides(Resource):
             fold_engines=fold_engines,
             fold_per_engine=fold_per_engine,
             fold_shared_msa=fold_shared_msa,
+            fold_cascade=fold_cascade,
+            cascade_gate_metric=cascade_gate_metric,
+            cascade_gate_threshold=cascade_gate_threshold,
+            cascade_gate_top_n=cascade_gate_top_n,
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -4182,9 +4263,19 @@ class AsyncPeptides(AsyncResource):
         fold_engines: list[str] | None = None,
         fold_per_engine: dict[str, Any] | None = None,
         fold_shared_msa: str | dict[str, Any] | None = None,
+        # Cascade auto-fold (v0.6.7) — see :meth:`Peptides.generate` for docs.
+        # Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+        fold_cascade: bool = False,
+        cascade_gate_metric: str = "ipsae",
+        cascade_gate_threshold: float | None = 0.67,
+        cascade_gate_top_n: int | None = None,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
+        foldCascade: bool | None = None,
+        cascadeGateMetric: str | None = None,
+        cascadeGateThreshold: float | None = None,
+        cascadeGateTopN: int | None = None,
         **extra: Any,
     ) -> AsyncJob[GenerationResult]:
         """Async variant of :meth:`Peptides.generate`. See that method for full docs."""
@@ -4192,6 +4283,15 @@ class AsyncPeptides(AsyncResource):
         fold_engines = fold_engines if fold_engines is not None else foldEngines
         fold_per_engine = fold_per_engine if fold_per_engine is not None else foldPerEngine
         fold_shared_msa = fold_shared_msa if fold_shared_msa is not None else foldSharedMsa
+        # Cascade aliases — snake wins (mirrors the sync path).
+        if not fold_cascade and foldCascade is not None:
+            fold_cascade = bool(foldCascade)
+        if cascade_gate_metric == "ipsae" and cascadeGateMetric is not None:
+            cascade_gate_metric = cascadeGateMetric
+        if cascade_gate_threshold == 0.67 and cascadeGateThreshold is not None:
+            cascade_gate_threshold = cascadeGateThreshold
+        if cascade_gate_top_n is None and cascadeGateTopN is not None:
+            cascade_gate_top_n = cascadeGateTopN
         if self._client is not None:
             self._client._require_feature("generate_peptides")
             if _requests_advanced_guidance(
@@ -4262,6 +4362,10 @@ class AsyncPeptides(AsyncResource):
             fold_engines=fold_engines,
             fold_per_engine=fold_per_engine,
             fold_shared_msa=fold_shared_msa,
+            fold_cascade=fold_cascade,
+            cascade_gate_metric=cascade_gate_metric,
+            cascade_gate_threshold=cascade_gate_threshold,
+            cascade_gate_top_n=cascade_gate_top_n,
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}

@@ -26,9 +26,45 @@ camelCase aliases `foldEngines` / `foldPerEngine` / `foldSharedMsa` are accepted
 snake_case wins on conflict. The ensemble auto-fold **bills per engine** and is
 free-pays-credits (any tier with a positive balance), mirroring `cofold()`.
 
+### Added — cascade auto-fold (Boltz-2 gate → ensemble of ipSAE winners)
+
+`Peptides.generate()` (sync + async) gains four further opt-in parameters that
+layer a **two-stage cascade** on top of the ensemble auto-fold:
+
+- `fold_cascade` (`bool`, default `False`) — when `True`, the stratified top-N
+  peptides are folded on **Boltz-2 first** (stage 1); the Boltz-2 winners then
+  run the OTHER selected engines (`fold_engines` MINUS `boltz2`) as stage 2.
+  Boltz-2 is **reused** from stage 1, never re-folded — so it is charged once
+  (stage 1) and only the winners incur the additional per-engine ensemble cost.
+  Requires `boltz2` in `fold_engines` (it is the stage-1 gate); raises
+  `ValueError` otherwise, client- and server-side.
+- `cascade_gate_metric` (`"ipsae"` default | `"iptm"`) — the stage-1 metric used
+  to rank/select winners.
+- `cascade_gate_threshold` (`float | None`, default `0.67`) — winners are stage-1
+  Boltz-2 folds with the gate metric `>=` this value. `None` disables the filter.
+- `cascade_gate_top_n` (`int | None`, default `None`) — when set, take the top-N
+  by gate metric among the threshold-passers; if the threshold filter yields ZERO
+  winners but `cascade_gate_top_n` is set, fall back to the top-N by metric
+  **ignoring** the threshold (so an ensemble always runs on the best N).
+
+camelCase aliases `foldCascade` / `cascadeGateMetric` / `cascadeGateThreshold` /
+`cascadeGateTopN` are accepted; snake_case wins on conflict. Cascade keys
+(`foldCascade` / `cascadeGate*`) are emitted on the wire ONLY when `fold_cascade`
+is truthy.
+
+### Persistence — all trajectories + PAE on the ensemble/cascade path
+
+The ensemble + cascade auto-fold now surfaces **every** trajectory per engine and
+each trajectory's PAE matrix in the `fold_complete` / `ensemble_fold_complete`
+events so the server write-path can persist them (PAE matrices are stored as
+sidecar artifacts with a `pae://<hash>:<rank>` pointer, mirroring the single-fold
+storage pattern — never inlined into a JSON column). `best` remains the headline
+record per engine.
+
 **No behavior change for existing callers.** With `fold_engines` omitted (or set
-to `["boltz2"]`), generation emits no ensemble keys and the Phase-2 auto-fold is
-byte-for-byte the legacy single-Boltz-2 path.
+to `["boltz2"]`) and `fold_cascade` left `False`, generation emits no ensemble or
+cascade keys and the Phase-2 auto-fold is byte-for-byte the legacy single-Boltz-2
+path.
 
 Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
 
