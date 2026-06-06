@@ -16,12 +16,14 @@
           "num_trajectories": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
           "sampling_steps": {"type": "integer", "minimum": 15, "maximum": 1000, "default": 50},
           "fold_strategy": {"type": "string", "enum": ["consolidated", "distributed", "quality_ranked"], "default": "quality_ranked"},
-          "target_chains": {"type": "array", "items": {"type": "string"}, "description": "Restrict design+fold to specific chain(s) of the receptor"},
+          "target_chains": {"type": "array", "items": {"type": "string"}, "description": "Receptor chain IDs to restrict design+fold to. For HOMOMULTIMERS (e.g. TNFRSF19_homotrimer), pass ALL receptor chains so the binder targets the symmetric external ligand-binding pocket on every chain. Call client.structures.analyze(gene, analysis_depth='full') first — the response's homomerChainIds field lists every chain ID to pass here. Restricting to a single chain on a homomer was the pre-2026-05-21 bug that highlighted only chain A."},
           "variant_id": {"type": "integer", "description": "Use a previously-uploaded custom PDB/CIF as the receptor"},
           "quality_guided": {"type": "boolean", "default": false},
           "immunogenicity": {"type": "boolean", "default": false, "description": "Academia+ tier: avoid MHC-binding motifs"},
           "serum_stability": {"type": "boolean", "default": false},
           "cyclic_mode": {"type": "string", "enum": ["disulfide", "lactam", "head_tail_contact"]},
+          "cysteine_mode": {"type": "string", "enum": ["disulfide_only", "stability_only", "terminal_pair", "terminal_only", "exclude", "allow"], "default": "disulfide_only", "description": "Cysteine placement policy (2026-05-21 semantics). 'disulfide_only' and 'stability_only' are aliased: 0 or 2 Cys, signal-driven — penalty curve {0:0, 1:5x, 2:0, 3:5x, >=4:8x}, no logit bias toward Cys; the 2-Cys outcome only emerges when LigandForge's intrachain logits favor it (most peptides return 0 Cys, don't expect every result to carry a disulfide). 'terminal_pair' forces Cys only at positions 0 and len-1 (head-to-tail cyclic). 'terminal_only' allows Cys at either terminus, interior masked. 'exclude' removes Cys everywhere. 'allow' applies no constraint."},
+          "design_intent": {"type": "string", "enum": ["engage_interface", "disrupt_oligomerization"], "default": "engage_interface", "description": "For multimer targets, declare design intent. 'engage_interface' (default): bind the natural physiological ligand-binding face (mimic or inhibit a natural partner). For homomers this is the external solvent-accessible face on each chain (replicated N-fold by symmetry — pass all chain IDs in target_chains). For heteromers this is the chain-chain interface that the natural partner engages. 'disrupt_oligomerization': target the inward-facing chain-chain interface to displace a subunit. Rare; only use when the explicit goal is to dissociate the assembly."},
           "program_id": {"type": "integer"}
         },
         "required": ["gene"]

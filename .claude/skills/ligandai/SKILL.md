@@ -80,7 +80,7 @@ job = client.peptides.generate(
 | `client.jobs` | list, get, cancel, stream, stop_all | `examples/16_programs_sessions_jobs.py` |
 | `client.memory` | save/list/search/delete/recent_activity | `examples/19_msa_memory_reports_diseases.py` |
 | `client.msa` | MSA generation for receptor chains | `examples/19_msa_memory_reports_diseases.py` |
-| `client.peptides` | generate / fold / score / search / list / by-gene / get_elite / fill_until / pocket_for_hotspots / search_by_pocket / estimate_cost / continue_folding / fold_custom_mutation / score_pdb / score_with_ligandiq / analyze_solubility | `examples/02_end_to_end.py`, `examples/04_async_parallel.py`, `examples/06_streaming.py`, `examples/11_generate_hotspot_cascade.py`, `examples/12_peptide_listing_search.py`, `examples/20_parallel_fold_control.py` |
+| `client.peptides` | generate / fold / cofold / score / search / list / by-gene / get_elite / fill_until / pocket_for_hotspots / search_by_pocket / estimate_cost / continue_folding / fold_custom_mutation / score_pdb / score_with_ligandiq / analyze_solubility | `examples/02_end_to_end.py`, `examples/04_async_parallel.py`, `examples/06_streaming.py`, `examples/11_generate_hotspot_cascade.py`, `examples/12_peptide_listing_search.py`, `examples/20_parallel_fold_control.py` |
 | `client.programs` | list, create, get, update, archive, workstreams, sessions | `examples/08_program_list_and_structures.py`, `examples/16_programs_sessions_jobs.py` |
 | `client.proteins` | info / disorder / topology / variants / upload_pdb / glycosylation / save_fold_as_variant | `examples/05_custom_variant.py`, `examples/15_proteins_upload_variants.py` |
 | `client.receptors` | search, list, by_gene, chain_classification, download_pdb, request_fold, oligomeric_states, genes | `examples/01_quickstart.py`, `examples/10_receptors_search_resolve.py` |
@@ -109,6 +109,48 @@ from ligandai.errors import (
 )
 ```
 
+## Multimer & cysteine policy
+
+### Multimer design intent (heteromer vs homomer)
+
+`client.structures.analyze(gene, analysis_depth='full')` returns
+`vacancyIntelligence` with a `multimerType` field (`HOMODIMER`, `HOMOTRIMER`,
+`HETERODIMER`, `MONOMER`, …) and chain classification (`receptorChainIds`,
+`ligandChainIds`). Pick targeting based on **design intent**, not just on
+the assembly type:
+
+| Intent | Heteromultimer | Homomultimer |
+|---|---|---|
+| **Engage the physiological binding interface** (mimic or inhibit a natural partner) | Target the chain-chain interface — the natural partner-binding pocket. `vacancyPairings` lists the exposed contact residues when the ligand chain is removed. | Each chain has its own solvent-accessible binding face pointing OUTWARD. Pocket exists N times by symmetry. Mirror residue highlights across every chain ID; pass them all simultaneously to `highlight_residues`. |
+| **Disrupt oligomerization** (break the assembly itself) | Less common — target where the assembly is held together rather than where the partner binds. | Target the inward-facing chain-chain interface (`homomerInterfacePairs` field). Only use when the explicit design goal is to disrupt the homomer. |
+
+For **HOMOTRIMER** assemblies (e.g. TNFRSF19, TNF-family receptors): default
+to engaging the external ligand-binding face on each chain. The
+`vacancyIntelligence` response includes `homomerChainIds` and
+`symmetricChainMirror` — list every chain ID when calling
+`peptides.generate(target_chains=...)` so the binder is designed against the
+symmetric pocket on all subunits, not just chain A. Andre 2026-05-18: a
+TNFRSF19_homotrimer run that highlighted only chain A is a bug — pass all
+three chains.
+
+### Cysteine policy
+
+`peptides.generate(cysteine_mode=...)` accepts:
+
+- `disulfide_only` / `stability_only` — **0 or 2 Cys, signal-driven.** Penalty
+  curve `{0: 0.0, 1: 5×, 2: 0.0, 3: 5×, ≥4: 8×}`, no logit bias toward Cys.
+  The 2-Cys outcome only emerges when LigandForge's own intrachain logits
+  favor it. Use for linear binders where a natural disulfide may form.
+- `terminal_pair` — Cys forced at positions 0 and `seq_len-1`, 1e9 penalty
+  elsewhere. End-capped only. Use for head-to-tail cyclic peptides.
+- `terminal_only` — Cys allowed at either terminus only (interior masked).
+- `exclude` — no Cys anywhere (free-thiol-sensitive payloads, etc.).
+- `allow` — no constraint (debug / synthesis-side filtering only).
+
+Default is `disulfide_only`. Never expect every peptide to carry 2 Cys — that
+was the pre-2026-05-21 behavior and is now considered a regression. Most
+binders return 0 Cys.
+
 ## Pitfalls
 
 - Don't pass a CIF path to `peptides.generate(gene=...)` — call
@@ -120,3 +162,8 @@ from ligandai.errors import (
   the tier error.
 - Free keys cannot reach `/api/v1/*` paid endpoints — surface the 402 with
   the upgrade URL the server returns.
+- For homomultimer targets, don't restrict `target_chains=` to a single chain
+  unless the user explicitly asks for asymmetric design — pass every receptor
+  chain ID so the symmetric pocket is engaged on all subunits.
+- Don't assume every `cysteine_mode='disulfide_only'` run will produce 2 Cys
+  per peptide — the post-2026-05-21 policy lets the model choose 0 or 2.

@@ -252,8 +252,42 @@ Returns session_id for polling via ligandai_get_job.`,
       },
       cysteine_mode: {
         type: "string",
-        enum: ["disulfide_only", "allow_all", "exclude_all"],
+        enum: ["disulfide_only", "stability_only", "terminal_pair", "terminal_only", "exclude", "allow"],
         default: "disulfide_only",
+        description: "Cysteine placement policy (2026-05-21 semantics): " +
+          "'disulfide_only' / 'stability_only' (aliased) — 0 or 2 Cys, signal-driven. " +
+          "Penalty curve {0:0, 1:5×, 2:0, 3:5×, ≥4:8×}, no logit bias toward Cys; " +
+          "the 2-Cys outcome only emerges when LigandForge's own intrachain logits " +
+          "favor it. Most peptides return 0 Cys — don't assume every result will carry a disulfide. " +
+          "'terminal_pair' — Cys forced at positions 0 and len-1 only (cyclic head-to-tail). " +
+          "'terminal_only' — Cys allowed at either terminus, interior masked. " +
+          "'exclude' — no Cys anywhere. 'allow' — no constraint.",
+      },
+      target_chains: {
+        type: "array",
+        items: { type: "string" },
+        description: "Receptor chain IDs to restrict design to. For HOMOMULTIMER " +
+          "targets (e.g. TNFRSF19_homotrimer), pass ALL receptor chains " +
+          "(e.g. ['A','B','C']) so the binder is designed against the symmetric " +
+          "external ligand-binding pocket on every chain — restricting to one " +
+          "chain only ('A') was the pre-2026-05-21 default and produced asymmetric " +
+          "highlights that missed equivalent pockets on B/C. Call " +
+          "structures.analyze(gene, analysis_depth='full') first; the response " +
+          "includes homomerChainIds and symmetricChainMirror — pass that list here.",
+      },
+      design_intent: {
+        type: "string",
+        enum: ["engage_interface", "disrupt_oligomerization"],
+        default: "engage_interface",
+        description: "For multimer targets, declare the design intent. " +
+          "'engage_interface' (default) — bind the natural physiological " +
+          "ligand-binding face (mimic or inhibit a natural partner interaction). " +
+          "For homomers this is the external solvent-accessible face on each chain " +
+          "(replicated N× by symmetry); for heteromers this is the chain-chain " +
+          "interface that the natural partner engages. " +
+          "'disrupt_oligomerization' — target the inward-facing chain-chain interface " +
+          "of a homomer to displace a subunit and break the assembly. Rare; only use " +
+          "when the explicit goal is to dissociate the oligomer.",
       },
       program_id: { type: "integer", description: "Associate with program workstream" },
     },
