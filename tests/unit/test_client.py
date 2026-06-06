@@ -73,8 +73,8 @@ def test_max_peptides_per_generation_by_tier() -> None:
 
 
 def test_folding_gpu_caps_by_tier() -> None:
-    assert LigandAI(api_key="lgai_free_x").max_concurrent_gpu_slots == 1
-    assert LigandAI(api_key="lgai_basic_x").max_concurrent_gpu_slots == 4
+    assert LigandAI(api_key="lgai_free_x").max_concurrent_gpu_slots == 4
+    assert LigandAI(api_key="lgai_basic_x").max_concurrent_gpu_slots == 8
     assert LigandAI(api_key="lgai_edu_x").max_concurrent_gpu_slots == 16
     assert LigandAI(api_key="lgai_pro_x").max_concurrent_gpu_slots == 25
     assert LigandAI(api_key="lgai_ent_x").max_concurrent_gpu_slots == 50

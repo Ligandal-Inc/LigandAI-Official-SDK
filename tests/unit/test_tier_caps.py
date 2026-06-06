@@ -47,10 +47,13 @@ def _batch_response_factory():
     return make_response
 
 
-class TestBasicTierCap:
-    """basic tier — TIER_GPU_SLOTS['basic'] == 4."""
+_BASIC_FILL_GENES = ["EGFR", "HER2", "TNF", "IL6R", "VEGFA", "KRAS", "MYC", "TP53"]
 
-    def test_cap_blocks_fifth_distinct_submit(self, tmp_ligandai_home) -> None:
+
+class TestBasicTierCap:
+    """basic tier — TIER_GPU_SLOTS['basic'] == 8."""
+
+    def test_cap_blocks_ninth_distinct_submit(self, tmp_ligandai_home) -> None:
         with respx.mock(base_url="http://api.ligandai.test", assert_all_called=False) as rmock:
             rmock.get("/api/credits").mock(return_value=httpx.Response(
                 200, json={"balance": 1_000_000, "is_unlimited": False},
@@ -65,9 +68,9 @@ class TestBasicTierCap:
             try:
                 assert c.tier == "basic"
                 cap = TIER_GPU_SLOTS["basic"]
-                assert cap == 4
+                assert cap == 8
 
-                for gene in ["EGFR", "HER2", "TNF", "IL6R"]:
+                for gene in _BASIC_FILL_GENES:
                     c.fold_batch(
                         peptides=["ACDE"], target_gene=gene,
                         diffusion_samples=1, sampling_steps=50,
@@ -75,11 +78,11 @@ class TestBasicTierCap:
 
                 with pytest.raises(LigandAIConcurrencyLimit) as ei:
                     c.fold_batch(
-                        peptides=["ACDE"], target_gene="VEGFA",
+                        peptides=["ACDE"], target_gene="PTEN",
                         diffusion_samples=1, sampling_steps=50,
                     )
-                assert ei.value.in_flight == 4
-                assert ei.value.limit == 4
+                assert ei.value.in_flight == 8
+                assert ei.value.limit == 8
             finally:
                 c.close()
 
@@ -96,12 +99,12 @@ class TestBasicTierCap:
                 base_url="http://api.ligandai.test", max_retries=1,
             )
             try:
-                for gene in ["EGFR", "HER2", "TNF", "IL6R"]:
+                for gene in _BASIC_FILL_GENES:
                     c.fold_batch(
                         peptides=["ACDE"], target_gene=gene,
                         diffusion_samples=1, sampling_steps=50,
                     )
-                assert posted.call_count == 4
+                assert posted.call_count == 8
 
                 # Release one slot by completing EGFR.
                 rec = receptor_seq_for_hash(
@@ -123,18 +126,18 @@ class TestBasicTierCap:
 
                 # Slot is free — a NEW distinct submit succeeds.
                 c.fold_batch(
-                    peptides=["ACDE"], target_gene="VEGFA",
+                    peptides=["ACDE"], target_gene="PTEN",
                     diffusion_samples=1, sampling_steps=50,
                 )
-                assert posted.call_count == 5
+                assert posted.call_count == 9
             finally:
                 c.close()
 
 
 class TestFreeTierCap:
-    """free tier — TIER_GPU_SLOTS['free'] == 1."""
+    """free tier — TIER_GPU_SLOTS['free'] == 4."""
 
-    def test_second_distinct_submit_blocked(self, tmp_ligandai_home) -> None:
+    def test_fifth_distinct_submit_blocked(self, tmp_ligandai_home) -> None:
         with respx.mock(base_url="http://api.ligandai.test", assert_all_called=False) as rmock:
             rmock.get("/api/credits").mock(return_value=httpx.Response(
                 200, json={"balance": 1_000_000, "is_unlimited": False},
@@ -148,18 +151,19 @@ class TestFreeTierCap:
             )
             try:
                 assert c.tier == "free"
-                assert TIER_GPU_SLOTS["free"] == 1
-                c.fold_batch(
-                    peptides=["ACDE"], target_gene="EGFR",
-                    diffusion_samples=1, sampling_steps=50,
-                )
-                with pytest.raises(LigandAIConcurrencyLimit) as ei:
+                assert TIER_GPU_SLOTS["free"] == 4
+                for gene in ["EGFR", "HER2", "TNF", "IL6R"]:
                     c.fold_batch(
-                        peptides=["ACDE"], target_gene="HER2",
+                        peptides=["ACDE"], target_gene=gene,
                         diffusion_samples=1, sampling_steps=50,
                     )
-                assert ei.value.in_flight == 1
-                assert ei.value.limit == 1
+                with pytest.raises(LigandAIConcurrencyLimit) as ei:
+                    c.fold_batch(
+                        peptides=["ACDE"], target_gene="VEGFA",
+                        diffusion_samples=1, sampling_steps=50,
+                    )
+                assert ei.value.in_flight == 4
+                assert ei.value.limit == 4
             finally:
                 c.close()
 
