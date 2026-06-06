@@ -111,8 +111,8 @@ DEFAULT_TRAJECTORIES: int = 4
 # Folding GPU caps by tier. Generation is submitted as a one-GPU job; these caps
 # apply to folding and parallel fold batches.
 TIER_GPU_SLOTS: dict[Tier, int] = {
-    "free": 1,
-    "basic": 4,
+    "free": 4,
+    "basic": 8,
     "academia": 16,
     "pro": 25,
     "enterprise": 50,

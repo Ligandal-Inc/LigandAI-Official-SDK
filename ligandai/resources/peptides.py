@@ -816,6 +816,121 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     )
 
 
+# ─── Ensemble co-fold helpers (cofold) ──────────────────────────────────────
+#
+# The ensemble co-fold surface (POST /api/v1/cofold/start) folds the SAME chains
+# on 1-4 engines (esmfold2, boltz2, protenix, openfold3) in parallel. MSA is a
+# single shared control for the whole ensemble (our-own MSA server) — there is
+# NO per-engine MSA setting. Any MSA key in ``per_engine`` is rejected here,
+# client-side, BEFORE the request reaches the wire (the server strips again).
+
+#: Known ensemble engines (canonical lowercase). Mirrors the server.
+COFOLD_ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3")
+
+#: MSA keys never permitted in a per-engine override. Mirrors the server-side
+#: ``FORBIDDEN_PER_ENGINE_MSA_KEYS`` — MSA is shared, never per-engine.
+_COFOLD_FORBIDDEN_PER_ENGINE_MSA_KEYS = frozenset({
+    "msa", "msa_csv", "use_msa_server", "msa_server_mode",
+    "precomputed_msa_dir", "main_msa_file_paths", "pairedMsaPath",
+    "unpairedMsaPath", "msa_mode", "msa_server",
+})
+
+
+def _cofold_normalize_engines(engines: list[str] | tuple[str, ...]) -> list[str]:
+    """Validate + de-dupe (preserving order) the requested engine list."""
+    if not engines:
+        raise ValueError(
+            "engines required (1-4 of: esmfold2, boltz2, protenix, openfold3)"
+        )
+    seen: set[str] = set()
+    out: list[str] = []
+    for e in engines:
+        el = str(e).strip().lower()
+        if el not in COFOLD_ENGINES:
+            raise ValueError(
+                f"unknown engine '{e}'; known={list(COFOLD_ENGINES)}"
+            )
+        if el not in seen:
+            seen.add(el)
+            out.append(el)
+    if len(out) > 4:
+        raise ValueError("at most 4 engines per ensemble")
+    return out
+
+
+def _cofold_chains(chains: list[Any]) -> list[dict[str, Any]]:
+    """Coerce chain inputs into the server ChainSpec shape:
+    ``{"id", "sequence", "kind": "receptor"|"peptide"}``.
+
+    Accepts ``Sequence`` objects, bare AA strings, or dicts. A bare string with
+    no ``kind`` defaults to ``receptor`` unless it is the LAST chain in a
+    multi-chain payload, in which case it defaults to ``peptide`` (the canonical
+    receptor-then-peptide ordering). Per-chain MSA is NOT accepted — MSA is the
+    shared control.
+    """
+    if not isinstance(chains, list) or not chains:
+        raise ValueError("chains must be a non-empty list")
+    n = len(chains)
+    out: list[dict[str, Any]] = []
+    for i, c in enumerate(chains):
+        d = _norm_seq(c)  # {sequence, name?, geneName?, chainId?}
+        seq = str(d.get("sequence") or "").strip()
+        if not seq:
+            raise ValueError(f"chains[{i}] has no sequence")
+        cid = d.get("chainId") or d.get("id") or chr(ord("A") + i)
+        kind = str(d.get("kind") or "").strip().lower()
+        if kind not in ("receptor", "peptide"):
+            # Default: last chain in a multi-chain complex is the peptide.
+            kind = "peptide" if (n >= 2 and i == n - 1) else "receptor"
+        # Drop any MSA key a caller put on the chain dict — MSA is shared.
+        out.append({"id": str(cid), "sequence": seq, "kind": kind})
+    return out
+
+
+def _cofold_sanitize_per_engine(
+    per_engine: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Reject any MSA key inside a per-engine override (raises), then return the
+    cleaned map. MSA is shared + server-enforced; engines never accept an MSA
+    override from callers."""
+    if not per_engine:
+        return {}
+    if not isinstance(per_engine, dict):
+        raise TypeError("per_engine must be a dict of {engine: {settings}}")
+    clean: dict[str, Any] = {}
+    for engine, settings in per_engine.items():
+        el = str(engine).strip().lower()
+        if el not in COFOLD_ENGINES:
+            raise ValueError(
+                f"per_engine has unknown engine '{engine}'; "
+                f"known={list(COFOLD_ENGINES)}"
+            )
+        if not isinstance(settings, dict):
+            clean[el] = settings
+            continue
+        bad = [k for k in settings if k in _COFOLD_FORBIDDEN_PER_ENGINE_MSA_KEYS]
+        if bad:
+            raise ValueError(
+                f"per_engine['{engine}'] may not set MSA keys {bad} — MSA is a "
+                f"single shared control (shared_msa), not per-engine."
+            )
+        clean[el] = dict(settings)
+    return clean
+
+
+def _parse_cofold(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pass-through parser for an ensemble co-fold status payload.
+
+    The co-fold result is a multi-engine record (``result.engines`` keyed by
+    engine, plus ``result.summary`` / ``result.billing``); there is no single
+    :class:`FoldResult` to coerce to, so we return the server payload's terminal
+    ``result`` (falling back to the whole payload)."""
+    if not isinstance(payload, dict):
+        return {}
+    result = payload.get("result")
+    return result if isinstance(result, dict) else payload
+
+
 # ─── Batch fold helpers (v0.5.5) ────────────────────────────────────────────
 
 # The batch-fold endpoint takes either bare AA strings or FASTA blocks. The
@@ -2755,6 +2870,130 @@ class Peptides(Resource):
             sampling_steps=int(payload.get("sampling_steps") or sampling_steps),
         )
 
+    def cofold(
+        self,
+        chains: list[Sequence | str | dict[str, Any]],
+        engines: list[str] = ["boltz2"],
+        *,
+        per_engine: dict[str, Any] | None = None,
+        shared_msa: str | dict[str, Any] | None = None,
+        run_deltaforge: bool = True,
+        length_bin: str | None = None,
+        gene: str | None = None,
+        include_structures: bool = False,
+        audit_id: str | None = None,
+        # camelCase aliases (accepted; snake_case wins on conflict)
+        perEngine: dict[str, Any] | None = None,
+        sharedMsa: str | dict[str, Any] | None = None,
+        runDeltaforge: bool | None = None,
+        lengthBin: str | None = None,
+        includeStructures: bool | None = None,
+        auditId: str | None = None,
+    ) -> "Job[dict[str, Any]]":
+        """Ensemble co-fold — fold the SAME chains on 1-4 engines in parallel.
+
+        Each engine runs in its own single-B200 container; the result is a
+        per-engine record (canonical scores best-of + ranges) plus an optional
+        DeltaForge v10.2 score on each engine's best structure.
+
+        Args:
+            chains: 1-8 chains. Receptor chain(s) first, peptide last (a bare
+                string or dict with no ``kind`` defaults to ``peptide`` when it
+                is the last of a multi-chain payload, else ``receptor``).
+            engines: 1-4 of ``esmfold2``, ``boltz2``, ``protenix``,
+                ``openfold3``.
+            per_engine: NON-MSA setting overrides keyed by engine. **MSA keys
+                are rejected** — MSA is a single shared control (``shared_msa``),
+                never per-engine.
+            shared_msa: ONE shared-MSA control for the whole ensemble. Either a
+                mode string (``"auto"`` = compute/look up OUR-OWN MSA once on the
+                receptor chains and hand the same MSA to every engine, the
+                default; ``"none"`` = single-sequence for every engine) or a dict
+                ``{"mode": "auto"|"none"}``. NEVER an external/public MSA server.
+            run_deltaforge: Score each engine's best structure with DeltaForge
+                v10.2 (default ``True``).
+            gene: Optional HGNC symbol for labelling + MSA lookup.
+            include_structures: Include mmCIF/PDB text inline in the records
+                (default ``False`` keeps poll payloads small).
+
+        Returns:
+            A :class:`~ligandai.jobs.Job` polling ``/api/v1/cofold/{job_id}/
+            status``. ``job.result()`` returns the multi-engine result dict
+            (``engines``, ``summary``, ``billing``).
+
+        Free-pays-credits — any tier (including free) may submit a co-fold as
+        long as the account has a positive credit balance; the server reserves
+        the per-engine credit estimate and rejects a zero-balance caller with
+        HTTP 402. Refs: bd-LIGANDAI_ALPHA_V2-7wfnp
+        """
+        # Resolve camelCase aliases — snake_case wins when both are supplied.
+        per_engine = per_engine if per_engine is not None else perEngine
+        shared_msa = shared_msa if shared_msa is not None else sharedMsa
+        if runDeltaforge is not None and run_deltaforge is True:
+            run_deltaforge = runDeltaforge
+        length_bin = length_bin if length_bin is not None else lengthBin
+        if includeStructures is not None and include_structures is False:
+            include_structures = includeStructures
+        audit_id = audit_id if audit_id is not None else auditId
+
+        # Folding (incl. ensemble co-fold) is free-pays-credits: free keys with a
+        # positive credit balance may submit. The server enforces the balance
+        # (gpuSubmitGuard) — no client-side tier gate here. Refs:
+        # bd-LIGANDAI_ALPHA_V2-7wfnp
+
+        norm_engines = _cofold_normalize_engines(engines)
+        norm_chains = _cofold_chains(chains)
+        clean_per_engine = _cofold_sanitize_per_engine(per_engine)
+
+        # Normalize the shared-MSA control to {"mode": "auto"|"none"}.
+        if shared_msa is None:
+            shared_msa_spec: dict[str, Any] = {"mode": "auto"}
+        elif isinstance(shared_msa, str):
+            mode = shared_msa.strip().lower()
+            if mode not in ("auto", "none"):
+                raise ValueError("shared_msa must be 'auto' or 'none'")
+            shared_msa_spec = {"mode": mode}
+        elif isinstance(shared_msa, dict):
+            mode = str(shared_msa.get("mode", "auto")).strip().lower()
+            if mode not in ("auto", "none"):
+                raise ValueError("shared_msa.mode must be 'auto' or 'none'")
+            shared_msa_spec = {"mode": mode}
+        else:
+            raise TypeError("shared_msa must be a str ('auto'|'none') or a dict")
+
+        body: dict[str, Any] = {
+            "chains": norm_chains,
+            "engines": norm_engines,
+            "shared_msa": shared_msa_spec,
+            "run_deltaforge": bool(run_deltaforge),
+            "include_structures": bool(include_structures),
+        }
+        if clean_per_engine:
+            body["per_engine"] = clean_per_engine
+        if length_bin is not None:
+            body["length_bin"] = length_bin
+        if gene is not None:
+            body["gene"] = gene
+        if audit_id is not None:
+            body["audit_id"] = audit_id
+
+        payload = self._transport.request("POST", "/api/v1/cofold/start", json=body) or {}
+        job_id = payload.get("job_id") or payload.get("jobId") or payload.get("id") or ""
+        if not job_id:
+            raise LigandAIError(
+                "Server did not return a job_id for cofold", response=payload
+            )
+        return Job(
+            self._transport,
+            str(job_id),
+            job_type="cofold",
+            parser=_parse_cofold,
+            status_path="/api/v1/cofold/{job_id}/status",
+            cancel_path="/api/v1/cofold/{job_id}/cancel",
+            sse_path="/api/v1/cofold/{job_id}/stream",
+            initial={"id": str(job_id), "type": "cofold", "status": "queued", **payload},
+        )
+
     def _fold_batch_grouped(
         self,
         *,
@@ -4140,6 +4379,97 @@ class AsyncPeptides(AsyncResource):
             cancel_path="/api/folding/jobs/{job_id}",
             sse_path="/api/folding/jobs/{job_id}/logs/stream",
             initial={"id": job_id, "type": "folding", "status": "queued", **payload},
+        )
+
+    async def cofold(
+        self,
+        chains: list[Sequence | str | dict[str, Any]],
+        engines: list[str] = ["boltz2"],
+        *,
+        per_engine: dict[str, Any] | None = None,
+        shared_msa: str | dict[str, Any] | None = None,
+        run_deltaforge: bool = True,
+        length_bin: str | None = None,
+        gene: str | None = None,
+        include_structures: bool = False,
+        audit_id: str | None = None,
+        # camelCase aliases (accepted; snake_case wins on conflict)
+        perEngine: dict[str, Any] | None = None,
+        sharedMsa: str | dict[str, Any] | None = None,
+        runDeltaforge: bool | None = None,
+        lengthBin: str | None = None,
+        includeStructures: bool | None = None,
+        auditId: str | None = None,
+    ) -> "AsyncJob[dict[str, Any]]":
+        """Async ensemble co-fold — see :meth:`Peptides.cofold`.
+
+        Free-pays-credits (any tier with a positive balance; server reserves the
+        per-engine estimate and 402s a zero-balance caller). MSA is a single
+        shared control (``shared_msa``); per-engine MSA keys are rejected
+        client-side. Refs: bd-LIGANDAI_ALPHA_V2-7wfnp
+        """
+        per_engine = per_engine if per_engine is not None else perEngine
+        shared_msa = shared_msa if shared_msa is not None else sharedMsa
+        if runDeltaforge is not None and run_deltaforge is True:
+            run_deltaforge = runDeltaforge
+        length_bin = length_bin if length_bin is not None else lengthBin
+        if includeStructures is not None and include_structures is False:
+            include_structures = includeStructures
+        audit_id = audit_id if audit_id is not None else auditId
+
+        # Folding is free-pays-credits — server (gpuSubmitGuard) enforces the
+        # credit balance; no client-side tier gate. Refs: bd-LIGANDAI_ALPHA_V2-7wfnp
+
+        norm_engines = _cofold_normalize_engines(engines)
+        norm_chains = _cofold_chains(chains)
+        clean_per_engine = _cofold_sanitize_per_engine(per_engine)
+
+        if shared_msa is None:
+            shared_msa_spec: dict[str, Any] = {"mode": "auto"}
+        elif isinstance(shared_msa, str):
+            mode = shared_msa.strip().lower()
+            if mode not in ("auto", "none"):
+                raise ValueError("shared_msa must be 'auto' or 'none'")
+            shared_msa_spec = {"mode": mode}
+        elif isinstance(shared_msa, dict):
+            mode = str(shared_msa.get("mode", "auto")).strip().lower()
+            if mode not in ("auto", "none"):
+                raise ValueError("shared_msa.mode must be 'auto' or 'none'")
+            shared_msa_spec = {"mode": mode}
+        else:
+            raise TypeError("shared_msa must be a str ('auto'|'none') or a dict")
+
+        body: dict[str, Any] = {
+            "chains": norm_chains,
+            "engines": norm_engines,
+            "shared_msa": shared_msa_spec,
+            "run_deltaforge": bool(run_deltaforge),
+            "include_structures": bool(include_structures),
+        }
+        if clean_per_engine:
+            body["per_engine"] = clean_per_engine
+        if length_bin is not None:
+            body["length_bin"] = length_bin
+        if gene is not None:
+            body["gene"] = gene
+        if audit_id is not None:
+            body["audit_id"] = audit_id
+
+        payload = await self._transport.request("POST", "/api/v1/cofold/start", json=body) or {}
+        job_id = payload.get("job_id") or payload.get("jobId") or payload.get("id") or ""
+        if not job_id:
+            raise LigandAIError(
+                "Server did not return a job_id for cofold", response=payload
+            )
+        return AsyncJob(
+            self._transport,
+            str(job_id),
+            job_type="cofold",
+            parser=_parse_cofold,
+            status_path="/api/v1/cofold/{job_id}/status",
+            cancel_path="/api/v1/cofold/{job_id}/cancel",
+            sse_path="/api/v1/cofold/{job_id}/stream",
+            initial={"id": str(job_id), "type": "cofold", "status": "queued", **payload},
         )
 
     async def fold_batch(
