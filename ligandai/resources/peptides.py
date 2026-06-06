@@ -355,6 +355,12 @@ def _generation_body(
     segment_config: SegmentConfig | dict | None,
     pdc_config: PdcConfig | dict | None,
     ec_trimming_config: EcTrimmingConfig | dict | None,
+    # Ensemble auto-fold (v0.6.7) — opt-in multi-engine Phase-2 auto-fold. When
+    # absent / single-Boltz-2, the legacy single-engine auto-fold path runs
+    # unchanged (no ensemble keys are emitted). Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+    fold_engines: list[str] | None,
+    fold_per_engine: dict[str, Any] | None,
+    fold_shared_msa: str | dict[str, Any] | None,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
     # Auto-resolve targeting_strategy when not explicitly set:
@@ -521,6 +527,44 @@ def _generation_body(
             body["autoConformationExpansion"] = True
             body["enableExpansion"] = True
             body["foldPartnerMode"] = "all_conformations"
+
+    # Ensemble auto-fold (v0.6.7). Reuse the exact cofold validation helpers so
+    # there is one engine/per-engine/shared-MSA validation surface. The legacy
+    # single-Boltz-2 auto-fold is preserved byte-for-byte: keys are emitted ONLY
+    # when the request resolves to a REAL ensemble (>1 engine, or any engine that
+    # is not boltz2). ``fold_engines=None`` or ``["boltz2"]`` emits NOTHING.
+    # Bills PER ENGINE, free-pays-credits (any tier with a positive balance),
+    # mirroring ``cofold()``. Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+    if fold_engines:
+        norm_fold_engines = _cofold_normalize_engines(fold_engines)
+        is_real_ensemble = (
+            len(norm_fold_engines) > 1
+            or any(e != "boltz2" for e in norm_fold_engines)
+        )
+        if is_real_ensemble:
+            body["foldEngines"] = norm_fold_engines
+            clean_fold_per_engine = _cofold_sanitize_per_engine(fold_per_engine)
+            if clean_fold_per_engine:
+                body["foldPerEngine"] = clean_fold_per_engine
+            # Single shared OUR-OWN MSA for the whole ensemble; never per-engine,
+            # never external. Normalize to {"mode": "auto"|"none"} exactly as
+            # ``cofold()`` does (default "auto").
+            if fold_shared_msa is None:
+                body["foldSharedMsa"] = {"mode": "auto"}
+            elif isinstance(fold_shared_msa, str):
+                _msa_mode = fold_shared_msa.strip().lower()
+                if _msa_mode not in ("auto", "none"):
+                    raise ValueError("fold_shared_msa must be 'auto' or 'none'")
+                body["foldSharedMsa"] = {"mode": _msa_mode}
+            elif isinstance(fold_shared_msa, dict):
+                _msa_mode = str(fold_shared_msa.get("mode", "auto")).strip().lower()
+                if _msa_mode not in ("auto", "none"):
+                    raise ValueError("fold_shared_msa.mode must be 'auto' or 'none'")
+                body["foldSharedMsa"] = {"mode": _msa_mode}
+            else:
+                raise TypeError(
+                    "fold_shared_msa must be a str ('auto'|'none') or a dict"
+                )
 
     if extra:
         body.update(extra)
@@ -2065,6 +2109,18 @@ class Peptides(Resource):
         segment_config: SegmentConfig | dict | None = None,
         pdc_config: PdcConfig | dict | None = None,
         ec_trimming_config: EcTrimmingConfig | dict | None = None,
+        # Ensemble auto-fold (v0.6.7). Default None = legacy single-Boltz-2
+        # auto-fold (unchanged). Provide >=2 engines, or any engine other than
+        # boltz2, to run the Phase-2 auto-fold of each top-N peptide on an
+        # ENSEMBLE of engines with per-engine settings + a single shared
+        # OUR-OWN MSA. camelCase aliases foldEngines/foldPerEngine/foldSharedMsa
+        # accepted; snake_case wins on conflict. Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+        fold_engines: list[str] | None = None,
+        fold_per_engine: dict[str, Any] | None = None,
+        fold_shared_msa: str | dict[str, Any] | None = None,
+        foldEngines: list[str] | None = None,
+        foldPerEngine: dict[str, Any] | None = None,
+        foldSharedMsa: str | dict[str, Any] | None = None,
         **extra: Any,
     ) -> Job[GenerationResult]:
         """Submit a peptide generation job. Returns a :class:`Job`.
@@ -2151,7 +2207,30 @@ class Peptides(Resource):
             md_relaxation_enabled: Enable MD relaxation when server-supported.
             num_trajectories: Diffusion samples / trajectories per folded
                 peptide. ReceptorDB defaults to 4; set 1 to reduce runtime.
+            fold_engines: Opt-in ENSEMBLE auto-fold. ``None`` (default) or
+                ``["boltz2"]`` keeps the legacy single-Boltz-2 Phase-2 auto-fold
+                unchanged. Provide 1-4 of ``esmfold2``/``boltz2``/``protenix``/
+                ``openfold3`` (a list with >1 engine, or any engine other than
+                boltz2) to fold each top-N peptide × conformation on every listed
+                engine. Each engine **bills separately** (free-pays-credits — any
+                tier with a positive credit balance may run it; a zero-balance
+                caller is rejected the same way the single path is), mirroring
+                :meth:`cofold`.
+            fold_per_engine: NON-MSA per-engine setting overrides for the
+                ensemble auto-fold, keyed by engine. **MSA keys are rejected** —
+                MSA is a single shared control (``fold_shared_msa``), never
+                per-engine. Ignored unless ``fold_engines`` resolves to a real
+                ensemble.
+            fold_shared_msa: ONE shared-MSA control for the ensemble auto-fold.
+                A mode string (``"auto"`` = compute/look up OUR-OWN MSA once on
+                the receptor chains and hand the same MSA to every engine, the
+                default; ``"none"`` = single-sequence for every engine) or a dict
+                ``{"mode": "auto"|"none"}``. NEVER an external/public MSA server.
         """
+        # Resolve camelCase aliases — snake_case wins when both are supplied.
+        fold_engines = fold_engines if fold_engines is not None else foldEngines
+        fold_per_engine = fold_per_engine if fold_per_engine is not None else foldPerEngine
+        fold_shared_msa = fold_shared_msa if fold_shared_msa is not None else foldSharedMsa
         if self._client is not None:
             self._client._require_feature("generate_peptides")
             if _requests_advanced_guidance(
@@ -2219,6 +2298,9 @@ class Peptides(Resource):
             segment_config=segment_config,
             pdc_config=pdc_config,
             ec_trimming_config=ec_trimming_config,
+            fold_engines=fold_engines,
+            fold_per_engine=fold_per_engine,
+            fold_shared_msa=fold_shared_msa,
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -4094,9 +4176,22 @@ class AsyncPeptides(AsyncResource):
         segment_config: SegmentConfig | dict | None = None,
         pdc_config: PdcConfig | dict | None = None,
         ec_trimming_config: EcTrimmingConfig | dict | None = None,
+        # Ensemble auto-fold (v0.6.7) — see :meth:`Peptides.generate` for docs.
+        # Default None = legacy single-Boltz-2 auto-fold (unchanged). camelCase
+        # aliases accepted; snake_case wins. Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+        fold_engines: list[str] | None = None,
+        fold_per_engine: dict[str, Any] | None = None,
+        fold_shared_msa: str | dict[str, Any] | None = None,
+        foldEngines: list[str] | None = None,
+        foldPerEngine: dict[str, Any] | None = None,
+        foldSharedMsa: str | dict[str, Any] | None = None,
         **extra: Any,
     ) -> AsyncJob[GenerationResult]:
         """Async variant of :meth:`Peptides.generate`. See that method for full docs."""
+        # Resolve camelCase aliases — snake_case wins when both are supplied.
+        fold_engines = fold_engines if fold_engines is not None else foldEngines
+        fold_per_engine = fold_per_engine if fold_per_engine is not None else foldPerEngine
+        fold_shared_msa = fold_shared_msa if fold_shared_msa is not None else foldSharedMsa
         if self._client is not None:
             self._client._require_feature("generate_peptides")
             if _requests_advanced_guidance(
@@ -4164,6 +4259,9 @@ class AsyncPeptides(AsyncResource):
             segment_config=segment_config,
             pdc_config=pdc_config,
             ec_trimming_config=ec_trimming_config,
+            fold_engines=fold_engines,
+            fold_per_engine=fold_per_engine,
+            fold_shared_msa=fold_shared_msa,
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}

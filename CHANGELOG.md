@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.7] - 2026-06-06
+
+### Added — ensemble auto-fold for generation (Phase-2)
+
+`Peptides.generate()` (sync + async) gains three opt-in parameters that extend
+the already-shipped ensemble co-fold capability into the LigandForge generation
+path's Phase-2 auto-fold:
+
+- `fold_engines` — 1-4 of `esmfold2` / `boltz2` / `protenix` / `openfold3`.
+  When this resolves to a real ensemble (more than one engine, or any engine
+  other than `boltz2`), each top-N peptide × conformation is auto-folded on
+  **every** listed engine instead of single-Boltz-2.
+- `fold_per_engine` — NON-MSA per-engine setting overrides, keyed by engine.
+  MSA keys are rejected (MSA is a single shared control, never per-engine).
+- `fold_shared_msa` — one shared OUR-OWN MSA control for the whole ensemble
+  (`"auto"` default, or `"none"`); never an external/public MSA server.
+
+camelCase aliases `foldEngines` / `foldPerEngine` / `foldSharedMsa` are accepted;
+snake_case wins on conflict. The ensemble auto-fold **bills per engine** and is
+free-pays-credits (any tier with a positive balance), mirroring `cofold()`.
+
+**No behavior change for existing callers.** With `fold_engines` omitted (or set
+to `["boltz2"]`), generation emits no ensemble keys and the Phase-2 auto-fold is
+byte-for-byte the legacy single-Boltz-2 path.
+
+Refs: bd-LIGANDAI_ALPHA_V2-7y1uh
+
 ## [0.6.5] - 2026-06-04
 
 ### Changed (behavior) — generation + folding now default to physics-potentials ON
