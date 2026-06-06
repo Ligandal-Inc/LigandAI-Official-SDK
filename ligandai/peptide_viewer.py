@@ -658,6 +658,307 @@ def _dist2(a: tuple[float, float, float], b: tuple[float, float, float]) -> floa
     return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
 
 
+def build_comparison_summary(
+    candidates: list[PeptideCandidate],
+    metrics: tuple[str, ...] = ("iptm", "ipsae", "ptm", "plddt", "deltaforge"),
+) -> dict[str, Any]:
+    """Assemble the multi-engine comparison summary — RAW is never adjusted.
+
+    Every number is computed in PYTHON here, at write-time, from
+    :mod:`ligandai.fold_calibration`. Raw scores are carried through unchanged;
+    the only cross-engine footing is the within-engine percentile (where a raw
+    value sits in THAT engine's own distribution of the user's folds). The
+    returned structure carries, per metric:
+
+    - ``best_per_engine`` — the best RAW fold within each engine (ranked on raw,
+      respecting the metric direction). Each entry carries its within-engine
+      percentile + label as an annotation.
+    - ``best_aggregate`` — the engine whose best fold has the highest mean
+      within-engine percentile (consensus standing), NOT averaged raw and NOT a
+      rescaled score. The raw value backing it is shown.
+    - ``agreement`` — from :func:`ligandai.fold_calibration.engine_agreement`,
+      judged on percentile spread, so it surfaces "high raw spread but engines
+      agree on standing" and the inverse.
+
+    DeltaForge dG is reported per engine with its own within-engine standing
+    (no shared band). The browser only renders these precomputed fields — it
+    never recomputes a percentile.
+    """
+    from ligandai.fold_calibration import (
+        METRIC_META,
+        build_distributions,
+        engine_agreement,
+        normalize_engine,
+        normalize_metric,
+        standing,
+    )
+
+    canonical_metrics = [normalize_metric(metric) for metric in metrics]
+
+    # Build within-engine distributions from the user's own folds. One record
+    # per (candidate, metric) carrying the raw value the engine reported.
+    distribution_records: list[dict[str, Any]] = []
+    for candidate in candidates:
+        engine = normalize_engine(_candidate_engine(candidate))
+        record: dict[str, Any] = {"engine": engine}
+        for metric in canonical_metrics:
+            if metric not in METRIC_META:
+                continue
+            raw = candidate.score(metric)
+            if raw is not None:
+                record[metric] = raw
+        distribution_records.append(record)
+    distributions = build_distributions(distribution_records, metrics=tuple(canonical_metrics))
+
+    def _entry(engine: str, metric: str, raw: float, candidate_id: str, sequence: str) -> dict[str, Any]:
+        info = standing(distributions, engine, metric, raw)
+        return {
+            "raw": raw,  # unchanged, byte-identical to what the engine reported
+            "percentile": info.percentile if info else None,
+            "label": info.label if info else None,
+            "n": info.n if info else 0,
+            "candidate_id": candidate_id,
+            "sequence": sequence,
+        }
+
+    # records[seq][metric][engine] -> best RAW entry (per metric direction).
+    records: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+    sequences: list[str] = []
+    for candidate in candidates:
+        sequence = candidate.sequence or candidate.id
+        engine = normalize_engine(_candidate_engine(candidate))
+        if sequence not in records:
+            records[sequence] = {}
+            sequences.append(sequence)
+        for metric in canonical_metrics:
+            meta = METRIC_META.get(metric)
+            if meta is None:
+                continue
+            raw = candidate.score(metric)
+            if raw is None:
+                continue
+            higher_is_better = meta.higher_is_better
+            slot = records[sequence].setdefault(metric, {})
+            existing = slot.get(engine)
+            keep = (
+                existing is None
+                or (higher_is_better and raw > existing["raw"])
+                or (not higher_is_better and raw < existing["raw"])
+            )
+            if keep:
+                slot[engine] = _entry(engine, metric, raw, candidate.id, sequence)
+
+    per_metric: dict[str, Any] = {}
+    for metric in canonical_metrics:
+        meta = METRIC_META.get(metric)
+        if meta is None:
+            continue
+        higher_is_better = meta.higher_is_better
+        # Best fold per engine = best RAW within that engine, across sequences.
+        per_engine_best: dict[str, dict[str, Any]] = {}
+        for sequence in sequences:
+            slot = records.get(sequence, {}).get(metric, {})
+            for engine, entry in slot.items():
+                current = per_engine_best.get(engine)
+                better_raw = (
+                    current is None
+                    or (higher_is_better and entry["raw"] > current["raw"])
+                    or (not higher_is_better and entry["raw"] < current["raw"])
+                )
+                if better_raw:
+                    per_engine_best[engine] = entry
+
+        # Best aggregate = the engine whose best fold ranks highest by within-
+        # engine percentile (consensus standing). Never averaged raw, never a
+        # rescaled score. Engines without a distribution (percentile None) sort
+        # below those with one; ties fall back to raw direction.
+        best_aggregate: dict[str, Any] | None = None
+        for engine, entry in per_engine_best.items():
+            candidate_agg = {**entry, "engine": engine}
+            if best_aggregate is None:
+                best_aggregate = candidate_agg
+                continue
+            cur_pct = best_aggregate.get("percentile")
+            new_pct = entry.get("percentile")
+            if new_pct is not None and (cur_pct is None or new_pct > cur_pct):
+                best_aggregate = candidate_agg
+            elif new_pct is not None and cur_pct is not None and new_pct == cur_pct:
+                tie = (
+                    (higher_is_better and entry["raw"] > best_aggregate["raw"])
+                    or (not higher_is_better and entry["raw"] < best_aggregate["raw"])
+                )
+                if tie:
+                    best_aggregate = candidate_agg
+
+        # Agreement per sequence; surface the sequence with the most engines so
+        # the agreement panel is maximally informative.
+        agreement_payload: dict[str, Any] | None = None
+        best_coverage = 0
+        for sequence in sequences:
+            slot = records.get(sequence, {}).get(metric, {})
+            if len(slot) < 2:
+                continue
+            per_engine_raw = {engine: entry["raw"] for engine, entry in slot.items()}
+            agreement = engine_agreement(per_engine_raw, metric, distributions)
+            if agreement is None:
+                continue
+            coverage = len(agreement.raw)
+            if coverage > best_coverage:
+                best_coverage = coverage
+                agreement_payload = {
+                    "sequence": sequence,
+                    "metric": agreement.metric,
+                    "raw": agreement.raw,
+                    "percentile": agreement.percentile,
+                    "labels": agreement.labels,
+                    "n": agreement.n,
+                    "mean_percentile": agreement.mean_percentile,
+                    "percentile_spread": agreement.percentile_spread,
+                    "raw_spread": agreement.raw_spread,
+                    "agree": agreement.agree,
+                    "best_engine": agreement.best_engine,
+                    "worst_engine": agreement.worst_engine,
+                    "consensus_label": agreement.consensus_label,
+                    "note": agreement.note,
+                }
+
+        per_metric[metric] = {
+            "label": meta.label,
+            "higher_is_better": meta.higher_is_better,
+            "best_per_engine": per_engine_best,
+            "best_aggregate": best_aggregate,
+            "agreement": agreement_payload,
+        }
+
+    return {
+        "metrics": canonical_metrics,
+        "per_metric": per_metric,
+        "engines": sorted({normalize_engine(_candidate_engine(c)) for c in candidates}),
+        "sequence_count": len(sequences),
+        "standing_source": distributions.source,
+        "min_distribution_samples": _min_distribution_samples(),
+    }
+
+
+def _min_distribution_samples() -> int:
+    from ligandai.fold_calibration import MIN_DISTRIBUTION_SAMPLES
+
+    return MIN_DISTRIBUTION_SAMPLES
+
+
+def _candidate_engine(candidate: PeptideCandidate) -> str | None:
+    """Resolve the structure-prediction engine that produced a candidate."""
+    for key in ("engine", "method", "fold_method", "foldMethod", "model", "predictor"):
+        value = candidate.scores.get(key) if isinstance(candidate.scores, dict) else None
+        if value:
+            return str(value)
+        meta_value = candidate.metadata.get(key) if isinstance(candidate.metadata, dict) else None
+        if meta_value:
+            return str(meta_value)
+    return None
+
+
+def write_comparison_dashboard(
+    candidates: list[PeptideCandidate],
+    output_dir: str | Path,
+    title: str = "LigandAI Fold Comparison",
+) -> DashboardHandle:
+    """Write a clickable multi-engine comparison dashboard — RAW is never adjusted.
+
+    Summarizes ALL of a user's fold results on RAW scores in native units, with
+    a within-engine percentile annotation beside each: best RAW fold per method,
+    best aggregate across engines (ranked by mean within-engine percentile, not
+    averaged raw), and a model agreement/disagreement panel (percentile spread).
+    DeltaForge dG is shown per engine with its own within-engine standing. The
+    per-candidate 3Dmol.js structure viewer is reused from the legacy dashboard.
+    Everything is computed in Python here and embedded as ``summary.json`` +
+    per-row ``standing``/``raw`` fields; the JavaScript only renders these
+    precomputed fields and never recomputes a percentile.
+
+    This is additive: it does NOT alter :func:`write_dashboard`'s behavior.
+    """
+    from ligandai.fold_calibration import (
+        METRIC_META,
+        build_distributions,
+        normalize_engine,
+        normalize_metric,
+        standing,
+    )
+
+    out_dir = Path(output_dir).expanduser().resolve()
+    structures_dir = out_dir / "structures"
+    structures_dir.mkdir(parents=True, exist_ok=True)
+
+    metric_keys = tuple(METRIC_META.keys())
+
+    # Within-engine distributions from the user's own folds (raw-derived).
+    distribution_records: list[dict[str, Any]] = []
+    for candidate in candidates:
+        engine = normalize_engine(_candidate_engine(candidate))
+        record: dict[str, Any] = {"engine": engine}
+        for metric in metric_keys:
+            raw = candidate.score(metric)
+            if raw is not None:
+                record[normalize_metric(metric)] = raw
+        distribution_records.append(record)
+    distributions = build_distributions(distribution_records, metrics=metric_keys)
+
+    rows: list[dict[str, Any]] = []
+    for rank, candidate in enumerate(candidates, start=1):
+        pdb_path = _materialize_candidate_pdb(candidate, structures_dir, rank)
+        engine = normalize_engine(_candidate_engine(candidate))
+        standings: dict[str, dict[str, Any]] = {}
+        for metric in metric_keys:
+            raw = candidate.score(metric)
+            if raw is None:
+                continue
+            info = standing(distributions, engine, normalize_metric(metric), raw)
+            standings[normalize_metric(metric)] = {
+                "raw": raw,  # unchanged
+                "percentile": info.percentile if info else None,
+                "label": info.label if info else None,
+                "n": info.n if info else 0,
+            }
+        rows.append(
+            {
+                "rank": rank,
+                "id": candidate.id,
+                "gene": candidate.gene,
+                "target": candidate.target,
+                "sequence": candidate.sequence,
+                "conformation": candidate.conformation,
+                "engine": engine,
+                "scores": candidate.scores,
+                "standing": standings,
+                "pdb": pdb_path.relative_to(out_dir).as_posix() if pdb_path else None,
+                "alignmentRmsd": candidate.alignment_rmsd,
+                "alignmentAtoms": candidate.alignment_atoms,
+            }
+        )
+
+    summary = build_comparison_summary(candidates, metrics=metric_keys)
+    (out_dir / "candidates.json").write_text(json.dumps(rows, indent=2, default=str), encoding="utf-8")
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    index_path = out_dir / "index.html"
+    index_path.write_text(_comparison_dashboard_html(title), encoding="utf-8")
+    return DashboardHandle(output_dir=out_dir, index_path=index_path)
+
+
+def serve_comparison_dashboard(
+    handle: DashboardHandle,
+    host: str = "127.0.0.1",
+    port: int = 8766,
+    open_browser: bool = True,
+) -> DashboardHandle:
+    """Serve a generated comparison dashboard on localhost.
+
+    Thin wrapper over :func:`serve_dashboard` with a distinct default port so a
+    comparison dashboard and a legacy single-candidate dashboard can run side by
+    side.
+    """
+    return serve_dashboard(handle, host=host, port=port, open_browser=open_browser)
+
+
 def _dashboard_html(title: str) -> str:
     escaped_title = html.escape(title)
     return f"""<!doctype html>
@@ -763,6 +1064,197 @@ document.getElementById('candidateSelect').onchange = e => setSelected(Number(e.
 document.getElementById('prevBtn').onclick = () => setSelected(selected - 1);
 document.getElementById('nextBtn').onclick = () => setSelected(selected + 1);
 fetch('candidates.json').then(r => r.json()).then(data => {{ candidates = data; renderRows(); renderCandidate(); }});
+</script>
+</body>
+</html>
+"""
+
+
+def _comparison_dashboard_html(title: str) -> str:
+    """HTML for the multi-engine comparison dashboard — RAW shown, never adjusted.
+
+    The browser renders ONLY precomputed fields from ``candidates.json`` (per row
+    ``standing[metric].{{raw,percentile,label,n}}``) and ``summary.json``
+    (``per_metric[metric].{{best_per_engine,best_aggregate,agreement}}``). The
+    raw value is shown prominently and unchanged; the within-engine percentile is
+    an annotation beside it. No per-engine band/calibration logic exists in the
+    JavaScript — standings are computed solely in Python via
+    :mod:`ligandai.fold_calibration` and the page never recomputes a percentile.
+    """
+    escaped_title = html.escape(title)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escaped_title}</title>
+  <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+  <style>
+    body {{ margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; background: #0f1419; color: #e6edf3; }}
+    header {{ padding: 16px 22px; border-bottom: 1px solid #26313d; background: #111820; }}
+    header h1 {{ font-size: 18px; margin: 0; }}
+    header .subtle {{ color: #93a4b7; font-size: 12px; margin-top: 4px; }}
+    main {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 18px 22px; }}
+    section.panel {{ background: #111820; border: 1px solid #26313d; border-radius: 8px; padding: 14px; }}
+    section.panel h2 {{ font-size: 14px; margin: 0 0 10px; color: #7dd3fc; }}
+    .full {{ grid-column: 1 / -1; }}
+    .viewerwrap {{ display: grid; grid-template-columns: 360px 1fr; gap: 12px; min-height: 420px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    td, th {{ border-bottom: 1px solid #26313d; padding: 6px 5px; text-align: left; }}
+    tr.clickable {{ cursor: pointer; }}
+    tr.active {{ background: #123047; }}
+    .sequence {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #c4b5fd; word-break: break-all; }}
+    .raw {{ font-weight: 600; color: #e6edf3; }}
+    .pct {{ color: #a5b4fc; font-size: 11px; }}
+    .label-bottom {{ color: #f87171; }}
+    .label-low {{ color: #fb923c; }}
+    .label-mid {{ color: #facc15; }}
+    .label-high {{ color: #4ade80; }}
+    .label-top {{ color: #34d399; font-weight: 600; }}
+    .pill {{ display: inline-block; border-radius: 10px; padding: 1px 8px; font-size: 11px; }}
+    .agree {{ background: #14532d; color: #bbf7d0; }}
+    .disagree {{ background: #7f1d1d; color: #fecaca; }}
+    .tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }}
+    .tile {{ background: #17212b; border: 1px solid #26313d; border-radius: 6px; padding: 8px; }}
+    .tile small {{ color: #93a4b7; display: block; }}
+    .tile b {{ font-size: 14px; }}
+    #viewer {{ width: 100%; height: 420px; border-radius: 6px; }}
+    select, button {{ background: #17212b; color: #e6edf3; border: 1px solid #334155; border-radius: 6px; padding: 7px; }}
+    button {{ cursor: pointer; }}
+    footer {{ padding: 10px 22px; color: #718096; font-size: 11px; }}
+  </style>
+</head>
+<body>
+<header>
+  <h1>{escaped_title}</h1>
+  <div class="subtle" id="headSub">Raw scores in native units — each shown with its within-engine percentile (computed in Python). Raw values are never rescaled or calibrated across engines.</div>
+</header>
+<main>
+  <section class="panel full">
+    <h2>Best fold per method (best RAW per engine) &amp; best aggregate (consensus standing)</h2>
+    <div id="bestPerMethod"></div>
+  </section>
+  <section class="panel">
+    <h2>Model agreement / disagreement (within-engine percentile spread)</h2>
+    <div id="agreement"></div>
+  </section>
+  <section class="panel">
+    <h2>DeltaForge dG — per engine (own standing)</h2>
+    <div id="deltaforge"></div>
+  </section>
+  <section class="panel full">
+    <h2>Per-candidate structure</h2>
+    <div class="viewerwrap">
+      <div>
+        <select id="candidateSelect"></select>
+        <table><thead><tr><th>#</th><th>Engine</th><th>Seq</th><th>iPSAE (raw)</th><th>pct</th></tr></thead><tbody id="rows"></tbody></table>
+      </div>
+      <div id="viewer"></div>
+    </div>
+  </section>
+</main>
+<footer>Raw values, within-engine percentiles, and agreement verdicts are precomputed in Python (ligandai.fold_calibration) and embedded in summary.json / candidates.json. The browser shows the raw values and renders the precomputed percentiles; it does not recompute bands. ProteinView by Tristan Farmer / 001TMF, MIT License.</footer>
+<script>
+let candidates = [];
+let summary = {{ per_metric: {{}}, metrics: [] }};
+let selected = 0;
+const fmt = v => (v === null || v === undefined || Number.isNaN(Number(v))) ? '-' : Number(v).toFixed(3);
+const labelClass = l => l ? 'label-' + l : '';
+const pctTxt = (p, l) => (p === null || p === undefined) ? '<span class="pct">no dist</span>' : `<span class="pct ${{labelClass(l)}}">p${{Math.round(p * 100)}} ${{l || ''}}</span>`;
+function standingOf(c, metric) {{ return (c.standing && c.standing[metric]) ? c.standing[metric] : null; }}
+function renderBestPerMethod() {{
+  const host = document.getElementById('bestPerMethod');
+  const metrics = (summary.metrics || []).filter(m => m !== 'deltaforge');
+  let parts = [];
+  for (const metric of metrics) {{
+    const pm = summary.per_metric[metric];
+    if (!pm) continue;
+    const best = pm.best_per_engine || {{}};
+    const rows = Object.keys(best).map(engine => {{
+      const e = best[engine];
+      return `<tr><td>${{engine}}</td><td class="raw">${{fmt(e.raw)}}</td><td>${{pctTxt(e.percentile, e.label)}}</td><td class="sequence">${{(e.sequence || '').slice(0,14)}}</td></tr>`;
+    }}).join('');
+    const agg = pm.best_aggregate;
+    const aggTxt = agg ? `<div class="tile"><small>best aggregate (consensus standing)</small><b>${{agg.engine}}</b> raw ${{fmt(agg.raw)}} ${{pctTxt(agg.percentile, agg.label)}}</div>` : '';
+    parts.push(`<div style="margin-bottom:12px"><b>${{pm.label}}</b>${{aggTxt}}<table><thead><tr><th>engine</th><th>raw</th><th>within-engine</th><th>seq</th></tr></thead><tbody>${{rows}}</tbody></table></div>`);
+  }}
+  host.innerHTML = parts.join('') || '<p class="subtle">No per-engine metrics present.</p>';
+}}
+function renderAgreement() {{
+  const host = document.getElementById('agreement');
+  const metrics = (summary.metrics || []).filter(m => m !== 'deltaforge');
+  let parts = [];
+  for (const metric of metrics) {{
+    const pm = summary.per_metric[metric];
+    if (!pm || !pm.agreement) continue;
+    const a = pm.agreement;
+    const pill = a.agree ? '<span class="pill agree">AGREE</span>' : '<span class="pill disagree">DISAGREE</span>';
+    parts.push(`<div style="margin-bottom:10px"><b>${{pm.label}}</b> ${{pill}}<br>
+      <span class="subtle">seq ${{(a.sequence||'').slice(0,14)}} · raw spread ${{fmt(a.raw_spread)}} · within-engine percentile spread ${{fmt(a.percentile_spread)}} · consensus <span class="${{labelClass(a.consensus_label)}}">${{a.consensus_label}}</span></span><br>
+      <span class="subtle">${{a.note || ''}}</span></div>`);
+  }}
+  host.innerHTML = parts.join('') || '<p class="subtle">Need ≥2 engines on a shared sequence for agreement.</p>';
+}}
+function renderDeltaForge() {{
+  const host = document.getElementById('deltaforge');
+  const pm = summary.per_metric['deltaforge'];
+  if (!pm) {{ host.innerHTML = '<p class="subtle">No DeltaForge dG reported.</p>'; return; }}
+  const best = pm.best_per_engine || {{}};
+  const tiles = Object.keys(best).map(engine => {{
+    const e = best[engine];
+    return `<div class="tile"><small>${{engine}}</small><b>${{fmt(e.raw)}} kcal/mol</b>${{pctTxt(e.percentile, e.label)}}</div>`;
+  }}).join('');
+  host.innerHTML = `<div class="tiles">${{tiles}}</div><p class="subtle">dG is shown per engine with its own within-engine standing — no shared band, no engine-unbiased rescale.</p>`;
+}}
+function renderRows() {{
+  const select = document.getElementById('candidateSelect');
+  const rows = document.getElementById('rows');
+  select.innerHTML = '';
+  rows.innerHTML = '';
+  candidates.forEach((c, i) => {{
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = `${{c.rank}}. ${{c.engine || 'engine'}} ${{c.gene || ''}} ${{(c.sequence||'').slice(0,16)}}`;
+    select.appendChild(opt);
+    const st = standingOf(c, 'ipsae');
+    const tr = document.createElement('tr');
+    tr.className = 'clickable' + (i === selected ? ' active' : '');
+    tr.innerHTML = `<td>${{c.rank}}</td><td>${{c.engine || ''}}</td><td class="sequence">${{(c.sequence||'').slice(0,14)}}</td><td class="raw">${{st ? fmt(st.raw) : '-'}}</td><td>${{st ? pctTxt(st.percentile, st.label) : '-'}}</td>`;
+    tr.onclick = () => setSelected(i);
+    rows.appendChild(tr);
+  }});
+  select.value = selected;
+}}
+function setSelected(index) {{
+  selected = Math.max(0, Math.min(candidates.length - 1, index));
+  renderRows();
+  renderCandidate();
+}}
+async function renderCandidate() {{
+  const c = candidates[selected];
+  if (!c) return;
+  const viewer = $3Dmol.createViewer('viewer', {{ backgroundColor: '#0f1419' }});
+  if (!c.pdb) {{ viewer.render(); return; }}
+  const pdb = await fetch(c.pdb).then(r => r.text());
+  viewer.addModel(pdb, 'pdb');
+  viewer.setStyle({{}}, {{ cartoon: {{ color: 'spectrum' }} }});
+  viewer.addStyle({{chain: 'Z'}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.18}}}});
+  viewer.zoomTo();
+  viewer.render();
+}}
+document.getElementById('candidateSelect').onchange = e => setSelected(Number(e.target.value));
+Promise.all([
+  fetch('candidates.json').then(r => r.json()),
+  fetch('summary.json').then(r => r.json()),
+]).then(([cands, summ]) => {{
+  candidates = cands;
+  summary = summ;
+  renderBestPerMethod();
+  renderAgreement();
+  renderDeltaForge();
+  renderRows();
+  renderCandidate();
+}});
 </script>
 </body>
 </html>

@@ -24,6 +24,12 @@ See https://docs.ligandai.com for full documentation.
 
 from __future__ import annotations
 
+from ligandai._fold_time_model import (
+    estimate_fold_time,
+    format_eta,
+    get_fold_time_model,
+    update_fold_time_model,
+)
 from ligandai._version import __version__
 from ligandai.client import AsyncLigandAI, LigandAI
 from ligandai.errors import (
@@ -48,27 +54,50 @@ from ligandai.errors import (
     LigandAIWaitTimeout,
     NotSupportedOnReceptorDB,
 )
-from ligandai._fold_time_model import (
-    estimate_fold_time,
-    format_eta,
-    get_fold_time_model,
-    update_fold_time_model,
+from ligandai.fold_calibration import (
+    ENGINES,
+    METRIC_META,
+    METRICS,
+    MIN_DISTRIBUTION_SAMPLES,
+    PERCENTILE_AGREEMENT_TOLERANCE,
+    PERCENTILE_TIERS,
+    EngineAgreement,
+    EngineDistributions,
+    EngineStanding,
+    MetricMeta,
+    build_distributions,
+    engine_agreement,
+    metric_higher_is_better,
+    normalize_engine,
+    normalize_metric,
+    percentile_label,
+    standing,
+)
+from ligandai.fold_charts import (
+    FoldComparison,
+    FoldPoint,
+    build_fold_comparison,
+    distribution_figure,
+    linked_line_figure,
 )
 from ligandai.jobs import AsyncJob, Job
-from ligandai.resources.peptides import AsyncBatchFoldJob, BatchFoldJob
 from ligandai.peptide_viewer import (
     PROTEINVIEW_ATTRIBUTION,
     DashboardHandle,
     PeptideCandidate,
     align_candidates_to_receptor,
     align_pdb_to_receptor,
+    build_comparison_summary,
     launch_proteinview,
     load_peptide_results,
     rank_peptides,
+    serve_comparison_dashboard,
     serve_dashboard,
+    write_comparison_dashboard,
     write_dashboard,
 )
 from ligandai.receptordb import AsyncReceptorDBClient, ReceptorDBClient
+
 # 3dalk — linker modifications + payload optimization (pro+ tier).
 from ligandai.resources.linker_modifications import (
     AsyncLinkerModifications,
@@ -79,6 +108,7 @@ from ligandai.resources.linker_modifications import (
     PayloadOptimizationRun,
     ReceptorChain,
 )
+from ligandai.resources.peptides import AsyncBatchFoldJob, BatchFoldJob
 from ligandai.types import (
     AccountBalance,
     AdaptyvExperiment,
@@ -137,6 +167,12 @@ from ligandai.version_check import (
 )
 
 __all__ = [
+    "ENGINES",
+    "METRICS",
+    "METRIC_META",
+    "MIN_DISTRIBUTION_SAMPLES",
+    "PERCENTILE_AGREEMENT_TOLERANCE",
+    "PERCENTILE_TIERS",
     "PROTEINVIEW_ATTRIBUTION",
     "AccountBalance",
     "AdaptyvExperiment",
@@ -146,6 +182,7 @@ __all__ = [
     "AsyncBatchFoldJob",
     "AsyncJob",
     "AsyncLigandAI",
+    "AsyncLinkerModifications",
     "AsyncReceptorDBClient",
     "AutoTopupConfig",
     "BatchFoldEvent",
@@ -153,22 +190,21 @@ __all__ = [
     "BindingOrientationResult",
     "BiotinLinker",
     "BivalentTarget",
-    "AsyncLinkerModifications",
-    "CovalentAttachment",
-    "LinkerModification",
-    "LinkerModifications",
-    "PayloadFilter",
-    "PayloadOptimizationRun",
-    "ReceptorChain",
     "ClientSessionUsage",
     "ClientSessionUsageSummary",
     "CostEstimate",
+    "CovalentAttachment",
     "DashboardHandle",
     "DeltaForgeBestPair",
     "DeltaForgeGateReadout",
     "DeltaForgePairScore",
     "DeltaForgeScore",
     "EcTrimmingConfig",
+    "EngineAgreement",
+    "EngineDistributions",
+    "EngineStanding",
+    "FoldComparison",
+    "FoldPoint",
     "GeneSummary",
     "GenerationMaskGuidance",
     "GoalAcceptanceCriterion",
@@ -207,16 +243,22 @@ __all__ = [
     "LigandAIWaitTimeout",
     "LigandScore",
     "LinkerConfig",
+    "LinkerModification",
+    "LinkerModifications",
     "LinkerRecommendation",
     "MSAChain",
     "MSAResult",
+    "MetricMeta",
     "NotSupportedOnReceptorDB",
+    "PayloadFilter",
+    "PayloadOptimizationRun",
     "PdcConfig",
     "Peptide",
     "PeptideCandidate",
     "PeptideDetail",
     "PeptideInput",
     "PeptideSegment",
+    "ReceptorChain",
     "ReceptorDBClient",
     "ResidueRange",
     "SegmentConfig",
@@ -226,17 +268,30 @@ __all__ = [
     "__version__",
     "align_candidates_to_receptor",
     "align_pdb_to_receptor",
+    "build_comparison_summary",
+    "build_distributions",
+    "build_fold_comparison",
+    "distribution_figure",
     "emit_update_notice",
+    "engine_agreement",
     "estimate_fold_time",
     "format_eta",
     "get_fold_time_model",
     "get_latest_pypi_version",
     "get_update_notice",
     "is_outdated",
-    "update_fold_time_model",
     "launch_proteinview",
+    "linked_line_figure",
     "load_peptide_results",
+    "metric_higher_is_better",
+    "normalize_engine",
+    "normalize_metric",
+    "percentile_label",
     "rank_peptides",
+    "serve_comparison_dashboard",
     "serve_dashboard",
+    "standing",
+    "update_fold_time_model",
+    "write_comparison_dashboard",
     "write_dashboard",
 ]
