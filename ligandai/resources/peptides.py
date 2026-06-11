@@ -898,13 +898,13 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
 # ─── Ensemble co-fold helpers (cofold) ──────────────────────────────────────
 #
 # The ensemble co-fold surface (POST /api/v1/cofold/start) folds the SAME chains
-# on 1-4 engines (esmfold2, boltz2, protenix, openfold3) in parallel. MSA is a
+# on 1-5 engines (esmfold2, boltz2, protenix, openfold3, promera) in parallel. MSA is a
 # single shared control for the whole ensemble (our-own MSA server) — there is
 # NO per-engine MSA setting. Any MSA key in ``per_engine`` is rejected here,
 # client-side, BEFORE the request reaches the wire (the server strips again).
 
 #: Known ensemble engines (canonical lowercase). Mirrors the server.
-COFOLD_ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3")
+COFOLD_ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera")
 
 #: MSA keys never permitted in a per-engine override. Mirrors the server-side
 #: ``FORBIDDEN_PER_ENGINE_MSA_KEYS`` — MSA is shared, never per-engine.
@@ -919,7 +919,7 @@ def _cofold_normalize_engines(engines: list[str] | tuple[str, ...]) -> list[str]
     """Validate + de-dupe (preserving order) the requested engine list."""
     if not engines:
         raise ValueError(
-            "engines required (1-4 of: esmfold2, boltz2, protenix, openfold3)"
+            "engines required (1-5 of: esmfold2, boltz2, protenix, openfold3, promera)"
         )
     seen: set[str] = set()
     out: list[str] = []
@@ -932,8 +932,8 @@ def _cofold_normalize_engines(engines: list[str] | tuple[str, ...]) -> list[str]
         if el not in seen:
             seen.add(el)
             out.append(el)
-    if len(out) > 4:
-        raise ValueError("at most 4 engines per ensemble")
+    if len(out) > 5:
+        raise ValueError("at most 5 engines per ensemble")
     return out
 
 

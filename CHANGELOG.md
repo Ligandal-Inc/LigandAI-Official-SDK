@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.8] - 2026-06-11
+
+### Added — PROMERA as a 5th fold/cofold engine
+
+PROMERA (an AF3-class structure-prediction engine) joins the engine registry
+across the calibration and ensemble surfaces:
+
+- `fold_calibration.ENGINES` now includes `promera`; aliases `promera`,
+  `promera2606`, and `promerav1` all normalize to `promera`. Per-engine
+  goodness-percentiles, agreement, and standings work for PROMERA folds exactly
+  as for the other engines (empirical, from the user's own folds — never a fixed
+  prior). pLDDT autoscaling already handles PROMERA's 0–1 reporting.
+- `Peptides.cofold()` / `peptides.COFOLD_ENGINES` accept `promera` — an ensemble
+  may now name 1–5 of `esmfold2` / `boltz2` / `protenix` / `openfold3` /
+  `promera`. MSA stays a single shared OUR-OWN control (never per-engine, never
+  an external/public MSA server).
+
 ## [0.6.7] - 2026-06-06
 
 ### Added — ensemble auto-fold for generation (Phase-2)
