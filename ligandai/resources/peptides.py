@@ -316,7 +316,8 @@ def _generation_body(
     variant_id: int | None,
     gen_gpus: int,
     fold_gpus: int,
-    program_id: int | None,
+    program_id: int | str | None,
+    conversation_id: str | None,
     cysteine_mode: _CysteineMode,
     quality_guided: bool,
     quality_guidance_scale: float,
@@ -431,8 +432,19 @@ def _generation_body(
         body["samplingSteps"] = sampling_steps
     if glycosylation_enabled is not None:
         body["glycosylationEnabled"] = glycosylation_enabled
+    # Program linkage (v0.7.0): accept both numeric DB id and public string id,
+    # plus conversation_id for the convo-dedup path. Server resolution ladder:
+    # programDbId → programId → convo-dedup → gene-hash → recent-by-genes → create-new.
     if program_id is not None:
-        body["programId"] = program_id
+        if isinstance(program_id, int):
+            body["programDbId"] = program_id
+            body["program_db_id"] = program_id
+        else:
+            body["programId"] = str(program_id)
+            body["program_id"] = str(program_id)
+    if conversation_id is not None:
+        body["conversationId"] = conversation_id
+        body["conversation_id"] = conversation_id
     # Optional immuno / stability sub-modules (dict of booleans per protease/epitope)
     if immuno_modules is not None:
         body["immunoModules"] = immuno_modules
@@ -2095,7 +2107,8 @@ class Peptides(Resource):
         variant_id: int | None = None,
         gen_gpus: int = 1,
         fold_gpus: int = 1,
-        program_id: int | None = None,
+        program_id: int | str | None = None,
+        conversation_id: str | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
         quality_guided: bool = False,
         quality_guidance_scale: float = 1.0,
@@ -2340,6 +2353,7 @@ class Peptides(Resource):
             gen_gpus=gen_gpus,
             fold_gpus=fold_gpus,
             program_id=program_id,
+            conversation_id=conversation_id,
             cysteine_mode=cysteine_mode,
             quality_guided=quality_guided,
             quality_guidance_scale=quality_guidance_scale,
@@ -4037,6 +4051,7 @@ class Peptides(Resource):
         """
         return self.list(
             program_id=program_id,
+            conversation_id=conversation_id,
             gene=gene,
             min_ipsae=min_ipsae,
             min_iptm=min_iptm,
@@ -4216,7 +4231,8 @@ class AsyncPeptides(AsyncResource):
         variant_id: int | None = None,
         gen_gpus: int = 1,
         fold_gpus: int = 1,
-        program_id: int | None = None,
+        program_id: int | str | None = None,
+        conversation_id: str | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
         quality_guided: bool = False,
         quality_guidance_scale: float = 1.0,
@@ -4324,6 +4340,7 @@ class AsyncPeptides(AsyncResource):
             gen_gpus=gen_gpus,
             fold_gpus=fold_gpus,
             program_id=program_id,
+            conversation_id=conversation_id,
             cysteine_mode=cysteine_mode,
             quality_guided=quality_guided,
             quality_guidance_scale=quality_guidance_scale,
@@ -5513,6 +5530,7 @@ class AsyncPeptides(AsyncResource):
         """Async variant of :meth:`Peptides.list_by_program`."""
         return await self.list(
             program_id=program_id,
+            conversation_id=conversation_id,
             gene=gene,
             min_ipsae=min_ipsae,
             min_iptm=min_iptm,

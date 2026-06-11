@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-06-11
+
+### Added — program_id + conversation_id for run organization
+
+`Peptides.generate()` (sync + async) now accepts two optional kwargs that link a
+generation run to an existing program instead of orphaning every single-target
+run as a new top-level program in the Work Browser:
+
+- `program_id: int | str | None = None` — accepts both numeric DB id (e.g.
+  `1060`) and the public string id (e.g. `'program_1781150460811_xe0tul'`).
+  Numeric routes via `programDbId`, string routes via `programId`. When both
+  are absent, the server falls through to the next dedup level.
+- `conversation_id: str | None = None` — extends the bd-byn53 convo-scoped
+  program dedup from the chat-agent path to the SDK path. When `program_id` is
+  not provided but `conversation_id` is, the server attaches the run to the
+  conversation's existing active `ai_orchestrated` program.
+
+Server resolution ladder (new): `programDbId → programId → convo-dedup →
+gene-set hash → recent-by-genes-fallback → create-new`. Every branch logs
+`[PTF-GENERATE] decision: <branch>` for prod-log traceability.
+
+### Note
+
+0.6.9 was published from the wrong source tree and has been yanked. 0.7.0
+restores PROMERA, ensemble auto-fold, fold-calibration, jobs, key-wallet —
+the full 0.6.8 surface — plus the new program / conversation kwargs.
+
 ## [0.6.8] - 2026-06-11
 
 ### Added — PROMERA as a 5th fold/cofold engine
