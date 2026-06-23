@@ -572,14 +572,45 @@ class CustomDatasetTarget(_LGModel):
 
 
 class TargetGroup(_LGModel):
+    """A group to compare in comparative transcriptomics.
+
+    A group can be one of several kinds (``type``):
+
+    - ``custom``  — a user-uploaded transcriptomics dataset
+      (set ``dataset_id`` / ``datasetId`` and optional ``cell_types``).
+    - ``gtex``    — a GTEx reference tissue (set ``tissue``).
+    - ``geneset`` — an explicit gene / receptor set or pathway
+      (set ``genes``), e.g. a BBB transcytosis shuttle set
+      ``["TFRC", "LRP1", "FCGRT"]`` or a signalling pathway. Lets you
+      compare "BBB-shuttle set vs brain-cortex" or "pathway A vs pathway B"
+      in a single :meth:`compare_groups` / :meth:`compare_targets` call.
+
+    ``tissue`` / ``cell_type`` are retained for backward compatibility.
+    [bd-LIGANDAI_ALPHA_V2-k5usa]
+    """
+
     name: str
-    samples: list[str]
-    type: Literal["tissue", "cell_type", "custom"] = "tissue"
+    samples: list[str] = Field(default_factory=list)
+    type: Literal["tissue", "cell_type", "custom", "gtex", "geneset"] = "tissue"
+    # Group-kind-specific fields (optional; populated per ``type``).
+    dataset_id: str | int | None = Field(default=None, alias="datasetId")
+    cell_types: list[str] | None = Field(default=None, alias="cellTypes")
+    tissue: str | None = None
+    genes: list[str] | None = None
 
 
 class ReferenceGroup(_LGModel):
+    """A reference group for comparative transcriptomics. Same shape as
+    :class:`TargetGroup` (custom | gtex | geneset). [bd-LIGANDAI_ALPHA_V2-k5usa]
+    """
+
     name: str
-    samples: list[str]
+    samples: list[str] = Field(default_factory=list)
+    type: Literal["tissue", "cell_type", "custom", "gtex", "geneset"] = "tissue"
+    dataset_id: str | int | None = Field(default=None, alias="datasetId")
+    cell_types: list[str] | None = Field(default=None, alias="cellTypes")
+    tissue: str | None = None
+    genes: list[str] | None = None
 
 
 class TissueMarker(_LGModel):
@@ -590,6 +621,11 @@ class TissueMarker(_LGModel):
     target_expression: float | None = Field(default=None, alias="targetExpression")
     rank: int | None = None
     receptor: bool | None = None
+    # [bd-LIGANDAI_ALPHA_V2-k5usa] comparison provenance
+    reference_type: str | None = Field(default=None, alias="referenceType")
+    reference_tissues: list[str] | None = Field(default=None, alias="referenceTissues")
+    target_tpm: float | None = Field(default=None, alias="targetTpm")
+    ref_tpm: float | None = Field(default=None, alias="refTpm")
 
 
 class MarkerResponse(_LGModel):
@@ -606,10 +642,44 @@ class ExpressionProfile(_LGModel):
 
 
 class ComparisonResponse(_LGModel):
-    target_group: str = Field(alias="targetGroup")
-    reference_groups: list[str] = Field(alias="referenceGroups")
-    mode: str
-    results: list[TissueMarker]
+    """Result of :meth:`compare_groups` / :meth:`compare_targets`.
+
+    The server returns ``markers`` (not ``results``); we normalize both into
+    ``results`` so callers have a single field. ``shared_genes`` /
+    ``differential_genes`` are populated by :meth:`compare_targets`.
+    [bd-LIGANDAI_ALPHA_V2-k5usa]
+    """
+
+    target_group: str = Field(default="", alias="targetGroup")
+    reference_groups: list[str] = Field(default_factory=list, alias="referenceGroups")
+    mode: str = "compare"
+    results: list[TissueMarker] = Field(default_factory=list)
+    method: str | None = None
+    metadata: dict[str, Any] | None = None
+    success: bool | None = None
+    # Populated by compare_targets (client-side shared/differential split).
+    shared_genes: list[str] | None = Field(default=None, alias="sharedGenes")
+    differential_genes: list[str] | None = Field(default=None, alias="differentialGenes")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_markers(cls, data: Any) -> Any:
+        """Accept the server's ``markers`` array (whose entries key the gene as
+        ``gene_name``) and surface it as ``results`` of :class:`TissueMarker`."""
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        raw = d.get("results")
+        if not raw:
+            raw = d.get("markers")
+        if isinstance(raw, list):
+            norm = []
+            for m in raw:
+                if isinstance(m, dict) and "gene" not in m and "gene_name" in m:
+                    m = {**m, "gene": m["gene_name"]}
+                norm.append(m)
+            d["results"] = norm
+        return d
 
 
 class GeoDataset(_LGModel):
@@ -637,10 +707,64 @@ class Dataset(_LGModel):
 
 
 class BBBReceptor(_LGModel):
+    """A BBB transcytosis shuttle receptor returned by
+    :meth:`~ligandai.resources.discovery.Discovery.transport_vasculome`.
+
+    Beyond the transport suitability ``score``, this now carries the
+    BBB-specificity / shared-expression overlay [bd-LIGANDAI_ALPHA_V2-k5usa]:
+    ``specificity_index`` (higher = more CNS-selective), the peripheral GTEx
+    tissues the shuttle is ALSO expressed in (``top_peripheral_tissues``), and a
+    ``broadly_shared`` flag (with ``broadly_shared_reason``) so you can tell a
+    brain-selective shuttle from a broadly-expressed, off-target-prone one. When
+    a ``specificity_weight`` > 0 was passed, ``combined_score`` is the blended
+    transport + specificity ranking score.
+    """
+
     gene: str
     score: float
     risk_factors: list[str] | None = Field(default=None, alias="riskFactors")
     notes: str | None = None
+    # -- BBB specificity / shared-expression overlay -------------------------
+    specificity_index: float | None = Field(default=None, alias="specificityIndex")
+    enrichment: float | None = None
+    gtex_max_tpm: float | None = Field(default=None, alias="gtexMaxTpm")
+    top_peripheral_tissues: list[Any] | None = Field(default=None, alias="topPeripheralTissues")
+    broadly_shared: bool | None = Field(default=None, alias="broadlyShared")
+    broadly_shared_reason: str | None = Field(default=None, alias="broadlySharedReason")
+    combined_score: float | None = Field(default=None, alias="combinedScore")
+    transport_score: float | None = Field(default=None, alias="transportScore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_receptor_row(cls, data: Any) -> Any:
+        """Accept BOTH the SDK-alias ``{gene, score}`` shape and a raw
+        ``transport_receptors`` row (``uniprot_gene`` + ``monovalent_score`` /
+        ``multivalent_score`` + ``top_gtex_tissues``) so the platform's
+        ``/receptors`` response validates without a server-side transform."""
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        if "gene" not in d:
+            if d.get("uniprot_gene"):
+                d["gene"] = d["uniprot_gene"]
+            elif d.get("ensembl_gene"):
+                d["gene"] = d["ensembl_gene"]
+        if "score" not in d:
+            score = (
+                d.get("combined_score")
+                if d.get("combined_score") is not None
+                else d.get("monovalent_score")
+                if d.get("monovalent_score") is not None
+                else d.get("multivalent_score")
+                if d.get("multivalent_score") is not None
+                else d.get("suitability_score")
+            )
+            if score is not None:
+                d["score"] = score
+        # peripheral tissues land under top_gtex_tissues from the server
+        if d.get("top_peripheral_tissues") is None and d.get("top_gtex_tissues") is not None:
+            d["top_peripheral_tissues"] = d["top_gtex_tissues"]
+        return d
 
 
 # -- Peptides / generation / folding ----------------------------------------
@@ -1375,6 +1499,27 @@ class SolubilityResult(_LGModel):
     notes: str | None = None
 
 
+class DevelopabilityResult(_LGModel):
+    """Three developability grades for one peptide sequence.
+
+    Returned by :meth:`ligandai.resources.peptides.Peptides.score_developability`
+    — a standalone rescore (NO regen / NO refold) of already-generated peptides.
+
+    The nested ``stability_scores`` / ``immuno_scores`` dicts carry the full
+    grade detail (cleavage sites, MHC epitope counts, half-life, etc.); the
+    top-level convenience fields mirror the headline grades. Half-life lives
+    inside ``stability_scores`` and is also surfaced as ``predicted_halflife_*``.
+    """
+
+    sequence: str
+    stability_grade: str | None = Field(default=None, alias="stability_grade")
+    immuno_grade: str | None = Field(default=None, alias="immuno_grade")
+    predicted_halflife_hours: float | None = Field(default=None, alias="predicted_halflife_hours")
+    predicted_halflife_min: float | None = Field(default=None, alias="predicted_halflife_min")
+    stability_scores: dict[str, Any] | None = Field(default=None, alias="stability_scores")
+    immuno_scores: dict[str, Any] | None = Field(default=None, alias="immuno_scores")
+
+
 class LigandScore(_LGModel):
     """LF-SM v3 small-molecule Kd prediction for one (holo structure, ligand).
 
@@ -1477,6 +1622,60 @@ class ReceptorIntelligence(_LGModel):
     endocytosis: dict[str, Any] | None = None
     internalization: dict[str, Any] | None = None
     biased_agonism: dict[str, Any] | None = Field(default=None, alias="biasedAgonism")
+
+
+class ReceptorAtlas(_LGModel):
+    """Deterministic Receptor Intelligence atlas overlay
+    (``GET /api/receptor-intelligence/atlas/{gene}`` and ``.../full``).
+
+    Returned by :meth:`Proteins.receptor_atlas`. Every block is optional — the
+    atlas silently omits any block it has no curated data for, so a sparse target
+    yields a sparse model. ``extra="allow"`` (inherited from :class:`_LGModel`)
+    preserves any additional server blocks as raw attributes.
+
+    Two tiers map to one model:
+
+    * ``full=False`` → free/any-authenticated hard-data overlay: ``identity``,
+      ``signaling_state``, ``cell_surface``, ``coupling``, ``bias_profile``,
+      ``engagements``, ``internalization``, ``rotamer_summary``,
+      ``atlas_coverage_count``.
+    * ``full=True`` → SUPERADMIN overlay: everything above PLUS the ndLF /
+      nanoGPT supervised-head ``model_predictions`` (22+ heads), the full
+      ``intracellular_partners`` list, ``trigger_profile``, ``phospho_bias_proxy``,
+      ``residue_functional_annotation``, ``rotamer_full`` chi1 rows,
+      ``tumbler_signature``, the atlas-vs-model ``disagreements`` panel, and raw
+      ``atlas_coverage`` provenance.
+
+    bd-LIGANDAI_ALPHA_V2-q3z1b.
+    """
+
+    gene: str
+    # --- Free / hard-data blocks (omitted when not curated) ---
+    identity: dict[str, Any] | None = None
+    signaling_state: str | None = None
+    cell_surface: dict[str, Any] | None = None
+    coupling: dict[str, Any] | None = None
+    bias_profile: dict[str, Any] | None = None
+    engagements: dict[str, Any] | None = None
+    internalization: dict[str, Any] | None = None
+    rotamer_summary: dict[str, Any] | None = None
+    atlas_coverage_count: int | None = None
+    # --- Superadmin (full=True) ndLF / nanoGPT model + deep-atlas blocks ---
+    model_predictions: dict[str, Any] | None = None
+    intracellular_partners: list[dict[str, Any]] | None = None
+    intracellular_partners_count: int | None = None
+    trigger_profile: dict[str, Any] | None = None
+    phospho_bias_proxy: dict[str, Any] | None = None
+    # The live full-atlas endpoint returns this as a dict wrapper
+    # ({"annotations": [...], "keyed_by": ..., "source_atlas": ...}); older
+    # builds emit a bare list of rows. Accept both so the SDK validates against
+    # any backend revision.
+    residue_functional_annotation: list[dict[str, Any]] | dict[str, Any] | None = None
+    rotamer_full: dict[str, Any] | None = None
+    tumbler_signature: dict[str, Any] | None = None
+    atlas_coverage: list[Any] | None = None
+    disagreements: list[str] | None = None
+    has_disagreements: bool | None = None
 
 
 class GlycosylationData(_LGModel):
@@ -1621,15 +1820,43 @@ class PeptideSegment(_LGModel):
     - ``"linker"``    — diffusion-generated without binding mask (flexible connector)
     - ``"stability"`` — diffusion-generated with intramolecular stability contacts
     - ``"premade"``   — fixed, user-provided sequence (no generation)
+
+    ``id`` and ``position`` are **optional** for callers — when a list of
+    segments is assembled into a :class:`SegmentConfig` (or passed via the
+    ``segments=`` convenience kwarg on :meth:`Peptides.generate`), any segment
+    that left them unset is auto-assigned from its order in the list
+    (``position = index``, ``id = f"seg{index}"``). Both stay overridable; if
+    you set them explicitly they are preserved. This means a caller can write::
+
+        PeptideSegment(type="premade", sequence="SNRFTCREGYL")
+
+    without hand-numbering. ``type="generated"`` is accepted as an alias for
+    ``"binding"`` (the most common diffusion-generated segment intent).
     """
 
-    id: str
+    id: str | None = None
     type: Literal["binding", "linker", "stability", "premade"]
-    position: int
+    position: int | None = None
     sequence: str | None = None
     length_range: tuple[int, int] | None = Field(default=None, alias="lengthRange")
     label: str | None = None
     locked: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_type(cls, data: Any) -> Any:
+        """Accept ``type="generated"`` as an alias for ``"binding"``.
+
+        ``"generated"`` is a natural word for "a diffusion-generated segment",
+        but the platform's segment vocabulary is binding/linker/stability/premade.
+        Map it to ``"binding"`` (the binding-objective generated segment) so the
+        alias does not raise a ``ValidationError``.
+        """
+        if isinstance(data, dict):
+            t = data.get("type")
+            if t == "generated":
+                data = {**data, "type": "binding"}
+        return data
 
 
 class SegmentConfig(_LGModel):
@@ -1651,6 +1878,28 @@ class SegmentConfig(_LGModel):
     length_range: tuple[int, int] = Field(default=(20, 70), alias="lengthRange")
     segments: list[PeptideSegment] = Field(default_factory=list)
     auto_switch_to_custom: bool = Field(default=False, alias="autoSwitchToCustom")
+
+    @model_validator(mode="after")
+    def _assign_segment_order(self) -> "SegmentConfig":
+        """Auto-assign ``position``/``id`` from each segment's order in the list.
+
+        Callers may build segments without hand-numbering::
+
+            SegmentConfig(mode="custom", segments=[
+                PeptideSegment(type="premade", sequence="SNRFTCREGYL"),
+                PeptideSegment(type="binding", length_range=(9, 39)),
+            ])
+
+        Any segment that left ``position``/``id`` unset is filled from its index
+        (``position = index``, ``id = f"seg{index}"``). Explicit values are kept,
+        so existing hand-numbered callers are unaffected.
+        """
+        for index, segment in enumerate(self.segments):
+            if segment.position is None:
+                segment.position = index
+            if segment.id is None:
+                segment.id = f"seg{index}"
+        return self
 
 
 class PdcConfig(_LGModel):

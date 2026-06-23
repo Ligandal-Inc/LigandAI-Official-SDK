@@ -10,6 +10,7 @@ from ligandai.types import (
     DisorderProfile,
     ProteinInfo,
     ProteinVariant,
+    ReceptorAtlas,
     ReceptorIntelligence,
     ReceptorTopology,
     UserProtein,
@@ -61,6 +62,49 @@ class Proteins(Resource):
             raise ValueError("Pass gene= or genes=")
         return ReceptorIntelligence.model_validate(
             self._transport.request("GET", f"/api/receptor-intelligence/{gene}") or {"gene": gene}
+        )
+
+    def receptor_atlas(self, gene: str, full: bool = False) -> ReceptorAtlas:
+        """Full deterministic Receptor Intelligence atlas overlay for ``gene``.
+
+        This is the agent-callable surface for the complete Receptor
+        Intelligence. It complements :meth:`receptor_intelligence` (the
+        pro+ *profile* — endocytosis / internalization / biased agonism) by
+        exposing the deterministic 21-atlas overlay and, for superadmin, the
+        ndLF / nanoGPT supervised-head model predictions.
+
+        Two tiers, one method:
+
+        * ``full=False`` (default) — ``GET /api/receptor-intelligence/atlas/{gene}``.
+          Hard-data overlay available to ANY authenticated user (free tier
+          included). Returns whatever IS curated: ``identity``,
+          ``signaling_state``, ``cell_surface``, ``coupling``, ``bias_profile``,
+          ``engagements``, ``internalization``, ``rotamer_summary``,
+          ``atlas_coverage_count``. Blocks with no curated data are silently
+          omitted (no negative-absence messages).
+
+        * ``full=True`` — ``GET /api/receptor-intelligence/atlas/{gene}/full``.
+          SUPERADMIN ONLY. Adds the ndLF / nanoGPT ``model_predictions`` (22+
+          supervised heads + atlas-vs-model ``comparison``), the full
+          ``intracellular_partners`` list, ``trigger_profile``,
+          ``phospho_bias_proxy``, ``residue_functional_annotation``,
+          ``rotamer_full`` chi1 rows, ``tumbler_signature``, the
+          ``disagreements`` panel, and raw ``atlas_coverage`` provenance.
+          Authorization rides the client's api-key (the server enforces the
+          superadmin gate); a non-superadmin key receives HTTP 403.
+
+        The returned :class:`ReceptorAtlas` is permissive — every block is
+        optional and additive server blocks are preserved as raw attributes.
+
+        bd-LIGANDAI_ALPHA_V2-q3z1b. See :meth:`receptor_intelligence` for the
+        narrower profile method.
+        """
+        suffix = "/full" if full else ""
+        return ReceptorAtlas.model_validate(
+            self._transport.request(
+                "GET", f"/api/receptor-intelligence/atlas/{gene}{suffix}"
+            )
+            or {"gene": gene}
         )
 
     def variants(
@@ -174,6 +218,21 @@ class AsyncProteins(AsyncResource):
             raise ValueError("Pass gene= or genes=")
         return ReceptorIntelligence.model_validate(
             await self._transport.request("GET", f"/api/receptor-intelligence/{gene}") or {"gene": gene}
+        )
+
+    async def receptor_atlas(self, gene: str, full: bool = False) -> ReceptorAtlas:
+        """Async variant of :meth:`Proteins.receptor_atlas`.
+
+        ``full=False`` → hard-data atlas overlay (any authenticated user).
+        ``full=True`` → SUPERADMIN ndLF / nanoGPT model predictions overlay.
+        bd-LIGANDAI_ALPHA_V2-q3z1b.
+        """
+        suffix = "/full" if full else ""
+        return ReceptorAtlas.model_validate(
+            await self._transport.request(
+                "GET", f"/api/receptor-intelligence/atlas/{gene}{suffix}"
+            )
+            or {"gene": gene}
         )
 
     async def variants(

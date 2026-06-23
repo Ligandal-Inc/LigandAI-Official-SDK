@@ -37,6 +37,7 @@ from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     CostEstimate,
     DeltaForgeScore,
+    DevelopabilityResult,
     EcTrimmingConfig,
     FoldResult,
     GenerationResult,
@@ -46,6 +47,7 @@ from ligandai.types import (
     Peptide,
     PeptideDetail,
     PeptideInput,
+    PeptideSegment,
     ResidueRange,
     SegmentConfig,
     Sequence,
@@ -61,6 +63,61 @@ _ALLOWED_INCLUDE: frozenset[str] = frozenset({"pocket_features", "interface", "p
 # (ESM_SCORER_ENTITLEMENT_REQUIRED); the default ``v10_2`` scores on your tier.
 _DeltaForgeScorer = Literal["auto", "current", "v10", "v10_2", "unified", "esm_augmented"]
 _DeltaForgeAggregateMethod = Literal["boltzmann_parallel", "best_pair", "mean_pair"]
+
+# Developability grade modules (bd-dre-h0cuo.2.3). Half-life rides inside the
+# stability grade server-side but is requestable/suppressible independently.
+_DEV_MODULES: frozenset[str] = frozenset({"stability", "immuno", "halflife"})
+
+
+def _build_developability_body(
+    *,
+    sequences: list[str] | None,
+    peptide_ids: list[int] | None,
+    fold_ids: list[str | int] | None,
+    modules: list[str] | None,
+    stability: bool | None,
+    immuno: bool | None,
+    halflife: bool | None,
+) -> dict[str, Any]:
+    """Build the camelCase request body for /api/v1/peptides/score-developability.
+
+    Validates that at least one input source is supplied and that any explicit
+    ``modules`` whitelist uses known module names. The academia+ default (all
+    three modules ON) is applied server-side; explicit ``False`` opt-outs and an
+    explicit ``modules`` whitelist are forwarded verbatim.
+    """
+    seqs = [str(s).strip().upper() for s in (sequences or []) if str(s).strip()]
+    pids = [int(p) for p in (peptide_ids or [])]
+    fids = [str(f) for f in (fold_ids or [])]
+    if not seqs and not pids and not fids:
+        raise ValueError(
+            "score_developability requires at least one of: sequences, peptide_ids, fold_ids"
+        )
+    if modules is not None:
+        unknown = {str(m).lower() for m in modules} - _DEV_MODULES
+        if unknown:
+            raise ValueError(
+                f"Unknown developability modules: {sorted(unknown)}. "
+                f"Valid: {sorted(_DEV_MODULES)}"
+            )
+    body: dict[str, Any] = {}
+    if seqs:
+        body["sequences"] = seqs
+    if pids:
+        body["peptideIds"] = pids
+    if fids:
+        body["foldIds"] = fids
+    if modules is not None:
+        body["modules"] = [str(m).lower() for m in modules]
+    # Explicit per-module opt-out flags (only forward when the caller set them).
+    if stability is not None:
+        body["stability"] = bool(stability)
+    if immuno is not None:
+        body["immuno"] = bool(immuno)
+    if halflife is not None:
+        body["halflife"] = bool(halflife)
+    return body
+
 
 # Cysteine-control keys that used to be passed via ``extra={...}`` and are now
 # first-class typed kwargs on :meth:`Peptides.generate`. We continue to accept
@@ -211,6 +268,21 @@ def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
 
 _TargetingStrategy = Literal["full_surface", "pocket_targeted"]
 
+# Receptor topology FACE to restrict the design pocket to (bd-LIGANDAI_ALPHA_V2-q3z1b).
+# The server resolves an explicit face to the matching membrane-topology residue
+# ranges (NC=extracellular, TM=transmembrane, CY=intracellular) and sets them as
+# the explicit-pocket target_residues. When unset (None) the backend featurizer
+# applies its receptor default (extracellular + transmembrane, excluding the
+# intracellular/cytoplasmic face) — so the override only fires when the caller
+# names a face. ``full`` means "do not restrict — fold/target the whole surface".
+_TargetFace = Literal[
+    "extracellular",  # NC ranges only
+    "ec_tm",          # NC + TM (the explicit form of the receptor default)
+    "transmembrane",  # TM ranges only
+    "intracellular",  # CY ranges only (cytoplasmic — explicit IC override)
+    "full",           # no face restriction (whole surface)
+]
+
 # Cyclic peptide mode. Controls which cyclization constraint is applied during
 # generation (recombinant-only scope — Adaptyv synthesis path).
 #
@@ -281,6 +353,50 @@ _StabilityMode = Literal["resist", "target"]
 _FoldPartnerMode = Literal["target_only", "native_complex", "all_conformations"]
 
 
+def _serialize_residue_ranges(
+    target_residues: ResidueRange | list[ResidueRange] | dict | list | None,
+) -> list[Any] | None:
+    """Normalize ``target_residues`` into a JSON-ready list of dicts.
+
+    Accepts a single :class:`ResidueRange`, a list of them, already-serialized
+    dicts, or any mix. A bare ``ResidueRange`` is wrapped into a one-element
+    list rather than iterated — iterating a pydantic model yields ``(field,
+    value)`` tuples, which would silently produce a corrupt pocket spec
+    (``[('chain', 'A'), ('start', 140), ...]``) that the server cannot read.
+    """
+    if target_residues is None:
+        return None
+    if isinstance(target_residues, ResidueRange):
+        items: list[Any] = [target_residues]
+    elif isinstance(target_residues, dict):
+        # A single already-serialized range dict.
+        items = [target_residues]
+    else:
+        items = list(target_residues)
+    return [
+        r.model_dump(by_alias=True) if isinstance(r, ResidueRange) else r
+        for r in items
+    ]
+
+
+def _jsonsafe_residue_ranges(value: Any) -> Any:
+    """Recursively convert any stray :class:`ResidueRange` to its dict form.
+
+    Final defensive pass over the request body so that residue ranges arriving
+    through *any* path (e.g. raw objects passed via ``**extra`` or nested in a
+    user-provided dict) are JSON-serializable. httpx serializes ``json=`` via
+    ``json.dumps``, which raises ``"Object of type ResidueRange is not JSON
+    serializable"`` if even one such object survives.
+    """
+    if isinstance(value, ResidueRange):
+        return value.model_dump(by_alias=True)
+    if isinstance(value, dict):
+        return {k: _jsonsafe_residue_ranges(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonsafe_residue_ranges(v) for v in value]
+    return value
+
+
 def _generation_target(
     gene: str,
     target_residues: list[ResidueRange] | None = None,
@@ -289,11 +405,9 @@ def _generation_target(
 ) -> dict[str, Any]:
     """Build a single PTF target spec for the parallel generate endpoint."""
     target: dict[str, Any] = {"gene": gene, "targetingStrategy": targeting_strategy}
-    if target_residues is not None:
-        target["targetResidues"] = [
-            r.model_dump(by_alias=True) if isinstance(r, ResidueRange) else r
-            for r in target_residues
-        ]
+    serialized = _serialize_residue_ranges(target_residues)
+    if serialized is not None:
+        target["targetResidues"] = serialized
     if variant_id is not None:
         target["variantId"] = variant_id
     return target
@@ -308,6 +422,7 @@ def _generation_body(
     target_chains: list[str] | None,
     fold_partners: _FoldPartnerMode | list[str] | None,
     targeting_strategy: _TargetingStrategy | None,
+    target_face: _TargetFace | None,
     pocket_expansion_radius_a: float | None,
     auto_fold: bool,
     top_n_fold: int | None,
@@ -613,9 +728,54 @@ def _generation_body(
                 raise ValueError("cascade_gate_top_n must be a positive integer")
             body["cascadeGateTopN"] = _top_n
 
+    # Receptor topology target face (bd-LIGANDAI_ALPHA_V2-q3z1b). Sent ONLY when
+    # the caller named a face — an unset face leaves the body field absent so the
+    # backend featurizer applies its receptor default (extracellular + TM, IC
+    # excluded). When present, the Express /api/ptf/parallel/generate handler
+    # resolves it to the matching membrane-topology residue ranges and sets them
+    # as the explicit-pocket target_residues (extracellular→NC, transmembrane→TM,
+    # intracellular→CY, ec_tm→NC+TM, full→no restriction).
+    if target_face is not None:
+        body["targetFace"] = target_face
+
     if extra:
         body.update(extra)
-    return body
+    # Final defensive pass: convert any stray ResidueRange (e.g. arriving via
+    # **extra, or nested in a user-provided dict) into its JSON dict form so the
+    # body is always json.dumps-able regardless of how residues entered it.
+    return _jsonsafe_residue_ranges(body)
+
+
+def _resolve_segment_config(
+    segments: "list[PeptideSegment] | list[dict] | None",
+    segment_config: "SegmentConfig | dict | None",
+) -> "SegmentConfig | dict | None":
+    """Reconcile the ``segments=`` convenience kwarg with ``segment_config=``.
+
+    ``segments`` is a convenience for the common motif-grafting case: pass a
+    plain ordered list of :class:`PeptideSegment` (premade + generated flanks)
+    and the SDK wraps them into ``SegmentConfig(mode="custom", segments=...)``.
+    Segment ``id``/``position`` auto-assign from list order (see
+    :class:`SegmentConfig`), so callers never hand-number.
+
+    Precedence: if ``segment_config`` is given explicitly it wins (and passing
+    both raises, to avoid a silent ambiguity). Plain dicts in ``segments`` are
+    coerced to :class:`PeptideSegment` so auto-numbering still applies.
+    """
+    from ligandai.types import PeptideSegment, SegmentConfig
+
+    if segments is None:
+        return segment_config
+    if segment_config is not None:
+        raise ValueError(
+            "Pass either segments=[...] or segment_config=SegmentConfig(...), "
+            "not both. Use segment_config for full control (mode/length_range); "
+            "use segments for the common 'list of segments' case."
+        )
+    coerced: list[PeptideSegment] = [
+        s if isinstance(s, PeptideSegment) else PeptideSegment(**s) for s in segments
+    ]
+    return SegmentConfig(mode="custom", segments=coerced)
 
 
 _VALID_FOLD_APPROACHES = ("boltz2_affinity", "esmfold2", "esmfold2_fast")
@@ -1090,13 +1250,38 @@ def _build_batch_fold_body(
     num_trajectories: int | None = None,
     msa_depth: int | None = None,
     use_potentials: bool | None = None,
+    msa_source_gene: str | None = None,
+    gene_range: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-    """Construct the POST /api/v1/folding/predict-batch JSON body."""
+    """Construct the POST /api/v1/folding/predict-batch JSON body.
+
+    ``msa_source_gene`` / ``gene_range`` (bd-dre-h0cuo.1): give an arbitrary
+    receptor a proper MSA derived from a homolog-rich PARENT gene instead of a
+    fresh, often-degenerate fragment search.
+
+    * ``receptor_sequence=<arbitrary seq>`` + ``msa_source_gene="COL17A1"``
+      → server derives the MSA from COL17A1's cached full-length MSA (column-
+      subset when the sequence is an exact substring; align otherwise).
+    * ``target_gene="COL17A1"`` + ``gene_range=(489, 566)`` (1-based inclusive)
+      → server slices the gene's sequence AND MSA columns to that range and
+      folds the slice. This is how you fold COL17A1 NC16A (residues 489-566).
+    """
     receptor_specified = [v for v in (target_gene, receptor_pdb, receptor_sequence) if v]
     if len(receptor_specified) != 1:
         raise ValueError(
             "Pass exactly one of target_gene=, receptor_pdb=, or receptor_sequence="
         )
+    if gene_range is not None and target_gene is None:
+        raise ValueError("gene_range= requires target_gene= (it slices that gene's sequence + MSA)")
+    if msa_source_gene is not None and receptor_sequence is None:
+        raise ValueError(
+            "msa_source_gene= only applies to receptor_sequence= "
+            "(use target_gene=+gene_range= to fold a gene's domain)"
+        )
+    if gene_range is not None:
+        s, e = int(gene_range[0]), int(gene_range[1])
+        if s < 1 or e < s:
+            raise ValueError(f"gene_range must be 1-based inclusive with start<=end, got {gene_range!r}")
 
     body: dict[str, Any] = {
         "peptides": _normalize_batch_peptide_inputs(peptides),
@@ -1110,6 +1295,10 @@ def _build_batch_fold_body(
         body["receptor_pdb"] = _resolve_receptor_pdb_arg(receptor_pdb)
     if receptor_sequence is not None:
         body["receptor_sequence"] = receptor_sequence
+    if msa_source_gene is not None:
+        body["msa_source_gene"] = str(msa_source_gene)
+    if gene_range is not None:
+        body["gene_range"] = [int(gene_range[0]), int(gene_range[1])]
     if receptor_name is not None:
         body["receptor_name"] = receptor_name
     if recycling_steps is not None:
@@ -1926,11 +2115,31 @@ def _flatten_peptide(raw: dict[str, Any], gene: str | None = None) -> dict[str, 
     _set_if_missing(out, "predictedPlddt", _first_present(raw.get("predicted_plddt"), qs.get("predicted_plddt")))
     _set_if_missing(out, "binderProb", _first_present(raw.get("binder_prob"), qs.get("binder_prob")))
 
-    # Stability / immuno (academia+ tier, may be None)
-    if not out.get("stability_grade") and raw.get("stability_scores"):
-        out["stabilityGrade"] = raw["stability_scores"].get("stability_grade")
-    if not out.get("immunogenicity_score") and raw.get("immuno_scores"):
-        out["immunogenicityScore"] = raw["immuno_scores"].get("immunogenicityScore")
+    # Stability / immuno / half-life (academia+ tier, may be None).
+    #
+    # NULL-GRADE ROOT-CAUSE FIX (bd-dre-h0cuo.2.3): the immuno mapping used to
+    # read ``immuno_scores.get("immunogenicityScore")`` — a key that DOES NOT
+    # EXIST in the persisted immuno_scores dict (real keys are ``immuno_grade``
+    # and ``immuno_risk_score``). So immunogenicityScore was always None even
+    # when grades were present. Stability read the right key (``stability_grade``)
+    # and was fine. Half-life (which rides inside stability_scores) was never
+    # surfaced at all. All three are now mapped from their real keys.
+    ss = raw.get("stability_scores")
+    if isinstance(ss, dict):
+        if not out.get("stabilityGrade") and not out.get("stability_grade"):
+            out["stabilityGrade"] = ss.get("stability_grade")
+        if out.get("halfLifeHours") is None and out.get("predicted_halflife_hours") is None:
+            out["halfLifeHours"] = ss.get("predicted_halflife_hours")
+        if out.get("halfLifeMin") is None and out.get("predicted_halflife_min") is None:
+            out["halfLifeMin"] = ss.get("predicted_halflife_min")
+    isd = raw.get("immuno_scores")
+    if isinstance(isd, dict):
+        if not out.get("immunoGrade") and not out.get("immuno_grade"):
+            out["immunoGrade"] = isd.get("immuno_grade")
+        # The numeric immunogenicity "score" is immuno_risk_score (0..1, lower
+        # = less immunogenic). Keep the historical camelCase output key.
+        if out.get("immunogenicityScore") is None and out.get("immunogenicity_score") is None:
+            out["immunogenicityScore"] = isd.get("immuno_risk_score")
     return out
 
 
@@ -1984,6 +2193,139 @@ def _session_id_from_payload(payload: dict[str, Any]) -> str | None:
     return sid if isinstance(sid, str) else None
 
 
+def _to_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_session_fold_results(
+    fold_results: Any,
+) -> Iterator[tuple[str | None, dict[str, Any]]]:
+    """Yield ``(gene, fold_entry)`` pairs from the session ``fold_results`` blob.
+
+    The session detail endpoint returns ``fold_results`` keyed by gene
+    (``{"PRLR": [ {...}, ... ]}``). A few legacy/list-shaped payloads return a
+    flat list of fold dicts. Handle both so the merge is robust to either.
+    """
+    if isinstance(fold_results, dict):
+        for gene, entries in fold_results.items():
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        yield (str(gene) if gene is not None else None), entry
+    elif isinstance(fold_results, list):
+        for entry in fold_results:
+            if isinstance(entry, dict):
+                yield None, entry
+
+
+def _merge_fold_results_into_peptides(
+    peptides: Any,
+    fold_results: Any,
+) -> None:
+    """Stamp post-fold metrics from ``fold_results`` onto matching peptides.
+
+    Root cause this fixes (bd-LIGANDAI_ALPHA_V2-u4gss): the session detail
+    endpoint returns the pre-fold peptide list (``session['peptides']``) and the
+    post-fold structural scores (``session['fold_results']``) as SEPARATE
+    structures. The server only stamps ``peptide.folded=true`` — it does NOT
+    copy ipsae/iptm/deltaG/Kd back onto the peptide. Without this merge,
+    ``generate(auto_fold=True)`` returns peptides whose post-fold fields are all
+    None, so callers see ``n_folded == 0`` even when folding succeeded.
+
+    Folds are matched to peptides by sequence (within a gene when both carry
+    one). When the same sequence has multiple folded conformations we keep the
+    one with the highest iPSAE so the surfaced metrics reflect the best pose.
+
+    Mutates the peptide dicts in place. ``peptides`` may be a flat list or a
+    dict keyed by gene (session detail format), matching ``_extract_peptides``.
+    """
+    if not fold_results:
+        return
+
+    # Build best-fold-per-(gene, sequence) and per-sequence (gene-agnostic) maps.
+    best_by_gene_seq: dict[tuple[str, str], dict[str, Any]] = {}
+    best_by_seq: dict[str, dict[str, Any]] = {}
+    for gene, fold in _iter_session_fold_results(fold_results):
+        seq = fold.get("sequence")
+        if not isinstance(seq, str) or not seq:
+            continue
+        ipsae = _to_optional_float(fold.get("ipsae"))
+
+        def _is_better(existing: dict[str, Any]) -> bool:
+            prev = _to_optional_float(existing.get("ipsae"))
+            return ipsae is not None and (prev is None or ipsae > prev)
+
+        if best_by_seq.get(seq) is None or _is_better(best_by_seq[seq]):
+            best_by_seq[seq] = fold
+        if gene is not None:
+            key = (gene.upper(), seq)
+            if best_by_gene_seq.get(key) is None or _is_better(best_by_gene_seq[key]):
+                best_by_gene_seq[key] = fold
+
+    if not best_by_seq:
+        return
+
+    def _lookup(pep: dict[str, Any]) -> dict[str, Any] | None:
+        seq = pep.get("sequence")
+        if not isinstance(seq, str) or not seq:
+            return None
+        gene = pep.get("targetGene") or pep.get("target_gene") or pep.get("gene")
+        if isinstance(gene, str):
+            hit = best_by_gene_seq.get((gene.upper(), seq))
+            if hit is not None:
+                return hit
+        return best_by_seq.get(seq)
+
+    def _apply(pep: dict[str, Any]) -> None:
+        fold = _lookup(pep)
+        if fold is None:
+            return
+        scores = fold.get("scores") if isinstance(fold.get("scores"), dict) else {}
+        # Post-fold structural scores → Peptide field names.
+        for field, candidates in (
+            ("ipsae", ("ipsae",)),
+            ("iptm", ("iptm",)),
+            ("ptm", ("ptm",)),
+            ("plddt", ("plddt",)),
+        ):
+            value = _first_present(
+                *(fold.get(c) for c in candidates),
+                *(scores.get(c) for c in candidates),
+            )
+            _set_if_missing(pep, field, _to_optional_float(value))
+        # DeltaForge ΔG → deltaforge_dg (alias deltaforgeDg).
+        dg = _first_present(
+            fold.get("deltaG"), fold.get("delta_g"),
+            scores.get("deltaG"), scores.get("delta_g"),
+        )
+        _set_if_missing(pep, "deltaforgeDg", _to_optional_float(dg))
+        # Predicted Kd → predicted_kd (alias predictedKd).
+        kd = _first_present(
+            fold.get("predictedKd"), fold.get("predicted_kd"), fold.get("kd_nm"),
+            scores.get("predictedKd"), scores.get("predicted_kd"),
+        )
+        _set_if_missing(pep, "predictedKd", _to_optional_float(kd))
+        pep["folded"] = True
+
+    if isinstance(peptides, list):
+        for pep in peptides:
+            if isinstance(pep, dict):
+                _apply(pep)
+    elif isinstance(peptides, dict):
+        for gene, gene_peps in peptides.items():
+            if not isinstance(gene_peps, list):
+                continue
+            for pep in gene_peps:
+                if isinstance(pep, dict):
+                    pep.setdefault("targetGene", str(gene))
+                    _apply(pep)
+
+
 def _generation_result_from_session(
     payload: dict[str, Any],
     session_response: dict[str, Any],
@@ -2015,6 +2357,21 @@ def _generation_result_from_session(
 
     if not _has_generation_peptides(result) and session.get("peptides") is not None:
         result["peptides"] = session["peptides"]
+
+    # bd-LIGANDAI_ALPHA_V2-u4gss: the session detail endpoint returns the
+    # pre-fold peptide list and the post-fold scores (``fold_results``) as
+    # SEPARATE structures; the server only stamps ``peptide.folded=true``. Merge
+    # the fold metrics (ipsae/iptm/ptm/plddt/ΔG/Kd) onto the matching peptides so
+    # generate(auto_fold=True) surfaces the folded scores instead of reporting
+    # n_folded=0. Operates on whichever peptide blob we ended up with (result's
+    # own, or the session-copied one).
+    session_fold_results = (
+        session.get("fold_results")
+        or session.get("foldResults")
+        or session.get("folds")
+    )
+    if session_fold_results and result.get("peptides") is not None:
+        _merge_fold_results_into_peptides(result["peptides"], session_fold_results)
 
     if result.get("totalGenerated") is None:
         result["totalGenerated"] = (
@@ -2093,6 +2450,22 @@ class Peptides(Resource):
         # to "pocket_targeted" unless you override here. Pass "full_surface"
         # explicitly to keep the residues as soft hints only.
         targeting_strategy: _TargetingStrategy | None = None,
+        # Receptor topology FACE override (bd-LIGANDAI_ALPHA_V2-q3z1b). For a
+        # membrane receptor target, restrict the design pocket to a specific
+        # topological face instead of the whole folded surface:
+        #   "extracellular" → NC (non-cytoplasmic / extracellular) ranges only
+        #   "ec_tm"         → NC + TM (the explicit form of the receptor default)
+        #   "transmembrane" → TM ranges only
+        #   "intracellular" → CY (cytoplasmic / intracellular) ranges only
+        #   "full"          → no face restriction (whole surface)
+        #   None (default)  → backend applies its receptor default
+        #                     (extracellular + TM, excluding the intracellular face)
+        # An extracellular peptide cannot reach the intracellular face in vivo,
+        # so the default excludes IC; pass "intracellular" to override that for
+        # cytoplasmic-delivery designs. The server resolves an explicit face to
+        # the matching membrane-topology residue ranges and uses them as the
+        # explicit-pocket target_residues.
+        target_face: _TargetFace | None = None,
         # Hotspot pocket expansion radius in Angstroms. When target_residues
         # are provided, the server includes every residue within this radius
         # of any listed hotspot atom in the design pocket. This is the right
@@ -2154,6 +2527,7 @@ class Peptides(Resource):
         num_trajectories: int | None = None,
         sampling_steps: int | None = None,
         glycosylation_enabled: bool | None = None,
+        segments: list[PeptideSegment] | list[dict] | None = None,
         segment_config: SegmentConfig | dict | None = None,
         pdc_config: PdcConfig | dict | None = None,
         ec_trimming_config: EcTrimmingConfig | dict | None = None,
@@ -2336,6 +2710,7 @@ class Peptides(Resource):
         # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
         # use the typed kwargs above. Hard-rejected in v0.3.0.
         _warn_deprecated_cys_extra(extra)
+        effective_segment_config = _resolve_segment_config(segments, segment_config)
         body = _generation_body(
             gene=gene,
             num_peptides=num_peptides,
@@ -2344,6 +2719,7 @@ class Peptides(Resource):
             target_chains=target_chains,
             fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
+            target_face=target_face,
             pocket_expansion_radius_a=pocket_expansion_radius_a,
             auto_fold=auto_fold,
             top_n_fold=top_n_fold,
@@ -2386,7 +2762,7 @@ class Peptides(Resource):
             num_trajectories=num_trajectories,
             sampling_steps=sampling_steps,
             glycosylation_enabled=glycosylation_enabled,
-            segment_config=segment_config,
+            segment_config=effective_segment_config,
             pdc_config=pdc_config,
             ec_trimming_config=ec_trimming_config,
             fold_engines=fold_engines,
@@ -2657,6 +3033,15 @@ class Peptides(Resource):
         receptor_pdb: str | None = None,
         receptor_sequence: str | None = None,
         receptor_name: str | None = None,
+        # bd-dre-h0cuo.1 — arbitrary-seq MSA:
+        #   msa_source_gene / parent_gene: derive a receptor_sequence's MSA from
+        #     a homolog-rich parent gene's cached MSA (column-subset on substring
+        #     match, align otherwise) instead of a fresh fragment search.
+        #   gene_range: with target_gene=, fold a 1-based inclusive residue range
+        #     (a domain) of the gene using the gene's MSA sliced to those columns.
+        msa_source_gene: str | None = None,
+        parent_gene: str | None = None,
+        gene_range: tuple[int, int] | None = None,
         diffusion_samples: int = 1,
         sampling_steps: int = 50,
         recycling_steps: int | None = None,
@@ -2943,6 +3328,11 @@ class Peptides(Resource):
             self._client, estimated=estimated, kind="fold_batch",
         )
 
+        # parent_gene is an alias for msa_source_gene; reject conflicting values.
+        _effective_msa_gene = msa_source_gene if msa_source_gene is not None else parent_gene
+        if msa_source_gene is not None and parent_gene is not None and msa_source_gene != parent_gene:
+            raise ValueError("Pass only one of msa_source_gene= or parent_gene= (they are aliases)")
+
         body = _build_batch_fold_body(
             peptides=peptides,
             target_gene=target_gene,
@@ -2962,6 +3352,8 @@ class Peptides(Resource):
             num_trajectories=num_trajectories,
             msa_depth=msa_depth,
             use_potentials=use_potentials,
+            msa_source_gene=_effective_msa_gene,
+            gene_range=gene_range,
         )
 
         # 4) Record submission BEFORE the POST. If the POST fails we'll mark
@@ -3581,6 +3973,69 @@ class Peptides(Resource):
         )
         items = payload.get("results") or payload.get("solubility") or []
         return [SolubilityResult.model_validate(s) for s in items]
+
+    def score_developability(
+        self,
+        sequences: list[str] | None = None,
+        *,
+        peptide_ids: list[int] | None = None,
+        fold_ids: list[str | int] | None = None,
+        modules: list[str] | None = None,
+        stability: bool | None = None,
+        immuno: bool | None = None,
+        halflife: bool | None = None,
+    ) -> list[DevelopabilityResult]:
+        """``POST /api/v1/peptides/score-developability`` — rescore existing peptides.
+
+        Compute the three developability grades — **stability**,
+        **immunogenicity**, and **half-life** — for already-generated peptides
+        with NO regeneration and NO refold. This is what lets you grade prior
+        design jobs (e.g. PRLR / CD200 / NC16A / LGR5 batches) without re-running
+        them.
+
+        Provide any combination of:
+
+        * ``sequences`` — raw amino-acid strings to grade directly.
+        * ``peptide_ids`` — ``ptf_generated_peptides.id`` values; resolved to
+          sequences server-side AND the grades are persisted back onto those
+          rows so subsequent reads return them.
+        * ``fold_ids`` — ``ptf_fold_results.id`` values; resolved to sequences.
+
+        Tier: academia and above (the three modules default ON). Opt a module
+        out with ``stability=False`` / ``immuno=False`` / ``halflife=False`` (or
+        an explicit ``modules=[...]`` whitelist). Free / basic tiers are rejected
+        with an upgrade-required error.
+
+        Args:
+            sequences: Peptide sequences to grade directly.
+            peptide_ids: ptf_generated_peptides primary keys to grade + persist.
+            fold_ids: ptf_fold_results primary keys to grade.
+            modules: Optional explicit module whitelist; subset of
+                ``["stability", "immuno", "halflife"]``. Defaults to all three.
+            stability: Set ``False`` to skip the stability grade.
+            immuno: Set ``False`` to skip the immunogenicity grade.
+            halflife: Set ``False`` to skip the half-life value.
+
+        Returns:
+            One :class:`~ligandai.types.DevelopabilityResult` per resolved
+            sequence, each carrying the nested ``stability_scores`` /
+            ``immuno_scores`` objects plus the headline grades and half-life.
+        """
+        body = _build_developability_body(
+            sequences=sequences,
+            peptide_ids=peptide_ids,
+            fold_ids=fold_ids,
+            modules=modules,
+            stability=stability,
+            immuno=immuno,
+            halflife=halflife,
+        )
+        payload = (
+            self._transport.request("POST", "/api/v1/peptides/score-developability", json=body)
+            or {}
+        )
+        items = payload.get("results") or []
+        return [DevelopabilityResult.model_validate(s) for s in items]
 
     def search(
         self,
@@ -4217,6 +4672,22 @@ class AsyncPeptides(AsyncResource):
         # to "pocket_targeted" unless you override here. Pass "full_surface"
         # explicitly to keep the residues as soft hints only.
         targeting_strategy: _TargetingStrategy | None = None,
+        # Receptor topology FACE override (bd-LIGANDAI_ALPHA_V2-q3z1b). For a
+        # membrane receptor target, restrict the design pocket to a specific
+        # topological face instead of the whole folded surface:
+        #   "extracellular" → NC (non-cytoplasmic / extracellular) ranges only
+        #   "ec_tm"         → NC + TM (the explicit form of the receptor default)
+        #   "transmembrane" → TM ranges only
+        #   "intracellular" → CY (cytoplasmic / intracellular) ranges only
+        #   "full"          → no face restriction (whole surface)
+        #   None (default)  → backend applies its receptor default
+        #                     (extracellular + TM, excluding the intracellular face)
+        # An extracellular peptide cannot reach the intracellular face in vivo,
+        # so the default excludes IC; pass "intracellular" to override that for
+        # cytoplasmic-delivery designs. The server resolves an explicit face to
+        # the matching membrane-topology residue ranges and uses them as the
+        # explicit-pocket target_residues.
+        target_face: _TargetFace | None = None,
         # Hotspot pocket expansion radius in Angstroms. When target_residues
         # are provided, the server includes every residue within this radius
         # of any listed hotspot atom in the design pocket. This is the right
@@ -4270,6 +4741,7 @@ class AsyncPeptides(AsyncResource):
         num_trajectories: int | None = None,
         sampling_steps: int | None = None,
         glycosylation_enabled: bool | None = None,
+        segments: list[PeptideSegment] | list[dict] | None = None,
         segment_config: SegmentConfig | dict | None = None,
         pdc_config: PdcConfig | dict | None = None,
         ec_trimming_config: EcTrimmingConfig | dict | None = None,
@@ -4323,6 +4795,7 @@ class AsyncPeptides(AsyncResource):
         # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
         # use the typed kwargs above. Hard-rejected in v0.3.0.
         _warn_deprecated_cys_extra(extra)
+        effective_segment_config = _resolve_segment_config(segments, segment_config)
         body = _generation_body(
             gene=gene,
             num_peptides=num_peptides,
@@ -4331,6 +4804,7 @@ class AsyncPeptides(AsyncResource):
             target_chains=target_chains,
             fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
+            target_face=target_face,
             pocket_expansion_radius_a=pocket_expansion_radius_a,
             auto_fold=auto_fold,
             top_n_fold=top_n_fold,
@@ -4373,7 +4847,7 @@ class AsyncPeptides(AsyncResource):
             num_trajectories=num_trajectories,
             sampling_steps=sampling_steps,
             glycosylation_enabled=glycosylation_enabled,
-            segment_config=segment_config,
+            segment_config=effective_segment_config,
             pdc_config=pdc_config,
             ec_trimming_config=ec_trimming_config,
             fold_engines=fold_engines,
@@ -4700,6 +5174,15 @@ class AsyncPeptides(AsyncResource):
         receptor_pdb: str | None = None,
         receptor_sequence: str | None = None,
         receptor_name: str | None = None,
+        # bd-dre-h0cuo.1 — arbitrary-seq MSA:
+        #   msa_source_gene / parent_gene: derive a receptor_sequence's MSA from
+        #     a homolog-rich parent gene's cached MSA (column-subset on substring
+        #     match, align otherwise) instead of a fresh fragment search.
+        #   gene_range: with target_gene=, fold a 1-based inclusive residue range
+        #     (a domain) of the gene using the gene's MSA sliced to those columns.
+        msa_source_gene: str | None = None,
+        parent_gene: str | None = None,
+        gene_range: tuple[int, int] | None = None,
         diffusion_samples: int = 1,
         sampling_steps: int = 50,
         recycling_steps: int | None = None,
@@ -4832,6 +5315,11 @@ class AsyncPeptides(AsyncResource):
             self._client, estimated=estimated, kind="fold_batch",
         )
 
+        # parent_gene is an alias for msa_source_gene; reject conflicting values.
+        _effective_msa_gene = msa_source_gene if msa_source_gene is not None else parent_gene
+        if msa_source_gene is not None and parent_gene is not None and msa_source_gene != parent_gene:
+            raise ValueError("Pass only one of msa_source_gene= or parent_gene= (they are aliases)")
+
         body = _build_batch_fold_body(
             peptides=peptides,
             target_gene=target_gene,
@@ -4851,6 +5339,8 @@ class AsyncPeptides(AsyncResource):
             num_trajectories=num_trajectories,
             msa_depth=msa_depth,
             use_potentials=use_potentials,
+            msa_source_gene=_effective_msa_gene,
+            gene_range=gene_range,
         )
 
         record_submission(
@@ -5297,6 +5787,39 @@ class AsyncPeptides(AsyncResource):
         )
         items = payload.get("results") or payload.get("solubility") or []
         return [SolubilityResult.model_validate(s) for s in items]
+
+    async def score_developability(
+        self,
+        sequences: list[str] | None = None,
+        *,
+        peptide_ids: list[int] | None = None,
+        fold_ids: list[str | int] | None = None,
+        modules: list[str] | None = None,
+        stability: bool | None = None,
+        immuno: bool | None = None,
+        halflife: bool | None = None,
+    ) -> list[DevelopabilityResult]:
+        """Async ``POST /api/v1/peptides/score-developability``.
+
+        See :meth:`Peptides.score_developability` for full semantics: standalone
+        developability rescore (stability / immuno / half-life) of existing
+        peptides — no regen, no refold — by sequence, peptide_id, or fold_id.
+        """
+        body = _build_developability_body(
+            sequences=sequences,
+            peptide_ids=peptide_ids,
+            fold_ids=fold_ids,
+            modules=modules,
+            stability=stability,
+            immuno=immuno,
+            halflife=halflife,
+        )
+        payload = (
+            await self._transport.request("POST", "/api/v1/peptides/score-developability", json=body)
+            or {}
+        )
+        items = payload.get("results") or []
+        return [DevelopabilityResult.model_validate(s) for s in items]
 
     async def search(
         self,

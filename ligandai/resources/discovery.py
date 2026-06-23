@@ -21,6 +21,36 @@ from ligandai.types import (
 )
 
 
+def _split_shared_differential(markers: list[Any]) -> tuple[list[str], list[str]]:
+    """Split comparison markers into SHARED vs DIFFERENTIAL gene lists.
+    [bd-LIGANDAI_ALPHA_V2-k5usa]
+
+    - differential: target-enriched (fold_change > 2) or target-exclusive, or
+      specificity-ranked (gtex SI) markers with no reference TPM.
+    - shared: expressed in target AND a reference (fold_change <= 2 with a
+      non-trivial reference TPM).
+    """
+    shared: list[str] = []
+    differential: list[str] = []
+    for m in markers:
+        gene = getattr(m, "gene", None)
+        if not gene:
+            continue
+        fc = getattr(m, "fold_change", None)
+        ref_tpm = getattr(m, "ref_tpm", None)
+        if fc is not None:
+            if fc > 2:
+                differential.append(gene)
+            elif ref_tpm is not None and ref_tpm > 1:
+                shared.append(gene)
+            else:
+                differential.append(gene)
+        else:
+            # SI-method (gtex) markers are specificity-ranked → differential.
+            differential.append(gene)
+    return shared, differential
+
+
 class Discovery(Resource):
     """``/api/transcriptomics/*``, ``/api/scrna/*``, ``/api/geo-import/*``,
     ``/api/transport-vasculome/*``."""
@@ -180,8 +210,19 @@ class Discovery(Resource):
         min_score: float = 0.0,
         limit: int = 50,
         include_risks: bool = False,
+        specificity_weight: float = 0.0,
     ) -> list[BBBReceptor]:
-        """Enterprise-only. BBB transcytosis receptors."""
+        """Enterprise-only. BBB transcytosis receptors.
+
+        :param specificity_weight: 0..1 BBB-specificity lever
+            [bd-LIGANDAI_ALPHA_V2-k5usa]. ``0`` (default) ranks purely by
+            transport suitability (unchanged behaviour). ``> 0`` blends the
+            transport score with the GTEx BBB-specificity index and re-ranks, so
+            broadly-shared (off-target-prone) shuttles are demoted in favour of
+            brain-selective ones. Each returned :class:`~ligandai.types.BBBReceptor`
+            then carries ``specificity_index``, ``top_peripheral_tissues``,
+            ``broadly_shared`` and ``combined_score``.
+        """
         if self._client is not None:
             self._client._require_feature("transport_vasculome")
         body = {
@@ -189,12 +230,95 @@ class Discovery(Resource):
             "minScore": min_score,
             "limit": limit,
             "includeRisks": include_risks,
+            "specificityWeight": specificity_weight,
         }
         payload = self._transport.request(
             "POST", "/api/transport-vasculome/query", json=body
         ) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+        items = (
+            payload
+            if isinstance(payload, list)
+            else payload.get("receptors", payload.get("results", []))
+        )
         return [BBBReceptor.model_validate(r) for r in items]
+
+    def compare_targets(
+        self,
+        groups: list[TargetGroup | ReferenceGroup | dict[str, Any]],
+        mode: Literal["focus", "global", "compare"] = "compare",
+        receptor_only: bool = False,
+        top_n: int = 100,
+    ) -> ComparisonResponse:
+        """Compare 2+ desired target groups and surface SHARED vs DIFFERENTIAL
+        genes plus specificity. [bd-LIGANDAI_ALPHA_V2-k5usa]
+
+        ``groups[0]`` is the target; ``groups[1:]`` are references. A group can be
+        a custom dataset (``type='custom'`` + ``dataset_id`` / ``cell_types``), a
+        GTEx tissue (``type='gtex'`` + ``tissue``), or a gene/receptor set
+        (``type='geneset'`` + ``genes``), e.g. a BBB transcytosis shuttle set
+        or a pathway. This is what lets you compare "BBB-shuttle set vs brain-cortex
+        targets" or "pathway A vs pathway B" in ONE call, and lets a user see
+        which BBB shuttles are brain-selective vs broadly shared.
+
+        The returned :class:`~ligandai.types.ComparisonResponse` is annotated with
+        ``shared_genes`` (expressed in target AND a reference) and
+        ``differential_genes`` (target-enriched / target-exclusive).
+        """
+        if not groups:
+            raise ValueError("compare_targets requires at least one group (groups[0]=target)")
+        norm = [g if isinstance(g, (TargetGroup, ReferenceGroup)) else TargetGroup.model_validate(g) for g in groups]
+        target = TargetGroup.model_validate(norm[0].model_dump(by_alias=True))
+        references = [ReferenceGroup.model_validate(g.model_dump(by_alias=True)) for g in norm[1:]]
+        resp = self.compare_groups(
+            target_group=target,
+            reference_groups=references or None,
+            mode=mode,
+            receptor_only=receptor_only,
+            top_n=top_n,
+        )
+        shared, differential = _split_shared_differential(resp.results)
+        resp.shared_genes = shared
+        resp.differential_genes = differential
+        return resp
+
+    def compare_bbb_vs_brain(
+        self,
+        bbb_modality: Literal["monovalent", "multivalent", "both"] = "monovalent",
+        brain_tissues: list[str] | None = None,
+        bbb_limit: int = 25,
+        specificity_weight: float = 0.0,
+        receptor_only: bool = False,
+        top_n: int = 100,
+    ) -> ComparisonResponse:
+        """Convenience recipe: compare the BBB transcytosis shuttle set against
+        brain-parenchyma targets. [bd-LIGANDAI_ALPHA_V2-k5usa]
+
+        Builds a ``geneset`` target group from the top BBB transcytosis receptors
+        (via :meth:`transport_vasculome`) and compares it against the named GTEx
+        brain tissues — so a user sees which BBB shuttles are brain-selective vs
+        broadly shared, and which brain targets are co-expressed at the BBB.
+        """
+        brain_tissues = brain_tissues or ["brain_cortex"]
+        shuttles = self.transport_vasculome(
+            modality=bbb_modality,
+            limit=bbb_limit,
+            specificity_weight=specificity_weight,
+        )
+        shuttle_genes = [r.gene for r in shuttles if r.gene]
+        target = TargetGroup(
+            name="BBB transcytosis shuttles",
+            type="geneset",
+            genes=shuttle_genes,
+        )
+        references = [
+            ReferenceGroup(name=t, type="gtex", tissue=t) for t in brain_tissues
+        ]
+        return self.compare_targets(
+            [target, *references],
+            mode="compare",
+            receptor_only=receptor_only,
+            top_n=top_n,
+        )
 
     def tissues(self) -> list[str]:
         payload = self._transport.request("GET", "/api/transcriptomics/tissues") or []
@@ -334,7 +458,15 @@ class AsyncDiscovery(AsyncResource):
         min_score: float = 0.0,
         limit: int = 50,
         include_risks: bool = False,
+        specificity_weight: float = 0.0,
     ) -> list[BBBReceptor]:
+        """Enterprise-only. BBB transcytosis receptors.
+
+        :param specificity_weight: 0..1 BBB-specificity lever
+            [bd-LIGANDAI_ALPHA_V2-k5usa]. ``0`` (default) ranks by transport
+            suitability; ``> 0`` blends in the GTEx BBB-specificity index and
+            re-ranks to demote broadly-shared (off-target-prone) shuttles.
+        """
         if self._client is not None:
             self._client._require_feature("transport_vasculome")
         body = {
@@ -342,12 +474,69 @@ class AsyncDiscovery(AsyncResource):
             "minScore": min_score,
             "limit": limit,
             "includeRisks": include_risks,
+            "specificityWeight": specificity_weight,
         }
         payload = await self._transport.request(
             "POST", "/api/transport-vasculome/query", json=body
         ) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+        items = (
+            payload
+            if isinstance(payload, list)
+            else payload.get("receptors", payload.get("results", []))
+        )
         return [BBBReceptor.model_validate(r) for r in items]
+
+    async def compare_targets(
+        self,
+        groups: list[TargetGroup | ReferenceGroup | dict[str, Any]],
+        mode: Literal["focus", "global", "compare"] = "compare",
+        receptor_only: bool = False,
+        top_n: int = 100,
+    ) -> ComparisonResponse:
+        """Async: compare 2+ target groups → SHARED vs DIFFERENTIAL + specificity.
+        See :meth:`Discovery.compare_targets`. [bd-LIGANDAI_ALPHA_V2-k5usa]
+        """
+        if not groups:
+            raise ValueError("compare_targets requires at least one group (groups[0]=target)")
+        norm = [g if isinstance(g, (TargetGroup, ReferenceGroup)) else TargetGroup.model_validate(g) for g in groups]
+        target = TargetGroup.model_validate(norm[0].model_dump(by_alias=True))
+        references = [ReferenceGroup.model_validate(g.model_dump(by_alias=True)) for g in norm[1:]]
+        resp = await self.compare_groups(
+            target_group=target,
+            reference_groups=references or None,
+            mode=mode,
+            receptor_only=receptor_only,
+            top_n=top_n,
+        )
+        shared, differential = _split_shared_differential(resp.results)
+        resp.shared_genes = shared
+        resp.differential_genes = differential
+        return resp
+
+    async def compare_bbb_vs_brain(
+        self,
+        bbb_modality: Literal["monovalent", "multivalent", "both"] = "monovalent",
+        brain_tissues: list[str] | None = None,
+        bbb_limit: int = 25,
+        specificity_weight: float = 0.0,
+        receptor_only: bool = False,
+        top_n: int = 100,
+    ) -> ComparisonResponse:
+        """Async BBB-vs-brain recipe. See :meth:`Discovery.compare_bbb_vs_brain`.
+        [bd-LIGANDAI_ALPHA_V2-k5usa]
+        """
+        brain_tissues = brain_tissues or ["brain_cortex"]
+        shuttles = await self.transport_vasculome(
+            modality=bbb_modality,
+            limit=bbb_limit,
+            specificity_weight=specificity_weight,
+        )
+        shuttle_genes = [r.gene for r in shuttles if r.gene]
+        target = TargetGroup(name="BBB transcytosis shuttles", type="geneset", genes=shuttle_genes)
+        references = [ReferenceGroup(name=t, type="gtex", tissue=t) for t in brain_tissues]
+        return await self.compare_targets(
+            [target, *references], mode="compare", receptor_only=receptor_only, top_n=top_n
+        )
 
     async def tissues(self) -> list[str]:
         payload = await self._transport.request("GET", "/api/transcriptomics/tissues") or []
