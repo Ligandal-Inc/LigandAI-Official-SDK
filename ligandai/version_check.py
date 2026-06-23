@@ -17,7 +17,10 @@ PACKAGE_NAME = "ligandai"
 PYPI_JSON_URL = "https://pypi.org/pypi/ligandai/json"
 PYPI_RELEASE_URL = "https://pypi.org/pypi/ligandai/{version}/json"
 SKIP_ENV_VAR = "LIGANDAI_SKIP_VERSION_CHECK"
-EXPECTED_REPOSITORY = "github.com/ligandal/ligandai-python-sdk"
+EXPECTED_REPOSITORIES = (
+    "github.com/ligandal-inc/ligandai-official-sdk",
+    "github.com/ligandal/ligandai-python-sdk",
+)
 
 _VERSION_NOTICE_CACHE: str | None = None
 _VERSION_NOTICE_CHECKED = False
@@ -51,7 +54,12 @@ def _metadata_matches_sdk(payload: dict[str, Any]) -> bool:
         str(info.get("home_page") or ""),
         *(str(value or "") for value in project_urls.values()),
     ]
-    return any(EXPECTED_REPOSITORY in url for url in urls)
+    normalized_urls = [url.lower().removesuffix(".git") for url in urls]
+    return any(
+        expected in url
+        for expected in EXPECTED_REPOSITORIES
+        for url in normalized_urls
+    )
 
 
 def _release_has_active_files(payload: dict[str, Any]) -> bool:
@@ -68,8 +76,8 @@ def get_latest_pypi_version(timeout: float = 2.0) -> str | None:
 
     The check validates that the release metadata points back to the real
     ``ligandal/ligandai-python-sdk`` repository and has at least one active
-    file. That prevents accidental uploads from another package root from being
-    recommended as an SDK update target.
+    file. That prevents uploads from another package root from being recommended
+    as an SDK update target.
     """
     if os.environ.get(SKIP_ENV_VAR, "").lower() in {"1", "true", "yes", "on"}:
         return None
@@ -137,4 +145,3 @@ def emit_update_notice(printer: Callable[[str], None] | None = None) -> str | No
     else:
         printer(notice)
     return notice
-

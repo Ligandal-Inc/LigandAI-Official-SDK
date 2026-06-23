@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.3] - 2026-06-23
+
+### Fixed
+
+- Publishes `ligandai` as the official Python SDK package, with package
+  metadata aligned to the SDK repository and Python API surface.
+- Keeps `AGENTS.md`, `CLAUDE.md`, `.claude/skills`, and cross-agent `skills/`
+  assets in both wheel and sdist artifacts so SDK consumers can inspect the
+  agent guidance from the installed distribution.
+- Accepts `LIGANDAL_API_KEY` as a legacy environment-variable alias while
+  keeping `LIGANDAI_API_KEY` as the canonical SDK variable.
+- Tightens PyPI update metadata validation so future CLI-only package uploads
+  are not accepted as official SDK update targets.
+
 ## [0.7.0] - 2026-06-11
 
 ### Added — program_id + conversation_id for run organization

@@ -57,18 +57,18 @@ from ligandai.errors import (
 from ligandai.key_wallet import WALLET_PATH, KeyWallet
 from ligandai.resources.account import Account, AsyncAccount
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
-from ligandai.resources.linker_modifications import (
-    AsyncLinkerModifications,
-    LinkerModifications,
-)
 from ligandai.resources.charts import AsyncCharts, Charts
-from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
+from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
 from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
 from ligandai.resources.jobs import AsyncJobs, Jobs
 from ligandai.resources.ligands import AsyncLigands, Ligands
+from ligandai.resources.linker_modifications import (
+    AsyncLinkerModifications,
+    LinkerModifications,
+)
 from ligandai.resources.memory import AsyncMemory, Memory
 from ligandai.resources.msa import MSA, AsyncMSA
 from ligandai.resources.peptides import AsyncPeptides, Peptides
@@ -105,10 +105,18 @@ def _looks_like_target_sequence(value: str | None) -> bool:
 
 
 def _resolve_api_key(api_key: str | None) -> str | None:
-    """Get API key from arg, then env vars."""
+    """Get API key from arg, then env vars.
+
+    ``LIGANDAI_API_KEY`` is canonical. ``LIGANDAL_API_KEY`` is accepted for
+    compatibility with older CLI-onboard snippets.
+    """
     if api_key:
         return api_key
-    return os.environ.get("LIGANDAI_API_KEY") or os.environ.get("LIGANDAI_TEST_API_KEY")
+    return (
+        os.environ.get("LIGANDAI_API_KEY")
+        or os.environ.get("LIGANDAL_API_KEY")
+        or os.environ.get("LIGANDAI_TEST_API_KEY")
+    )
 
 
 def _resolve_impersonation() -> str | None:
@@ -210,7 +218,7 @@ class _ClientCommon:
     # ─── Local dedupe + credit-ledger access ─────────
 
     @property
-    def submitted_set(self) -> "SubmittedSet":
+    def submitted_set(self) -> SubmittedSet:
         """Lazy ``~/.ligandai/submitted.db`` handle — created on first use.
 
         Used by the SDK's pre-submit dedupe and concurrency-cap checks. End
@@ -229,7 +237,7 @@ class _ClientCommon:
         return self._submitted_set
 
     @property
-    def credit_ledger(self) -> "CreditLedger":
+    def credit_ledger(self) -> CreditLedger:
         """Lazy ``~/.ligandai/credit_ledger.db`` handle — created on first use.
 
         Append-only audit trail of credit consumption. Use

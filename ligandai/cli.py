@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -26,7 +27,11 @@ def _print_err(msg: str) -> None:
 
 def _require_env_key() -> str | None:
     """Read the API key from env without printing it."""
-    return os.environ.get("LIGANDAI_API_KEY") or os.environ.get("LIGANDAI_TEST_API_KEY")
+    return (
+        os.environ.get("LIGANDAI_API_KEY")
+        or os.environ.get("LIGANDAL_API_KEY")
+        or os.environ.get("LIGANDAI_TEST_API_KEY")
+    )
 
 
 # ─── keys mint ───────────────────────────────────────────────────────────────
@@ -285,7 +290,7 @@ def _format_progress_bar(pct: int, width: int = 40) -> str:
     Filled cells show used spend; empty cells show remaining headroom.
     """
     pct = max(0, min(100, int(pct)))
-    filled = int(round(width * pct / 100))
+    filled = round(width * pct / 100)
     return "█" * filled + "░" * (width - filled)
 
 
@@ -318,7 +323,7 @@ def render_credits_widget(widget: Any, *, no_color: bool = False) -> str:
         f"  Resets {reset_str} · ${limit:.0f} monthly limit",
         "",
         f"  ▸ 1. ${balance_usd:.2f} balance · auto-reload {'on' if auto else 'off'}",
-        f"    2. Buy more  (ligandai credits top-up --amount 50)",
+        "    2. Buy more  (ligandai credits top-up --amount 50)",
         f"    3. {'Disable' if auto else 'Enable'} auto-reload",
     ]
     return "\n".join(lines)
@@ -393,7 +398,7 @@ def cmd_credits_auto(args: argparse.Namespace) -> int:
         f"Auto-reload {'enabled' if cfg.enabled else 'disabled'} "
         f"(threshold={cfg.threshold_credits:,} cr, amount=${cfg.amount_usd})"
         if cfg.enabled
-        else f"Auto-reload disabled."
+        else "Auto-reload disabled."
     )
     return 0
 

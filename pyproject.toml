@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ligandai"
-version = "0.7.0"
+version = "0.7.3"
 description = "Official Python SDK for the LIGANDAI (TM) platform — peptide design, structure prediction, scoring, and discovery."
 readme = "README.md"
 license = { text = "Proprietary. Use of this SDK constitutes acceptance of https://ligandai.com/terms and https://ligandai.com/eula." }
@@ -78,6 +78,12 @@ Changelog = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK/blob/main/CHA
 [tool.hatch.build.targets.wheel]
 packages = ["ligandai"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"AGENTS.md" = "AGENTS.md"
+"CLAUDE.md" = "CLAUDE.md"
+"skills" = "skills"
+".claude/skills" = ".claude/skills"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/ligandai",
@@ -85,11 +91,16 @@ include = [
     "/examples",
     "/skills",
     "/.claude/skills",
+    "/AGENTS.md",
+    "/CLAUDE.md",
     "/README.md",
     "/LICENSE",
     "/CHANGELOG.md",
     "/pyproject.toml",
 ]
+
+[tool.hatch.build.targets.sdist.force-include]
+"CLAUDE.md" = "CLAUDE.md"
 
 [tool.ruff]
 line-length = 100

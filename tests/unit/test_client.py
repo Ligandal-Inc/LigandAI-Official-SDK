@@ -27,10 +27,35 @@ def test_construct_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert c.api_key == "lgai_ent_envkey"
 
 
+def test_construct_from_legacy_ligandal_env_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LIGANDAI_API_KEY", raising=False)
+    monkeypatch.delenv("LIGANDAI_TEST_API_KEY", raising=False)
+    monkeypatch.setenv("LIGANDAL_API_KEY", "lgai_basic_aliaskey")
+
+    c = LigandAI()
+
+    assert c.tier == "basic"
+    assert c.api_key == "lgai_basic_aliaskey"
+
+
+def test_canonical_env_precedes_legacy_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LIGANDAI_API_KEY", "lgai_ent_envkey")
+    monkeypatch.setenv("LIGANDAL_API_KEY", "lgai_basic_aliaskey")
+
+    c = LigandAI()
+
+    assert c.tier == "enterprise"
+    assert c.api_key == "lgai_ent_envkey"
+
+
 def test_anonymous_client() -> None:
     c = LigandAI()
     # If no env var either
-    if "LIGANDAI_API_KEY" not in os.environ and "LIGANDAI_TEST_API_KEY" not in os.environ:
+    if (
+        "LIGANDAI_API_KEY" not in os.environ
+        and "LIGANDAL_API_KEY" not in os.environ
+        and "LIGANDAI_TEST_API_KEY" not in os.environ
+    ):
         assert c.tier is None
         assert c.api_key is None
 

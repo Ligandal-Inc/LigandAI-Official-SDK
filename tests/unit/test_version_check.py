@@ -40,6 +40,18 @@ def _wrong_payload(version: str) -> dict:
     }
 
 
+def _cli_payload(version: str) -> dict:
+    return {
+        "info": {
+            "version": version,
+            "project_urls": {
+                "Repository": "https://github.com/ligandal/ligandai-cli",
+            },
+        },
+        "urls": [{"filename": f"ligandai-{version}.tar.gz", "yanked": False}],
+    }
+
+
 def test_version_helpers_identify_outdated_releases() -> None:
     assert is_outdated("0.3.5", "0.3.6")
     assert get_update_notice("0.3.5", "0.3.6") is not None
@@ -72,6 +84,24 @@ def test_latest_version_ignores_wrong_package_metadata(
     httpx_mock.add_response(url=PYPI_036, json=_sdk_payload("0.3.6"))
 
     assert get_latest_pypi_version() == "0.3.6"
+
+
+def test_latest_version_ignores_cli_package_metadata(
+    httpx_mock: HTTPXMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LIGANDAI_SKIP_VERSION_CHECK", raising=False)
+    httpx_mock.add_response(
+        url=PYPI_PROJECT,
+        json={
+            **_cli_payload("0.7.2"),
+            "releases": {"0.7.2": [{}], "0.7.0": [{}]},
+        },
+    )
+    httpx_mock.add_response(url="https://pypi.org/pypi/ligandai/0.7.2/json", json=_cli_payload("0.7.2"))
+    httpx_mock.add_response(url="https://pypi.org/pypi/ligandai/0.7.0/json", json=_sdk_payload("0.7.0"))
+
+    assert get_latest_pypi_version() == "0.7.0"
 
 
 def test_latest_version_ignores_yanked_files(
