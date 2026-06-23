@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.4] - 2026-06-23
+
+### Added — `analysis` resource (structure / sequence analysis)
+- New `client.analysis` namespace (sync + async) backed by real, deployed
+  server endpoints:
+  - `analysis.interface_residues(pdb_content, chain_a, chain_b)` →
+    `POST /api/analysis/interface`. Interface residues from the
+    `binder_design` heavy-atom (8.0 Å) interface analyzer; returns
+    `chain_a_residues` / `chain_b_residues` plus `distance_cutoff_used` /
+    `contact_definition`.
+  - `analysis.immunogenicity(sequence, species=, threshold=, include_positions=)`
+    → `POST /api/analysis/immunogenicity`. Forwards to the multi-organism MHC
+    scanner (pro-feature gate + quota apply); lower score is better,
+    `passes = score <= threshold`.
+  - `analysis.batch_immunogenicity(sequences, species=, threshold=)` →
+    `POST /api/analysis/immunogenicity/batch`. Per-sequence metered scan (no
+    batch bypass of the pro-gate/quota); returns the `scores` list.
+  - `analysis.score_expression(sequences, include_bli=)` →
+    `POST /api/synthesis/score-expression`. E. coli cell-free expression risk
+    (GRAVY / charge clustering / terminal basics) with optional BLI suitability.
+
+### Notes
+- Single-peptide `POST /api/fold` remains a server-side `501` and is therefore
+  intentionally **not** exposed as an SDK method; use the batch fold / session
+  fold surfaces (`peptides.fold_batch`, auto-fold on `generate`) instead.
+
+### Added — features restored from the 0.6.x line onto the official SDK
+- Comparative transcriptomics across 2+ target groups: `discovery.compare_targets()` and `discovery.compare_bbb_vs_brain()`, with a new `geneset` group type (pathway / receptor-set) alongside `custom`/`gtex`, returning shared vs differential expression.
+- Specificity-aware BBB shuttle selection: `discovery.transport_vasculome(specificity_weight=...)` + `specificity_index` / `broadly_shared` / peripheral-tissue fields on `BBBReceptor`.
+- Full Receptor Intelligence atlas: `proteins.receptor_atlas(gene, full=...)` + `ReceptorAtlas` model.
+- `peptides.generate(target_face=...)` for intelligence-driven receptor face targeting (extracellular / ec_tm / transmembrane / intracellular / full).
+- `peptides.score_developability()` rescore + `DevelopabilityResult`.
+- `fold_batch()` arbitrary-sequence MSA via `msa_source_gene` / `parent_gene` / `gene_range`.
+- Motif-grafting `segments=` kwarg with auto id/position + ResidueRange serialization.
+
+### Fixed
+- `generate(auto_fold=True)` now reports folds — session `fold_results` merged onto returned peptides.
+
 ## [0.7.3] - 2026-06-23
 
 ### Fixed

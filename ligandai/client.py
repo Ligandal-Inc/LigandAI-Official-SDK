@@ -56,6 +56,7 @@ from ligandai.errors import (
 )
 from ligandai.key_wallet import WALLET_PATH, KeyWallet
 from ligandai.resources.account import Account, AsyncAccount
+from ligandai.resources.analysis import Analysis, AsyncAnalysis
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
@@ -363,6 +364,9 @@ class LigandAI(_ClientCommon):
 
         # Resource namespaces
         self.account: Account = Account(self._transport)
+        # Structure/sequence analysis — interface residues, immunogenicity,
+        # E. coli expression risk (POST /api/analysis/*, score-expression).
+        self.analysis: Analysis = Analysis(self._transport, client=self)
         self.bivalent: Bivalent = Bivalent(self._transport, client=self)
         # 3dalk — linker_modifications + Mode B payload optimization.
         self.linker_modifications: LinkerModifications = LinkerModifications(
@@ -677,6 +681,9 @@ class AsyncLigandAI(_ClientCommon):
         )
 
         self.account: AsyncAccount = AsyncAccount(self._transport)
+        # Structure/sequence analysis — interface residues, immunogenicity,
+        # E. coli expression risk (POST /api/analysis/*, score-expression).
+        self.analysis: AsyncAnalysis = AsyncAnalysis(self._transport, client=self)
         self.bivalent: AsyncBivalent = AsyncBivalent(self._transport, client=self)
         # 3dalk — linker_modifications + Mode B payload optimization.
         self.linker_modifications: AsyncLinkerModifications = AsyncLinkerModifications(
