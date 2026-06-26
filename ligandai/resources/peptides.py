@@ -402,6 +402,7 @@ def _generation_target(
     target_residues: list[ResidueRange] | None = None,
     targeting_strategy: _TargetingStrategy = "full_surface",
     variant_id: int | None = None,
+    user_pdb_id: int | None = None,
 ) -> dict[str, Any]:
     """Build a single PTF target spec for the parallel generate endpoint."""
     target: dict[str, Any] = {"gene": gene, "targetingStrategy": targeting_strategy}
@@ -410,6 +411,10 @@ def _generation_target(
         target["targetResidues"] = serialized
     if variant_id is not None:
         target["variantId"] = variant_id
+    if user_pdb_id is not None:
+        target["userPdbId"] = user_pdb_id
+        target["pdbId"] = f"userpdb_{user_pdb_id}"
+        target["activeStructureSource"] = "user_pdb"
     return target
 
 
@@ -429,6 +434,7 @@ def _generation_body(
     ec_domain_trimming: bool,
     deimmunize_mode: bool,
     variant_id: int | None,
+    user_pdb_id: int | None,
     gen_gpus: int,
     fold_gpus: int,
     program_id: int | str | None,
@@ -498,7 +504,7 @@ def _generation_body(
     )
 
     body: dict[str, Any] = {
-        "targets": [_generation_target(gene, target_residues, effective_strategy, variant_id)],
+        "targets": [_generation_target(gene, target_residues, effective_strategy, variant_id, user_pdb_id)],
         "lengthRange": list(length_range),
         "autoFoldEnabled": auto_fold,
         "ecDomainTrimming": ec_domain_trimming,
@@ -2478,12 +2484,13 @@ class Peptides(Resource):
         ec_domain_trimming: bool = True,
         deimmunize_mode: bool = False,
         variant_id: int | None = None,
+        user_pdb_id: int | None = None,
         gen_gpus: int = 1,
         fold_gpus: int = 1,
         program_id: int | str | None = None,
         conversation_id: str | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
-        quality_guided: bool = False,
+        quality_guided: bool = True,
         quality_guidance_scale: float = 1.0,
         immunogenicity: bool = False,
         immuno_strength: float = 2.0,
@@ -2587,8 +2594,10 @@ class Peptides(Resource):
             program_id: Program/workstream ID to associate session with.
             cysteine_mode: Cysteine placement policy (``"disulfide_only"`` /
                 ``"allow_all"`` / ``"exclude_all"``).
-            quality_guided: Enable quality-guided generation. Available to all
-                authenticated tiers, including free; server-side credits and
+            quality_guided: Enable quality-guided generation. Defaults to True —
+                without it the base generator can collapse to low-diversity,
+                degenerate sequences, so it should stay on for normal use. Available
+                to all authenticated tiers, including free; server-side credits and
                 retention/licensing terms still apply.
             quality_guidance_scale: Scale for quality guidance (default 1.0).
             immunogenicity: Enable immune guidance (academia+ tier). Steers
@@ -2726,6 +2735,7 @@ class Peptides(Resource):
             ec_domain_trimming=ec_domain_trimming,
             deimmunize_mode=deimmunize_mode,
             variant_id=variant_id,
+            user_pdb_id=user_pdb_id,
             gen_gpus=gen_gpus,
             fold_gpus=fold_gpus,
             program_id=program_id,
@@ -4700,12 +4710,13 @@ class AsyncPeptides(AsyncResource):
         ec_domain_trimming: bool = True,
         deimmunize_mode: bool = False,
         variant_id: int | None = None,
+        user_pdb_id: int | None = None,
         gen_gpus: int = 1,
         fold_gpus: int = 1,
         program_id: int | str | None = None,
         conversation_id: str | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
-        quality_guided: bool = False,
+        quality_guided: bool = True,
         quality_guidance_scale: float = 1.0,
         immunogenicity: bool = False,
         immuno_strength: float = 2.0,
@@ -4811,6 +4822,7 @@ class AsyncPeptides(AsyncResource):
             ec_domain_trimming=ec_domain_trimming,
             deimmunize_mode=deimmunize_mode,
             variant_id=variant_id,
+            user_pdb_id=user_pdb_id,
             gen_gpus=gen_gpus,
             fold_gpus=fold_gpus,
             program_id=program_id,
