@@ -160,6 +160,7 @@ from ligandai.types import (
     SynthesisPeptide,
     TargetGroup,
     TopUpResult,
+    UnlimitedCredits,
 )
 from ligandai.version_check import (
     emit_update_notice,
@@ -269,6 +270,7 @@ __all__ = [
     "SynthesisPeptide",
     "TargetGroup",
     "TopUpResult",
+    "UnlimitedCredits",
     "__version__",
     "align_candidates_to_receptor",
     "align_pdb_to_receptor",

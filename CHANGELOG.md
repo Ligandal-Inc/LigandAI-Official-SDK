@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+
+## [0.7.6] - 2026-06-30
+
+First-run ergonomics fixes surfaced by a fresh `pip install ligandai` + cold
+PD-L1 run (`bd-LIGANDAI_ALPHA_V2-9huj4`). Supersedes the internal 0.7.5
+version bump (never published).
+
+### Fixed
+
+- **`peptides.estimate_cost()` / `synthesis.estimate_cost()` no longer raise on
+  the live server response.** `CostEstimate.breakdown` was typed
+  `dict[str, int]`, but `GET /api/billing/estimate` now nests `params` and
+  `rates` objects inside `breakdown` — pydantic rejected the nested dicts with
+  "Input should be a valid integer". `breakdown` is now `dict[str, Any]`, and
+  `credits` / `cost_usd` default to `0` so a partial or restructured payload
+  parses instead of raising. Extra top-level keys are still preserved (base
+  `extra="allow"`).
+- **`structures.list_isoforms()` / `list_species()` and
+  `linker_modifications.list_uaa_palette()` / `list_payload_libraries()`** now
+  tolerate a bare-list **or** wrapped-dict server response (matching their
+  sibling `candidates()` / list helpers) instead of raising `AttributeError`
+  when the server returns the list directly. All four keep their declared
+  `list[...]` return type.
+
+### Added
+
+- **`peptides.reattach(job_id)` (sync + async)** — re-create a *waitable*
+  `Job` / `AsyncJob` for an in-flight or completed parallel-generation session
+  from its id alone, so a caller who kept only the `session_id` (e.g. after a
+  disconnect) can resume polling: `client.peptides.reattach(session_id).wait()`.
+  Binds to `GET /api/ptf/parallel/{id}/status` and resolves to a
+  `GenerationResult` exactly like the handle `generate()` returns.
+- **`jobs.get(job_id)` parallel-gen fallback** — `session_parallel_*` ids live
+  in the PTF parallel store, not the generic jobs tables, so the bare
+  `GET /api/jobs/{id}` lookup 404s. `jobs.get()` now falls back to
+  `GET /api/ptf/parallel/{id}/status` for those ids and normalizes the response
+  into a `JobInfo` snapshot (non-parallel ids still re-raise the 404). To
+  *resume polling*, prefer `peptides.reattach(id)`.
+- **`socks` optional dependency** — `pip install ligandai[socks]` pulls in
+  `httpx[socks]` (the `socksio` backend) for callers behind a SOCKS proxy
+  (`socks5://` / `socks5h://` via `HTTPS_PROXY` / `ALL_PROXY`). Not a base
+  dependency.
+- **`UnlimitedCredits`** is exported from the package root for `isinstance`
+  checks against unlimited balances.
+
+### Changed
+
+- **`client.credits` no longer reads `0` for unlimited / superadmin accounts.**
+  It now returns an `UnlimitedCredits` — an `int` subclass that compares as
+  effectively-infinite (so `cost <= client.credits` is `True`) but renders as
+  `"unlimited"`. `isinstance(client.credits, int)` and arithmetic are
+  unchanged; check `client.credits.is_unlimited` to branch. The one-shot
+  balance note is now informational ("unlimited credit balance … displays as
+  'unlimited'") instead of the alarming "implausible credits balance" warning.
+  The `credits` property docstring clarifies property-vs-method usage.
+
+
 ## [0.7.4] - 2026-06-23
 
 ### Added — `analysis` resource (structure / sequence analysis)

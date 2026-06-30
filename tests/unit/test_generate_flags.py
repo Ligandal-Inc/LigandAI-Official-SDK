@@ -220,10 +220,19 @@ def test_quality_guided_true_in_wire_body(httpx_mock: HTTPXMock, client: LigandA
     assert body["qualityGuidedEnabled"] is True
 
 
-def test_quality_guided_false_default(httpx_mock: HTTPXMock, client: LigandAI) -> None:
-    """Default is False — server applies tier-aware default; client sends explicit False."""
+def test_quality_guided_true_default(httpx_mock: HTTPXMock, client: LigandAI) -> None:
+    """Default is True (set in 491a904) — generate() sends qualityGuidedEnabled=True
+    unless the caller explicitly passes quality_guided=False."""
     httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
     client.peptides.generate(gene="EGFR")
+    body = _body(httpx_mock)
+    assert body["qualityGuidedEnabled"] is True
+
+
+def test_quality_guided_explicit_false_in_body(httpx_mock: HTTPXMock, client: LigandAI) -> None:
+    """Explicit quality_guided=False is forwarded as qualityGuidedEnabled=False."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", quality_guided=False)
     body = _body(httpx_mock)
     assert body["qualityGuidedEnabled"] is False
 

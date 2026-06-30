@@ -70,7 +70,7 @@ class Structures(Resource):
         Empty list if the gene has no reviewed UniProt entries.
         """
         payload = self._transport.request("GET", f"/api/structure/{gene}/isoforms") or {}
-        return payload.get("isoforms", [])
+        return list(payload if isinstance(payload, list) else payload.get("isoforms", []))
 
     def list_species(self, gene: str) -> list[dict]:
         """``GET /api/structure/{gene}/species`` — cross-species variants.
@@ -80,7 +80,7 @@ class Structures(Resource):
         returned ``species`` value as the ``species=`` kwarg for :meth:`get`.
         """
         payload = self._transport.request("GET", f"/api/structure/{gene}/species") or {}
-        return payload.get("species", [])
+        return list(payload if isinstance(payload, list) else payload.get("species", []))
 
     def analyze(
         self,
@@ -230,12 +230,12 @@ class AsyncStructures(AsyncResource):
     async def list_isoforms(self, gene: str) -> list[dict]:
         """Async variant of :meth:`Structures.list_isoforms`."""
         payload = await self._transport.request("GET", f"/api/structure/{gene}/isoforms") or {}
-        return payload.get("isoforms", [])
+        return list(payload if isinstance(payload, list) else payload.get("isoforms", []))
 
     async def list_species(self, gene: str) -> list[dict]:
         """Async variant of :meth:`Structures.list_species`."""
         payload = await self._transport.request("GET", f"/api/structure/{gene}/species") or {}
-        return payload.get("species", [])
+        return list(payload if isinstance(payload, list) else payload.get("species", []))
 
     async def analyze(
         self,

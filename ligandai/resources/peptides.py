@@ -2808,6 +2808,51 @@ class Peptides(Resource):
             ),
         )
 
+    def reattach(self, job_id: str) -> Job[GenerationResult]:
+        """Re-create a waitable :class:`~ligandai.jobs.Job` for an in-flight or
+        completed **parallel generation** session from its id alone.
+
+        Use this to resume polling after a disconnect when all you kept is the
+        ``session_id`` / ``job_id`` that :meth:`generate` returned (e.g. the
+        process that launched the run exited). The returned handle polls
+        ``GET /api/ptf/parallel/{job_id}/status`` and resolves to a
+        :class:`~ligandai.types.GenerationResult` via ``.wait()`` / ``.results``
+        exactly like the handle :meth:`generate` returns::
+
+            job = client.peptides.generate(gene="CD274", num_peptides=300)
+            session_id = job.id          # persist this
+            # ... later, in a fresh process / after a disconnect ...
+            result = client.peptides.reattach(session_id).wait()
+
+        Unlike :meth:`Jobs.get`, which returns a one-shot
+        :class:`~ligandai.types.JobInfo` snapshot AND only knows the generic
+        ``/api/jobs/{id}`` lookup (which 404s on parallel-gen session ids),
+        this returns a *waitable* Job bound to the parallel-generation status
+        path.
+
+        Args:
+            job_id: The parallel-generation session id (``session_parallel_*``),
+                or any id accepted by ``/api/ptf/parallel/{id}/status``.
+        """
+        if not job_id:
+            raise LigandAIError("reattach(job_id) requires a non-empty job_id")
+        return Job(
+            self._transport,
+            job_id,
+            job_type="generation",
+            parser=_parse_generation,
+            status_path="/api/ptf/parallel/{job_id}/status",
+            cancel_path="/api/ptf/parallel/{job_id}/cancel",
+            sse_path="/api/ptf/parallel/{job_id}/stream",
+            initial={"id": job_id, "type": "generation", "status": "queued"},
+            result_loader=lambda info: _load_generation_result(
+                self._transport,
+                info,
+                fallback_session_id=job_id,
+                fallback_gene=None,
+            ),
+        )
+
     def fold(
         self,
         sequences: list[Sequence | str | dict[str, Any]],
@@ -4889,6 +4934,32 @@ class AsyncPeptides(AsyncResource):
                 info,
                 fallback_session_id=job_id,
                 fallback_gene=gene,
+            ),
+        )
+
+    def reattach(self, job_id: str) -> AsyncJob[GenerationResult]:
+        """Async sibling of :meth:`Peptides.reattach`.
+
+        Returns a waitable :class:`~ligandai.jobs.AsyncJob` bound to the
+        parallel-generation status path so a disconnected caller holding only
+        ``job_id`` can ``await client.peptides.reattach(job_id).wait()``.
+        """
+        if not job_id:
+            raise LigandAIError("reattach(job_id) requires a non-empty job_id")
+        return AsyncJob(
+            self._transport,
+            job_id,
+            job_type="generation",
+            parser=_parse_generation,
+            status_path="/api/ptf/parallel/{job_id}/status",
+            cancel_path="/api/ptf/parallel/{job_id}/cancel",
+            sse_path="/api/ptf/parallel/{job_id}/stream",
+            initial={"id": job_id, "type": "generation", "status": "queued"},
+            result_loader=lambda info: _aload_generation_result(
+                self._transport,
+                info,
+                fallback_session_id=job_id,
+                fallback_gene=None,
             ),
         )
 

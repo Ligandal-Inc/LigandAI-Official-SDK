@@ -79,7 +79,7 @@ from ligandai.resources.receptors import AsyncReceptors, Receptors
 from ligandai.resources.reports import AsyncReports, Reports
 from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
-from ligandai.types import ClientSessionUsage, Credits, User
+from ligandai.types import ClientSessionUsage, Credits, UnlimitedCredits, User
 from ligandai.version_check import emit_update_notice
 
 _logger = logging.getLogger("ligandai")
@@ -426,33 +426,41 @@ class LigandAI(_ClientCommon):
 
     @property
     def credits(self) -> int:
-        """Current credit balance. Lightweight refresh on each access.
+        """Current credit balance — a **property**, not a method (no parens):
+        ``client.credits`` (not ``client.credits()``). Does a lightweight
+        ``GET /api/credits`` on each access.
 
-        Returns the **stored** balance for finite accounts. For unlimited /
-        superadmin accounts where the server returns a sentinel (any value
-        ≥ 10 billion, treated as the "is_unlimited" flag), this property
-        returns ``0`` rather than the raw sentinel — so user-facing CLIs
-        and logs never print "Credits: 9,999,999,999,999,999". To detect
-        unlimited accounts cleanly, use ``client.account.credits()`` and
-        inspect the returned :class:`~ligandai.types.Credits.is_unlimited`
-        attribute, or read ``client._credits.is_unlimited`` after a refresh.
+        Returns
+        -------
+        int
+            For finite accounts, the stored integer balance. For unlimited /
+            superadmin accounts (where the server returns a sentinel ≥ 10
+            billion), returns an :class:`~ligandai.types.UnlimitedCredits` —
+            an ``int`` subclass that compares as effectively-infinite (so
+            ``cost <= client.credits`` is ``True``) but **renders as
+            ``"unlimited"``** instead of a misleading ``0`` or a giant
+            sentinel. Test for it with ``client.credits.is_unlimited`` (always
+            present on the unlimited variant) or
+            ``getattr(client.credits, "is_unlimited", False)``.
 
-        the previous behavior surfaced the raw
-        sentinel as the int return value, which produced confusing
-        "implausible credits balance" warnings even on legitimately-resolved
-        superadmin accounts AND a far more confusing display for non-
-        superadmin users hitting a server tier-leak regression. Masking the
-        sentinel at the SDK boundary prevents both failure modes from
-        showing implausible numbers to users.
+        For the full balance object (raw ``balance``, ``is_unlimited``,
+        ``monthly_allocation``, refill date) call the
+        :meth:`~ligandai.resources.account.Account.credits` **method**:
+        ``client.account.credits()``.
+
+        Earlier releases returned a bare ``0`` here for unlimited accounts,
+        which read as "out of credits" to users and agents. Returning an
+        int-like ``"unlimited"`` value keeps arithmetic/comparison working
+        while fixing the display.
         """
         c = self.account.credits()
         self._credits = c
-        # When the server-side sentinel is in play (legit superadmin OR a
-        # tier-leak regression), surface 0 to the int property. The full
-        # Credits object on self._credits keeps the raw balance + is_unlimited
-        # flag available to callers who need to distinguish.
+        # Unlimited / superadmin sentinel: return an int-like value that
+        # renders as "unlimited" rather than a bare 0 (misleading) or the raw
+        # giant sentinel. The full Credits object on self._credits keeps the
+        # raw balance + is_unlimited flag for callers who need them.
         if c.is_unlimited:
-            return 0
+            return UnlimitedCredits(c.balance)
         return c.balance
 
     # ─── Rotating-JWT wallet methods ─────────────────────────────────────────

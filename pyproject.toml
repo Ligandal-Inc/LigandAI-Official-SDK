@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ligandai"
-version = "0.7.4"
+version = "0.7.6"
 description = "Official Python SDK for the LIGANDAI (TM) platform — peptide design, structure prediction, scoring, and discovery."
 readme = "README.md"
 license = { text = "Proprietary. Use of this SDK constitutes acceptance of https://ligandai.com/terms and https://ligandai.com/eula." }
@@ -48,6 +48,12 @@ dependencies = [
 [project.optional-dependencies]
 viz = [
     "matplotlib>=3.7",
+]
+# SOCKS proxy support. httpx needs the `socksio` backend to route through a
+# socks5:// / socks5h:// proxy (HTTPS_PROXY / ALL_PROXY); without it httpx
+# raises ImportError at request time. Install with: pip install ligandai[socks]
+socks = [
+    "httpx[socks]>=0.27",
 ]
 dev = [
     "pytest>=8.0",

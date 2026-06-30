@@ -96,6 +96,43 @@ class Credits(_LGModel):
         return d
 
 
+class UnlimitedCredits(int):
+    """An ``int`` representing an effectively-infinite credit balance.
+
+    Returned by :attr:`ligandai.LigandAI.credits` for unlimited / superadmin
+    accounts. It **is** an ``int`` — existing arithmetic and
+    ``isinstance(balance, int)`` checks keep working, and it compares as larger
+    than any realistic cost so pre-flight checks like
+    ``if cost <= client.credits:`` behave correctly. But it renders as
+    ``"unlimited"`` (via ``str`` / ``repr`` / default ``f"{...}"``) so CLIs and
+    logs never print a misleading bare ``0`` or a giant sentinel such as
+    ``9,007,199,254,740,991``.
+
+    An explicit numeric format spec still formats the underlying integer, so a
+    caller who deliberately asks for digits (``f"{client.credits:,d}"``) gets
+    them.
+    """
+
+    #: Marker mirroring :attr:`Credits.is_unlimited` for duck-typed checks.
+    is_unlimited: bool = True
+
+    # Default to Number.MAX_SAFE_INTEGER — the sentinel the platform returns
+    # for unlimited accounts — when no explicit balance is supplied.
+    def __new__(cls, value: int = 9_007_199_254_740_991) -> UnlimitedCredits:
+        return super().__new__(cls, int(value))
+
+    def __repr__(self) -> str:
+        return "unlimited"
+
+    def __str__(self) -> str:
+        return "unlimited"
+
+    def __format__(self, format_spec: str) -> str:
+        if format_spec == "":
+            return "unlimited"
+        return super().__format__(format_spec)
+
+
 class CreditTransaction(_LGModel):
     id: int | str
     amount: int
@@ -162,11 +199,24 @@ class CreditsWidget(_LGModel):
 
 
 class CostEstimate(_LGModel):
-    """Credit cost estimate for a generation + folding job."""
+    """Credit cost estimate for a generation + folding job.
 
-    credits: int
-    cost_usd: float = Field(alias="costUsd")
-    breakdown: dict[str, int] | None = None  # {'generation': X, 'folding': Y, 'scoring': Z}
+    Tolerant by design. The server's ``GET /api/billing/estimate`` response
+    nests richer structure under ``breakdown`` (``params`` and ``rates``
+    sub-dicts alongside the per-phase integer totals), so ``breakdown`` is
+    typed ``dict[str, Any]`` rather than ``dict[str, int]`` — a stricter type
+    raised ``ValidationError`` ("Input should be a valid integer") on the
+    nested objects. ``credits`` / ``cost_usd`` default to ``0`` so a partial or
+    restructured server payload parses instead of raising; the base
+    ``extra="allow"`` config preserves any additional top-level keys as raw.
+    """
+
+    # Defaulted (not required) so a richer/partial server dict never raises.
+    credits: int = 0
+    cost_usd: float = Field(default=0.0, alias="costUsd")
+    # dict[str, Any] (not dict[str, int]) — server breakdown carries nested
+    # ``params`` / ``rates`` objects, not only per-phase integer totals.
+    breakdown: dict[str, Any] | None = None  # {'generation': X, 'folding': Y, 'scoring': Z, 'params': {...}, 'rates': {...}}
 
 
 class TierLimits(_LGModel):

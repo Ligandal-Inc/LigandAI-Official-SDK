@@ -138,6 +138,17 @@ Both local databases are mode 0600 under a 0700 parent directory.
 pip install ligandai
 ```
 
+**Behind a SOCKS proxy?** httpx needs the `socksio` backend to route through a
+`socks5://` / `socks5h://` proxy (`HTTPS_PROXY` / `ALL_PROXY`); without it the
+first request raises an `ImportError`. Install the extra:
+
+```bash
+pip install ligandai[socks]
+```
+
+Optional extras: `ligandai[socks]` (SOCKS proxy support),
+`ligandai[viz]` (matplotlib charts).
+
 The SDK checks PyPI once per process when a client is created. If a newer valid
 `ligandal/ligandai-python-sdk` release exists, it emits:
 
@@ -180,6 +191,19 @@ job = client.peptides.generate(
 result = job.wait(timeout=1800)
 print(f"Got {len(result.peptides)} peptides, top iPSAE: {result.peptides[0].ipsae}")
 ```
+
+**Resuming after a disconnect.** A generation run keeps going server-side even
+if your process exits. Persist `job.id` and reattach later to resume polling:
+
+```python
+session_id = job.id          # save this somewhere durable
+
+# ... later, in a fresh process / after a disconnect ...
+result = client.peptides.reattach(session_id).wait()
+```
+
+`client.jobs.get(session_id)` returns a one-shot `JobInfo` status snapshot for
+the same parallel-generation id; `reattach()` returns a *waitable* `Job`.
 
 ### Designing against a specific PDB ID + chain
 
