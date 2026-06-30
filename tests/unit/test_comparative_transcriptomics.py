@@ -98,6 +98,69 @@ def test_compare_groups_normalizes_markers(httpx_mock: HTTPXMock, pro_client: Li
     assert resp.results[0].ref_tpm == 20
 
 
+# -- tissue_markers / MarkerResponse normalization -------------------------
+# The GTEx top-markers and scRNA/custom analyze-fast endpoints return the
+# ranked rows under a ``markers`` array (gene keyed as ``gene_name``), NOT a
+# ``top`` array. MarkerResponse must normalize that into ``.top`` so a fresh
+# agent can always read ``markers.top[0].gene``. [bd-LIGANDAI_ALPHA_V2-5p57t]
+
+
+def test_tissue_markers_normalizes_server_markers_to_top(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/transcriptomics/top-markers",
+        method="POST",
+        json={
+            "markers": [
+                {"gene_name": "SLC34A1", "si": 4.2, "receptor": True, "rank": 1},
+                {"gene_name": "UMOD", "si": 3.1, "receptor": True, "rank": 2},
+            ],
+            "count": 2,
+            "targetTissues": ["Kidney - Cortex"],
+        },
+    )
+    resp = pro_client.discovery.tissue_markers(
+        target_tissues=["Kidney - Cortex"], receptor_only=True, top_n=200
+    )
+    # server returned `markers`, SDK surfaces `.top`
+    assert [m.gene for m in resp.top] == ["SLC34A1", "UMOD"]
+    assert resp.top[0].si == 4.2
+    assert resp.total == 2  # `count` → `total`
+
+
+def test_tissue_markers_custom_dataset_routes_analyze_fast(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    # custom_dataset_targets → analyze-fast endpoint (NOT top-markers)
+    httpx_mock.add_response(
+        url=f"{BASE}/api/transcriptomics/analyze-fast",
+        method="POST",
+        json={"success": True, "markers": [{"gene_name": "EPCAM", "si": 5.5}]},
+    )
+    resp = pro_client.discovery.tissue_markers(
+        custom_dataset_targets=[{"datasetId": "ds_42", "cellTypes": ["proximal_tubule"]}],
+        receptor_only=True,
+    )
+    req = httpx_mock.get_request()
+    assert req.url.path == "/api/transcriptomics/analyze-fast"
+    body = _json.loads(req.read())
+    assert body["customDatasetTargets"] == [
+        {"datasetId": "ds_42", "cellTypes": ["proximal_tubule"]}
+    ]
+    assert [m.gene for m in resp.top] == ["EPCAM"]
+
+
+def test_tissue_markers_empty_body_does_not_raise(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/transcriptomics/top-markers", method="POST", json={}
+    )
+    resp = pro_client.discovery.tissue_markers(target_tissues=["Liver"])
+    assert resp.top == []
+
+
 # -- compare_targets shared/differential -----------------------------------
 
 

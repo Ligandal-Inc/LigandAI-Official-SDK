@@ -315,6 +315,13 @@ class _ClientCommon:
 class LigandAI(_ClientCommon):
     """Synchronous LIGANDAI client.
 
+    Agents: call :meth:`guide` (``client.guide()`` or ``LigandAI.guide()``) for
+    a concise map of the canonical workflows — including the built-in
+    target-discovery (transcriptomics) funnel on ``client.discovery`` — and a
+    pointer to the agent docs shipped in the package (``AGENTS.md`` and
+    ``.claude/skills/ligandai/``). Reach for those native namespaces first
+    rather than hand-stitching external data sources.
+
     Parameters
     ----------
     api_key
@@ -651,6 +658,19 @@ class LigandAI(_ClientCommon):
         """Hit ``GET /api/healthz`` — useful for connectivity checks."""
         return self._transport.request("GET", "/api/healthz") or {}
 
+    @staticmethod
+    def guide(print_it: bool = True) -> str:
+        """Print/return a concise map of the canonical LigandAI workflows.
+
+        Start here if you're an agent poking the API instead of reading docs:
+        it lists the target-discovery funnel (``client.discovery``), design,
+        fold, score and synthesis chains, and points to the shipped
+        ``AGENTS.md`` + ``.claude/skills/ligandai/`` docs. No network call.
+        """
+        from ligandai._guide import guide as _guide
+
+        return _guide(print_it=print_it)
+
 
 class AsyncLigandAI(_ClientCommon):
     """Asynchronous LIGANDAI client.
@@ -757,6 +777,15 @@ class AsyncLigandAI(_ClientCommon):
 
     async def me(self) -> User:
         return await self.account.me()
+
+    @staticmethod
+    def guide(print_it: bool = True) -> str:
+        """Concise map of the canonical LigandAI workflows (incl. the
+        ``discovery`` funnel) + pointer to the shipped ``AGENTS.md`` /
+        ``.claude/skills/ligandai/`` docs. See :meth:`LigandAI.guide`. No I/O."""
+        from ligandai._guide import guide as _guide
+
+        return _guide(print_it=print_it)
 
 
 def _generated_session_id() -> str:

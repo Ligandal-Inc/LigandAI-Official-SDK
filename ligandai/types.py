@@ -679,9 +679,46 @@ class TissueMarker(_LGModel):
 
 
 class MarkerResponse(_LGModel):
-    top: list[TissueMarker]
+    """SI-ranked surface markers returned by
+    :meth:`~ligandai.resources.discovery.Discovery.tissue_markers` and
+    :meth:`~ligandai.resources.discovery.Discovery.cell_type_markers`.
+
+    The server's ``top-markers`` (GTEx) and ``analyze-fast`` (scRNA / custom
+    dataset) endpoints return the ranked rows under a ``markers`` array whose
+    gene key is ``gene_name``; the scRNA ``cell-type-markers`` endpoint does the
+    same. We normalize that — plus a bare ``top`` array and an empty/partial
+    body — into ``top`` of :class:`TissueMarker`, so a caller always reads
+    ``response.top`` regardless of which endpoint produced it.
+    [bd-LIGANDAI_ALPHA_V2-5p57t]
+    """
+
+    top: list[TissueMarker] = Field(default_factory=list)
     total: int | None = None
     metadata: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_markers(cls, data: Any) -> Any:
+        """Accept the server's ``markers`` array (gene keyed as ``gene_name``),
+        a bare ``top`` array, or an empty body, and surface them all as
+        ``top``. Mirrors :meth:`ComparisonResponse._normalize_markers` for the
+        ranking (vs comparison) endpoints. [bd-LIGANDAI_ALPHA_V2-5p57t]"""
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        raw = d.get("top")
+        if not raw:
+            raw = d.get("markers")
+        if isinstance(raw, list):
+            norm = []
+            for m in raw:
+                if isinstance(m, dict) and "gene" not in m and "gene_name" in m:
+                    m = {**m, "gene": m["gene_name"]}
+                norm.append(m)
+            d["top"] = norm
+        if d.get("total") is None and isinstance(d.get("count"), int):
+            d["total"] = d["count"]
+        return d
 
 
 class ExpressionProfile(_LGModel):

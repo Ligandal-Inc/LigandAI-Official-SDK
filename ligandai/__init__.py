@@ -3,20 +3,32 @@
 
 Official Python client for the LIGANDAI platform.
 
+New here? Call ``ligandai.guide()`` (or ``LigandAI.guide()``) for a concise map
+of the canonical workflows — including the built-in target-discovery
+(transcriptomics) funnel — and a pointer to the agent docs shipped in the
+package (``AGENTS.md`` and ``.claude/skills/ligandai/``). Don't hand-stitch
+external data sources: ``client.discovery`` already runs the funnel natively.
+
 Example
 -------
 .. code-block:: python
 
+    import ligandai
     from ligandai import LigandAI
+
+    ligandai.guide()                        # prints the canonical workflow map
 
     client = LigandAI(api_key="lgai_pro_...")
     print(f"Tier: {client.tier}, Credits: {client.credits}")
 
-    # Find tissue-specific markers
-    markers = client.discovery.tissue_markers(target_tissues=["Liver"])
+    # Discover targets: SI-ranked surface receptors enriched in a tissue
+    markers = client.discovery.tissue_markers(
+        target_tissues=["Liver"], receptor_only=True, top_n=200,
+    )
+    gene = markers.top[0].gene
 
-    # Generate peptides
-    job = client.peptides.generate(gene="EGFR", num_peptides=50, auto_fold=True)
+    # Generate peptides against the top target
+    job = client.peptides.generate(gene=gene, num_peptides=50, auto_fold=True)
     result = job.wait()
 
 See https://docs.ligandai.com for full documentation.
@@ -30,6 +42,7 @@ from ligandai._fold_time_model import (
     get_fold_time_model,
     update_fold_time_model,
 )
+from ligandai._guide import guide
 from ligandai._version import __version__
 from ligandai.client import AsyncLigandAI, LigandAI
 from ligandai.errors import (
@@ -285,6 +298,7 @@ __all__ = [
     "get_fold_time_model",
     "get_latest_pypi_version",
     "get_update_notice",
+    "guide",
     "is_outdated",
     "launch_proteinview",
     "linked_line_figure",

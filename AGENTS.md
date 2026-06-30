@@ -13,6 +13,12 @@ folding API), DeltaForge V10 scoring, ReceptorDB, programs/projects, and
 synthesis ordering (Adaptyv BLI). Every call hits `https://ligandai.com/api/*`
 under a tier-gated API key.
 
+> **Start here for target discovery.** If the user asks "find targets" / "which
+> receptors are enriched in tissue or cell-type X" / "discover binders for
+> disease Y", use the built-in `client.discovery` transcriptomics funnel
+> (Workflow 5 below) — **don't hand-stitch GTEx + CellGuide / CellxGene
+> yourself.** The specificity-index ranking is already computed server-side.
+
 ## Authentication (1 step)
 
 ```python
@@ -108,7 +114,7 @@ default. To override:
 - ``fold_strategy="consolidated"`` — sequential single-target
 - ``fold_strategy=None`` — defer to server default
 
-## ⛔ The 4 Workflows You Will Be Asked For
+## ⛔ The 5 Workflows You Will Be Asked For
 
 ### Workflow 1 — Generate against a known gene (simplest)
 
@@ -232,6 +238,59 @@ job = client.peptides.generate(
 )
 ```
 
+### Workflow 5 — Target discovery (transcriptomics)
+
+When the user doesn't yet know WHICH gene to design against — "find targets",
+"which receptors are enriched in <tissue/cell-type>", "discover binders for
+<disease>" — run the native `client.discovery` funnel. The platform has already
+computed the specificity-index (SI) ranking over GTEx and single-cell atlases;
+**do not hand-stitch GTEx + CellGuide / CellxGene.**
+
+```python
+from ligandai import LigandAI
+
+client = LigandAI()
+
+# 1) Resolve identifiers first (exact GTEx strings — don't guess spelling).
+client.discovery.tissues()          # ['Kidney - Cortex', 'Liver', ...]
+client.discovery.organ_systems()
+
+# 2) SI-ranked surface receptors enriched in the tissue (GTEx bulk).
+#    receptor_only=True is THE cell-surface filter; exclude_tissues demotes
+#    broadly-shared (off-target-prone) genes. Read `.top`.
+markers = client.discovery.tissue_markers(
+    target_tissues=["Kidney - Cortex"],
+    exclude_tissues=["Liver", "Lung"],
+    receptor_only=True,
+    top_n=200,
+)
+gene = markers.top[0].gene          # .gene / .si (specificity index) / .receptor / .rank
+
+# 3) Optional refinement:
+#    - cell_type_markers(scrna_tissue, target_cell_types, ...)  single-cell (Academia+)
+#    - compare_targets([target, ref, ...])  SHARED vs DIFFERENTIAL selectivity
+#    - transport_vasculome(modality=...)     BBB transcytosis shuttles (Enterprise)
+
+# 4) Chain into design.
+job = client.peptides.generate(gene=gene, num_peptides=50, auto_fold=True, top_n_fold=10)
+result = job.wait(timeout=1800)
+```
+
+**Custom transcriptomics (your own counts).** Upload, then run the SAME SI
+ranking on it — `custom_dataset_targets` routes to the `analyze-fast` endpoint:
+
+```python
+ds = client.discovery.upload_dataset("counts.h5ad", dataset_type="bulk")  # or "scrna"
+markers = client.discovery.tissue_markers(
+    # CustomDatasetTarget aliases: datasetId (required), cellTypes, samples.
+    custom_dataset_targets=[{"datasetId": ds.id, "cellTypes": ["proximal_tubule"]}],
+    receptor_only=True, top_n=200,
+)
+# client.discovery.import_geo("GSE12345") ingests a public GEO series instead.
+```
+
+See `.claude/skills/ligandai/discovery.md` for the full recipe set.
+
 ## Resource Map (all `client.*` namespaces)
 
 ```python
@@ -239,7 +298,8 @@ client.account       # tier, credits, billing, top-ups, session_usage   → exam
 client.structures    # gene → PDB, .from_pdb, .from_alphafold, .resolve  → examples/07, 13
 client.proteins      # info, variants, .upload_pdb(file, gene, custom_name=) → examples/05, 15
 client.receptors     # ReceptorDB search/get/by_gene/chain_classification → examples/01, 10
-client.discovery     # tissue markers, scRNA, GEO import                → examples/02
+client.discovery     # TARGET DISCOVERY funnel: SI-ranked tissue/cell markers,
+                     #   compare_targets, transport-vasculome, custom upload → examples/02 · Workflow 5
 client.diseases      # disease search, mutations                        → examples/19
 client.goals         # autoresearch / persistent goal runs (pilot)      → examples/22
 client.peptides      # generate, fold, score, search, list, by_gene...  → examples/02, 04, 06, 11, 12, 20

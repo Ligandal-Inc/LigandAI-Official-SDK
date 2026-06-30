@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.7.7] - 2026-06-30
+
+Make the built-in target-discovery (transcriptomics) funnel natively
+discoverable so a fresh agent uses `client.discovery` instead of hand-stitching
+GTEx + CellGuide / CellxGene (`bd-LIGANDAI_ALPHA_V2-5p57t`).
+
+### Fixed
+
+- **`discovery.tissue_markers()` / `cell_type_markers()` no longer raise on the
+  live server response.** The GTEx `top-markers` and scRNA/custom `analyze-fast`
+  endpoints return ranked rows under a `markers` array (gene keyed as
+  `gene_name`), not a `top` array — `MarkerResponse` required `top` and rejected
+  the real payload. `MarkerResponse` now normalizes `markers` (with
+  `gene_name` → `gene`), a bare `top` array, and an empty body all into `.top`,
+  and maps the server's `count` into `total`. Mirrors the existing
+  `ComparisonResponse` normalization.
+
+### Added
+
+- **`ligandai.guide()` / `LigandAI.guide()` / `AsyncLigandAI.guide()`** — print
+  (or return) a concise map of the canonical workflows, including the
+  target-discovery funnel, with a pointer to the shipped `AGENTS.md` and
+  `.claude/skills/ligandai/` docs. Referenced from `ligandai.__doc__` and the
+  `LigandAI` class docstring so an agent reading `help(LigandAI)` is told to call
+  it. No network call.
+- **`.claude/skills/ligandai/discovery.md`** — new agent skill teaching the
+  discovery funnel (resolve identifiers → SI-ranked surface receptors →
+  differential/BBB ranking → custom-dataset quickstart → chain into design).
+  Listed in `SKILL.md` (now "5 workflows").
+- **AGENTS.md "Workflow 5 — Target discovery (transcriptomics)"** plus a
+  "start here for discovery" pointer near the top.
+- **README "Target discovery (transcriptomics)" section** with the funnel and
+  custom-transcriptomics quickstart.
+
+### Changed
+
+- **`Discovery` / `AsyncDiscovery` docstrings** enriched with the funnel
+  framing, when-to-use guidance, the `receptor_only` surface filter, and the
+  custom-dataset routing on `tissue_markers`, `cell_type_markers`,
+  `upload_dataset`, `compare_targets`, and `transport_vasculome` — so
+  `help(client.discovery)` teaches the funnel.
+- **`CLAUDE.md`** internal-path reference scrubbed (no absolute paths in the
+  public package).
+
+
 ## [0.7.6] - 2026-06-30
 
 First-run ergonomics fixes surfaced by a fresh `pip install ligandai` + cold
