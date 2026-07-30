@@ -98,6 +98,12 @@ from ligandai.peptide_viewer import (
 )
 from ligandai.receptordb import AsyncReceptorDBClient, ReceptorDBClient
 
+# Programmatic ToS/EULA review + acceptance — reachable as `client.legal`,
+# and as a top-level module/classes: `from ligandai import legal` /
+# `from ligandai import Legal, AsyncLegal`.
+from ligandai.resources import legal
+from ligandai.resources.legal import AsyncLegal, Legal
+
 # 3dalk — linker modifications + payload optimization (pro+ tier).
 from ligandai.resources.linker_modifications import (
     AsyncLinkerModifications,
@@ -183,6 +189,7 @@ __all__ = [
     "ApiCallLogEntry",
     "AsyncBatchFoldJob",
     "AsyncJob",
+    "AsyncLegal",
     "AsyncLigandAI",
     "AsyncLinkerModifications",
     "AsyncReceptorDBClient",
@@ -224,6 +231,7 @@ __all__ = [
     "GoalStepRecord",
     "GoalTaskDependency",
     "Job",
+    "Legal",
     "LigandAI",
     "LigandAIAuthError",
     "LigandAIConcurrencyLimit",
@@ -285,6 +293,7 @@ __all__ = [
     "get_update_notice",
     "is_outdated",
     "launch_proteinview",
+    "legal",
     "linked_line_figure",
     "load_peptide_results",
     "metric_higher_is_better",

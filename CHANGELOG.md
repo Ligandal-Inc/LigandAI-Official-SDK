@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.6] - 2026-07-12
+
+### Added — `legal` resource (programmatic ToS / EULA review + acceptance)
+- New `client.legal` namespace (sync + async) so SDK / agent consumers can
+  review and accept the current legal terms without a browser:
+  - `legal.versions()` → `GET /api/legal/versions`. Current ToS + EULA version
+    metadata (`version`, `effectiveDate`, `summary`, `isMaterialChange`).
+  - `legal.document(type)` → `GET /api/legal/document/{tos|eula}`. Full document
+    text (`contentMarkdown`) for review.
+  - `legal.status()` → `GET /api/legal/status`. The current API key's acceptance
+    status, accepted versions, current versions, and `needsReAcceptance`.
+  - `legal.accept(tos_version, eula_version)` → `POST /api/user/accept-tos`.
+    Records acceptance of the given versions.
+  - `legal.accept_current()` — convenience: fetch current versions and accept
+    them in one call.
+
+### Added — HSWAE-2 cell-type discovery methods
+- `discovery.get_hswae2_cell_type_markers(cell_type, top_n=25, reference_cell_types=None)`
+  → `POST /api/transcriptomics/hswae2/cell-type-markers/{cell_type}`. HSWAE-2
+  differential surface-marker (CSI) ranking for a cell type, with
+  specialized-alias resolution (enterprise tier).
+- `discovery.resolve_hswae2_cell_type(term)` →
+  `GET /api/transcriptomics/hswae2/resolve-cell-type/{term}`. Hybrid
+  exact / alias / fuzzy / marker-overlap resolution of a user-facing cell-type
+  term to a canonical HSWAE-2 cell type (enterprise tier).
+
+### Fixed
+- `__version__` is now `0.7.6` (the `0.7.5` publish left the runtime
+  `_version.py` at `0.7.4`; `import ligandai; ligandai.__version__` now matches
+  the distribution version again).
+
+### Notes
+- Additive-only release on top of `0.7.5` — no existing method signatures,
+  types, or endpoints changed. `types.StructureAnalysis.surface_features` was
+  already present in `0.7.5`.
+
 ## [0.7.4] - 2026-06-23
 
 ### Added — `analysis` resource (structure / sequence analysis)

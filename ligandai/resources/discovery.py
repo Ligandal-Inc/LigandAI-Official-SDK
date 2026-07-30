@@ -142,6 +142,60 @@ class Discovery(Resource):
             "POST", "/api/transcriptomics/hswae/isoform-expression", json=body
         ) or {"gene": gene, "isoforms": [], "resolution": "none"}
 
+    def get_hswae2_cell_type_markers(
+        self,
+        cell_type: str,
+        top_n: int = 25,
+        reference_cell_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """HSWAE-2 surface markers ranked for a cell type (enterprise tier).
+
+        Resolves ``cell_type`` through the HSWAE-2 specialized-alias table
+        (e.g. 'HFSC' -> 'basal keratinocytes') and returns the differential
+        surface-marker ranking (CSI) against the given reference cell types.
+        [bd-LIGANDAI_ALPHA_V2-kg2mi]
+
+        Args:
+            cell_type: Canonical HSWAE-2 cell type or a specialized alias.
+            top_n: Number of markers to return.
+            reference_cell_types: Optional comparator set; empty returns the
+                target's own top markers.
+
+        Returns:
+            Dict with the differential marker ranking and proxy metadata.
+            403 (LigandAIForbidden) if not enterprise tier.
+        """
+        from urllib.parse import quote
+
+        body = {
+            "top_n": top_n,
+            "reference_cell_types": reference_cell_types or [],
+        }
+        return self._transport.request(
+            "POST",
+            f"/api/transcriptomics/hswae2/cell-type-markers/{quote(cell_type)}",
+            json=body,
+        ) or {}
+
+    def resolve_hswae2_cell_type(self, term: str) -> dict[str, Any]:
+        """Resolve a user-facing cell-type term to a canonical HSWAE-2 cell type.
+
+        Hybrid exact / alias / fuzzy / marker-overlap resolution with proxy
+        metadata (enterprise tier). [bd-LIGANDAI_ALPHA_V2-kg2mi]
+
+        Args:
+            term: User-facing cell-type term, e.g. 'HFSC' or 'sebocyte'.
+
+        Returns:
+            Dict with canonical cell type, confidence, candidates, and any
+            proxy note. 403 (LigandAIForbidden) if not enterprise tier.
+        """
+        from urllib.parse import quote
+
+        return self._transport.request(
+            "GET", f"/api/transcriptomics/hswae2/resolve-cell-type/{quote(term)}"
+        ) or {}
+
     def compare_groups(
         self,
         target_group: TargetGroup,
@@ -389,6 +443,37 @@ class AsyncDiscovery(AsyncResource):
             await self._transport.request("GET", f"/api/transcriptomics/gene-expression/{gene}")
             or {"gene": gene}
         )
+
+    async def get_hswae2_cell_type_markers(
+        self,
+        cell_type: str,
+        top_n: int = 25,
+        reference_cell_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """HSWAE-2 surface markers ranked for a cell type (enterprise tier).
+        [bd-LIGANDAI_ALPHA_V2-kg2mi]
+        """
+        from urllib.parse import quote
+
+        body = {
+            "top_n": top_n,
+            "reference_cell_types": reference_cell_types or [],
+        }
+        return await self._transport.request(
+            "POST",
+            f"/api/transcriptomics/hswae2/cell-type-markers/{quote(cell_type)}",
+            json=body,
+        ) or {}
+
+    async def resolve_hswae2_cell_type(self, term: str) -> dict[str, Any]:
+        """Resolve a user-facing cell-type term to a canonical HSWAE-2 cell type
+        (enterprise tier). [bd-LIGANDAI_ALPHA_V2-kg2mi]
+        """
+        from urllib.parse import quote
+
+        return await self._transport.request(
+            "GET", f"/api/transcriptomics/hswae2/resolve-cell-type/{quote(term)}"
+        ) or {}
 
     async def compare_groups(
         self,
