@@ -86,6 +86,19 @@ class Discovery(Resource):
     ``gene`` / ``si`` / ``receptor`` / ``rank``).
     """
 
+    def _stamp_organism(
+        self, body: dict[str, Any], organism: str | None, species: str | None
+    ) -> None:
+        """Fail-closed stamp of the effective ``organism``/``species`` on a body.
+
+        Species selection is entitlement-gated: a non-entitled key can never
+        force ``mouse`` — it is coerced to ``human`` locally so the SDK's own
+        labels match the server. No-op when no parent client is attached.
+        """
+        if self._client is None:
+            return
+        self._client._apply_species(body, organism if organism is not None else species)
+
     def tissue_markers(
         self,
         target_tissues: list[str] | None = None,
@@ -94,6 +107,8 @@ class Discovery(Resource):
         top_n: int = 2000,
         receptor_only: bool = True,
         min_expression: float | None = None,
+        organism: str | None = None,
+        species: str | None = None,
     ) -> MarkerResponse:
         """Specificity-index (SI) ranked surface receptors enriched in a tissue
         — the workhorse of the discovery funnel. **Use this first** for "which
@@ -127,6 +142,13 @@ class Discovery(Resource):
             (incl. intracellular) ranking.
         :param min_expression: drop genes below this expression floor before
             ranking.
+        :param organism: species atlas to rank within — ``"human"`` (default) or
+            ``"mouse"``. Falls back to the client ``default_organism``; coerced to
+            ``"human"`` when the key is not entitled (fail-closed), so a crafted
+            ``organism="mouse"`` never selects the mouse atlas. "Flag mouse for
+            mouse targets": the effective species routes the ranking to the
+            matching atlas/ortholog namespace.
+        :param species: alias for ``organism`` (server-parity). ``organism`` wins.
         :returns: :class:`~ligandai.types.MarkerResponse`; read ``.top`` —
             SI-ranked :class:`~ligandai.types.TissueMarker` rows
             (``.gene`` / ``.si`` / ``.receptor`` / ``.rank``). Feed
@@ -150,6 +172,7 @@ class Discovery(Resource):
             body["excludeTissues"] = exclude_tissues
         if min_expression is not None:
             body["minExpression"] = min_expression
+        self._stamp_organism(body, organism, species)
 
         # Server has two endpoints: top-markers (GTEx) and analyze-fast (scRNA + custom).
         # When custom datasets provided, route to analyze-fast.
@@ -169,6 +192,8 @@ class Discovery(Resource):
         exclude_tissues: list[str] | None = None,
         top_n: int = 2000,
         receptor_only: bool = True,
+        organism: str | None = None,
+        species: str | None = None,
     ) -> MarkerResponse:
         """Single-cell resolution of :meth:`tissue_markers` (Academia+ tier).
         SI-ranks surface receptors enriched in specific CELL TYPES within a
@@ -193,14 +218,35 @@ class Discovery(Resource):
         }
         if exclude_tissues is not None:
             body["excludeTissues"] = exclude_tissues
+        self._stamp_organism(body, organism, species)
         return MarkerResponse.model_validate(
             self._transport.request("POST", "/api/scrna/cell-type-markers", json=body) or {"top": []}
         )
 
-    def gene_expression(self, gene: str) -> ExpressionProfile:
-        return ExpressionProfile.model_validate(
-            self._transport.request("GET", f"/api/transcriptomics/gene-expression/{gene}") or {"gene": gene}
-        )
+    def gene_expression(
+        self,
+        gene: str,
+        *,
+        organism: str | None = None,
+        species: str | None = None,
+    ) -> ExpressionProfile:
+        """Tissue-level expression profile for a gene.
+
+        :param organism: species atlas — ``"human"`` (default) or ``"mouse"``.
+            Falls back to the client ``default_organism``; coerced to ``"human"``
+            when the key is not entitled (fail-closed).
+        :param species: alias for ``organism`` (server-parity). ``organism`` wins.
+        """
+        params: dict[str, Any] = {}
+        if self._client is not None:
+            self._client._apply_species(
+                params, organism if organism is not None else species
+            )
+        payload = self._transport.request(
+            "GET", f"/api/transcriptomics/gene-expression/{gene}", params=params or None
+        ) or {"gene": gene}
+        payload.setdefault("organism", params.get("organism", "human"))
+        return ExpressionProfile.model_validate(payload)
 
     def isoform_expression(
         self,
@@ -452,6 +498,17 @@ class AsyncDiscovery(AsyncResource):
     hand-stitch GTEx + CellGuide.
     """
 
+    def _stamp_organism(
+        self, body: dict[str, Any], organism: str | None, species: str | None
+    ) -> None:
+        """Fail-closed stamp of the effective ``organism``/``species`` on a body.
+
+        See :meth:`Discovery._stamp_organism`. No-op with no parent client.
+        """
+        if self._client is None:
+            return
+        self._client._apply_species(body, organism if organism is not None else species)
+
     async def tissue_markers(
         self,
         target_tissues: list[str] | None = None,
@@ -460,14 +517,18 @@ class AsyncDiscovery(AsyncResource):
         top_n: int = 2000,
         receptor_only: bool = True,
         min_expression: float | None = None,
+        organism: str | None = None,
+        species: str | None = None,
     ) -> MarkerResponse:
         """Async SI-ranked surface receptors enriched in a tissue — the
         workhorse of the funnel; **use first** for target discovery. GTEx bulk
         via ``target_tissues``, or your own data via ``custom_dataset_targets``
         (``[{"datasetId": <id>, "cellTypes": [...]}]``, routes to
         ``analyze-fast``). ``receptor_only=True`` (default) is the cell-surface
-        filter. Read ``.top`` → feed ``.top[0].gene`` to
-        ``peptides.generate``. See :meth:`Discovery.tissue_markers`.
+        filter. ``organism`` (``"human"`` default / ``"mouse"``) selects the
+        atlas, fail-closed to human when not entitled; ``species`` is an alias.
+        Read ``.top`` → feed ``.top[0].gene`` to ``peptides.generate``. See
+        :meth:`Discovery.tissue_markers`.
         """
         body: dict[str, object] = {
             "topN": top_n,
@@ -484,6 +545,7 @@ class AsyncDiscovery(AsyncResource):
             body["excludeTissues"] = exclude_tissues
         if min_expression is not None:
             body["minExpression"] = min_expression
+        self._stamp_organism(body, organism, species)
         path = (
             "/api/transcriptomics/analyze-fast"
             if custom_dataset_targets
@@ -500,10 +562,14 @@ class AsyncDiscovery(AsyncResource):
         exclude_tissues: list[str] | None = None,
         top_n: int = 2000,
         receptor_only: bool = True,
+        organism: str | None = None,
+        species: str | None = None,
     ) -> MarkerResponse:
         """Async single-cell resolution of :meth:`tissue_markers` (Academia+):
         SI-ranks surface receptors enriched in specific CELL TYPES within an
-        scRNA atlas. ``receptor_only=True`` (default) is the surface filter; read
+        scRNA atlas. ``receptor_only=True`` (default) is the surface filter;
+        ``organism`` (``"human"`` default / ``"mouse"``) selects the atlas,
+        fail-closed to human when not entitled (``species`` is an alias). Read
         ``.top``. See :meth:`Discovery.cell_type_markers`.
         """
         body: dict[str, object] = {
@@ -514,16 +580,33 @@ class AsyncDiscovery(AsyncResource):
         }
         if exclude_tissues is not None:
             body["excludeTissues"] = exclude_tissues
+        self._stamp_organism(body, organism, species)
         return MarkerResponse.model_validate(
             await self._transport.request("POST", "/api/scrna/cell-type-markers", json=body)
             or {"top": []}
         )
 
-    async def gene_expression(self, gene: str) -> ExpressionProfile:
-        return ExpressionProfile.model_validate(
-            await self._transport.request("GET", f"/api/transcriptomics/gene-expression/{gene}")
-            or {"gene": gene}
-        )
+    async def gene_expression(
+        self,
+        gene: str,
+        *,
+        organism: str | None = None,
+        species: str | None = None,
+    ) -> ExpressionProfile:
+        """Async tissue-level expression profile. ``organism`` (``"human"``
+        default / ``"mouse"``) selects the atlas, fail-closed to human when not
+        entitled; ``species`` is an alias. See :meth:`Discovery.gene_expression`.
+        """
+        params: dict[str, Any] = {}
+        if self._client is not None:
+            self._client._apply_species(
+                params, organism if organism is not None else species
+            )
+        payload = await self._transport.request(
+            "GET", f"/api/transcriptomics/gene-expression/{gene}", params=params or None
+        ) or {"gene": gene}
+        payload.setdefault("organism", params.get("organism", "human"))
+        return ExpressionProfile.model_validate(payload)
 
     async def compare_groups(
         self,
