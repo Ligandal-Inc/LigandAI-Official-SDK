@@ -1555,11 +1555,26 @@ class DeltaForgeScore(_LGModel):
     warnings: list[str] | None = None
     metadata: dict[str, Any] | None = None
     # Fold confidence metrics — always returned by score-fold (and forwarded by
-    # score-pdb when the caller passes fold_*). iPTM is more reliable than iPSAE (which can
-    # be inflated); both are surfaced.
+    # score-pdb when the caller passes fold_*).
+    #
+    # ⛔ METRIC GUIDANCE for peptide binders:
+    #   peptide_ipsae  — peptide-receptor interface iPSAE. THIS is the binder metric.
+    #                    NULL means the column was not computed (fold_batch path); check
+    #                    peptide_ipsae_status for 'ok' vs 'not_computed'.
+    #   ipsae          — complex-level iPSAE dominated by receptor-self confidence.
+    #                    Stays high even when the peptide is not engaging. NOT a binder
+    #                    metric; retained for backward compatibility only.
+    #   iptm / ptm     — whole-complex confidence dominated by the (large) receptor chain.
+    #                    Not a reliable binder-quality metric on its own.
     iptm: float | None = None
     ptm: float | None = None
     ipsae: float | None = None
+    peptide_ipsae: float | None = Field(default=None, alias="peptide_ipsae")
+    """Peptide-receptor interface iPSAE — THE binder metric for Boltz-2 peptide binders.
+    NULL when not yet computed (fold_batch path); check ``peptide_ipsae_status``."""
+    peptide_ipsae_status: str | None = Field(default=None, alias="peptide_ipsae_status")
+    """'ok' when ``peptide_ipsae`` is present; 'not_computed' when the column is NULL
+    (common for folds run via predict-batch, which skips the peptide iPSAE step)."""
     plddt_mean: float | None = Field(default=None, alias="plddt_mean")
     fold_job_id: str | None = Field(default=None, alias="foldJobId")
     # Optional NxN PAE matrix (Angstroms). Present only when include_pae=True AND

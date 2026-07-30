@@ -264,6 +264,12 @@ def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
             "iptm": pick("iptm", "iPTM"),
             "ptm": pick("ptm", "pTM"),
             "ipsae": pick("ipsae", "iPSAE"),
+            # ⛔ peptide_ipsae is the BINDER metric (peptide-receptor interface iPSAE).
+            # overall ipsae is complex-level confidence dominated by the receptor — NOT a binder proxy.
+            # Use data.get() not pick() so explicit None is preserved (means 'not_computed').
+            "peptide_ipsae": data.get("peptide_ipsae") if "peptide_ipsae" in data
+                else scoring.get("peptide_ipsae"),
+            "peptide_ipsae_status": pick("peptide_ipsae_status"),
             "plddt_mean": pick("plddt_mean", "plddtMean", "mean_plddt"),
             "foldJobId": pick("foldJobId", "fold_job_id"),
             "pae": pick("pae"),

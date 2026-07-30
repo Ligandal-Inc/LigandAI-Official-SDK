@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.7.9] - 2026-07-30
+
+### Fixed — peptide binder metric correctness (`bd-LIGANDAI_ALPHA_V2-u4xc7`)
+
+**Breaking guidance correction** — the previously documented claim that "iPTM is
+generally more reliable than iPSAE" was **wrong for peptide binders** and has
+been removed from all three locations (README, `types.py`, `docs/api_reference.md`).
+
+Correct guidance: for a peptide binder the binder metric is `peptide_ipsae` — the
+peptide-receptor interface iPSAE returned by `score_fold` / `batch_score_fold`.
+The overall `ipsae` is complex-level confidence dominated by receptor-self contacts
+and stays high even when the peptide is not engaging; `iptm`/`ptm` are whole-complex
+confidence dominated by the (large) receptor chain.
+
+### Added — `peptide_ipsae` and `peptide_ipsae_status` fields
+
+- `DeltaForgeResult.peptide_ipsae: float | None` — peptide-receptor interface iPSAE
+  (alias `peptide_ipsae`). `None` when `peptide_ipsae_status == 'not_computed'`
+  (common for folds run via predict-batch, which skips this step).
+- `DeltaForgeResult.peptide_ipsae_status: str | None` — `'ok'` or `'not_computed'`.
+  Never coalesce `peptide_ipsae` to `ipsae` — a NULL binder iPSAE is UNKNOWN, not
+  equal to the complex-level value.
+
+
 ## [0.7.8] - 2026-07-30
 
 Released on top of the published `0.7.6`. Folds in two drafts that were written

@@ -560,9 +560,14 @@ csv_text = client.deltaforge.batch_score_fold_csv(["fold_a", "fold_b"], include_
 open("scores.csv", "w").write(csv_text)
 ```
 
-`iPTM` is generally more reliable than `iPSAE` (which can be inflated); both are
-returned. The legacy `client.peptides.score_pdb(...)` remains available and now
-also accepts `include_pae=`.
+For peptide binders the metric to use is `peptide_ipsae` — the peptide-receptor
+interface iPSAE. The overall `ipsae` is complex-level confidence dominated by
+receptor-self contacts and stays high even when the peptide is not engaging; it
+is **not** a binder metric. `iptm`/`ptm` are whole-complex confidence dominated
+by the (large) receptor and are similarly not reliable as binder-quality signals.
+When `peptide_ipsae` is `None`, check `peptide_ipsae_status`: `'not_computed'`
+means the fold was run via the batch path (which skips peptide iPSAE). The legacy
+`client.peptides.score_pdb(...)` remains available and now also accepts `include_pae=`.
 
 ## Folding Controls and Peptide Viewing (v0.3.3+)
 

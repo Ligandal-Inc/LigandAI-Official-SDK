@@ -166,8 +166,13 @@ these:
 | `deltaforge.batch_score_fold` | `POST /api/v1/deltaforge/batch-score-fold` | `foldJobIds: [...]`, `scorer?`, `includePae?` | per-binder results + `errors[]`; `?format=csv` for CSV |
 
 `score_fold` / `batch_score_fold` always return the fold confidence metrics
-(`iptm`, `ptm`, `ipsae`, `plddt_mean`) alongside affinity. `iPTM` is generally
-more reliable than `iPSAE`. With `includePae=true`, the NxN PAE matrix
+(`iptm`, `ptm`, `ipsae`, `peptide_ipsae`, `peptide_ipsae_status`, `plddt_mean`)
+alongside affinity. For peptide binders **use `peptide_ipsae`** — the
+peptide-receptor interface iPSAE — as the binder metric. The overall `ipsae` is
+complex-level confidence dominated by receptor-self contacts (not a binder metric);
+`iptm`/`ptm` are whole-complex confidence dominated by the receptor chain. When
+`peptide_ipsae` is `None`, `peptide_ipsae_status` will be `'not_computed'`
+(common for folds run via predict-batch). With `includePae=true`, the NxN PAE matrix
 (Angstroms) is attached on `pae` when resolvable; otherwise `pae` is `null` and
 `pae_status` is `pending` (a backend pull is in progress) or `unavailable`.
 

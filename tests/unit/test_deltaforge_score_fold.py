@@ -168,3 +168,121 @@ def test_score_fold_requires_fold_id(pro_client: LigandAI) -> None:
 def test_batch_requires_nonempty_list(pro_client: LigandAI) -> None:
     with pytest.raises(ValueError):
         pro_client.deltaforge.batch_score_fold([])
+
+
+# ── peptide_ipsae correctness tests (bd-LIGANDAI_ALPHA_V2-u4xc7) ─────────────
+
+def test_score_fold_surfaces_peptide_ipsae_when_present(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    """peptide_ipsae and status must be surfaced when the server returns them."""
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/deltaforge/score-fold",
+        json={
+            "success": True,
+            "foldJobId": "fold_peptide_ipsae_ok",
+            "delta_g": -9.1,
+            "kd_nm": 18.0,
+            "scorer_version": "v10_2_unified_parallel_2026_05_08",
+            "iptm": 0.82,
+            "ptm": 0.78,
+            "ipsae": 0.93,           # complex-level — must NOT be used as binder metric
+            "peptide_ipsae": 0.74,   # binder metric
+            "peptide_ipsae_status": "ok",
+            "plddt_mean": 89.0,
+        },
+    )
+    score = pro_client.deltaforge.score_fold("fold_peptide_ipsae_ok")
+    assert score.peptide_ipsae == pytest.approx(0.74)
+    assert score.peptide_ipsae_status == "ok"
+    # overall ipsae still surfaced for backward compat, but is not the binder metric
+    assert score.ipsae == pytest.approx(0.93)
+
+
+def test_score_fold_peptide_ipsae_null_when_not_computed(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    """peptide_ipsae must be None (not coalesced to overall ipsae) when not_computed."""
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/deltaforge/score-fold",
+        json={
+            "success": True,
+            "foldJobId": "fold_batch_path",
+            "delta_g": -5.5,
+            "kd_nm": 900.0,
+            "scorer_version": "v10_2_unified_parallel_2026_05_08",
+            "iptm": 0.88,
+            "ptm": 0.84,
+            "ipsae": 0.93,             # overall high — should NOT bleed into peptide_ipsae
+            "peptide_ipsae": None,     # NULL — fold_batch path did not compute it
+            "peptide_ipsae_status": "not_computed",
+            "plddt_mean": 87.0,
+        },
+    )
+    score = pro_client.deltaforge.score_fold("fold_batch_path")
+    assert score.peptide_ipsae is None, (
+        "peptide_ipsae must be None when not_computed — never coalesce to overall ipsae"
+    )
+    assert score.peptide_ipsae_status == "not_computed"
+
+
+def test_score_fold_peptide_ipsae_absent_from_response(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    """Older server responses without peptide_ipsae keys must parse without error."""
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/deltaforge/score-fold",
+        json={
+            "success": True,
+            "foldJobId": "fold_legacy",
+            "delta_g": -7.2,
+            "kd_nm": 65.0,
+            "scorer_version": "v10_2_unified_parallel_2026_05_08",
+            "iptm": 0.80,
+            "ptm": 0.76,
+            "ipsae": 0.70,
+            "plddt_mean": 85.0,
+        },
+    )
+    score = pro_client.deltaforge.score_fold("fold_legacy")
+    assert score.peptide_ipsae is None
+    assert score.peptide_ipsae_status is None
+
+
+def test_batch_score_fold_peptide_ipsae_in_results(
+    httpx_mock: HTTPXMock, pro_client: LigandAI
+) -> None:
+    """batch_score_fold results must carry peptide_ipsae and status per entry."""
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/deltaforge/batch-score-fold",
+        json={
+            "success": True,
+            "scored": 2,
+            "failed": 0,
+            "results": [
+                {
+                    "foldJobId": "fa", "sequence": "ACDE", "receptorChains": ["A"],
+                    "peptideChain": "B", "delta_g": -8.0, "kd_nm": 50.0,
+                    "classification": "Strong binder", "iptm": 0.85, "ptm": 0.80,
+                    "ipsae": 0.92, "peptide_ipsae": 0.76, "peptide_ipsae_status": "ok",
+                    "plddt_mean": 91.0,
+                },
+                {
+                    "foldJobId": "fb", "sequence": "WYLK", "receptorChains": ["A"],
+                    "peptideChain": "B", "delta_g": -3.0, "kd_nm": 3000.0,
+                    "classification": "Non-binder", "iptm": 0.90, "ptm": 0.85,
+                    "ipsae": 0.93,        # high overall — peptide still not engaging
+                    "peptide_ipsae": None, "peptide_ipsae_status": "not_computed",
+                    "plddt_mean": 88.0,
+                },
+            ],
+            "errors": [],
+        },
+    )
+    out = pro_client.deltaforge.batch_score_fold(["fa", "fb"])
+    r0 = out["results"][0]
+    r1 = out["results"][1]
+    assert r0.get("peptide_ipsae") == pytest.approx(0.76)
+    assert r0.get("peptide_ipsae_status") == "ok"
+    assert r1.get("peptide_ipsae") is None, "must not coalesce high overall ipsae to peptide_ipsae"
+    assert r1.get("peptide_ipsae_status") == "not_computed"
