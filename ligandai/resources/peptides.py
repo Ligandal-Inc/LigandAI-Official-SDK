@@ -31,7 +31,12 @@ from pathlib import Path
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, Callable, Literal
 
-from ligandai.errors import LigandAICreditError, LigandAIError
+from ligandai.errors import (
+    LigandAICreditError,
+    LigandAIError,
+    LigandAIValidationError,
+    LigandAIWaitTimeout,
+)
 from ligandai.jobs import AsyncJob, Job
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
@@ -429,6 +434,7 @@ def _generation_body(
     targeting_strategy: _TargetingStrategy | None,
     target_face: _TargetFace | None,
     pocket_expansion_radius_a: float | None,
+    receptor_flexible_residues: Sequence[int] | None,
     auto_fold: bool,
     top_n_fold: int | None,
     ec_domain_trimming: bool,
@@ -627,6 +633,15 @@ def _generation_body(
     if target_residues and pocket_expansion_radius_a and pocket_expansion_radius_a > 0:
         body["pocketExpansionRadiusA"] = float(pocket_expansion_radius_a)
         body["expandHotspotPocket"] = True
+
+    # Receptor flexible residues — 1-based receptor residue indices the backend
+    # is allowed to relax during generation/docking (side-chain / limited
+    # backbone flexibility at those positions). Emitted as ``flexibleResidues``
+    # only when provided, so legacy bytes are preserved for the common case.
+    if receptor_flexible_residues:
+        flex = [int(r) for r in receptor_flexible_residues]
+        if flex:
+            body["flexibleResidues"] = flex
 
     # Restrict generation to specific receptor chains (multimer support).
     # Server reads ``config.targetChains`` and filters conformations / restricts
@@ -2479,6 +2494,10 @@ class Peptides(Resource):
         # surrounding shell to make contacts, not just X itself. Set to 0 to
         # use the literal residues only.
         pocket_expansion_radius_a: float | None = 6.0,
+        # Receptor flexible residues — 1-based receptor residue indices the
+        # backend may relax (side-chain / limited backbone flexibility) during
+        # generation/docking. None (default) keeps the receptor rigid.
+        receptor_flexible_residues: Sequence[int] | None = None,
         auto_fold: bool = True,
         top_n_fold: int | None = None,
         ec_domain_trimming: bool = True,
@@ -2582,6 +2601,10 @@ class Peptides(Resource):
                 designed against chain C. The server filters conformations
                 and the binding surface to only those chains.
             targeting_strategy: ``"full_surface"`` or ``"pocket_targeted"``.
+            receptor_flexible_residues: 1-based receptor residue indices the
+                backend may relax (side-chain / limited backbone flexibility)
+                during generation/docking. ``None`` (default) keeps the receptor
+                rigid; emitted on the wire as ``flexibleResidues`` only when set.
             auto_fold: Run Boltz-2 folding automatically after generation.
             top_n_fold: Cap on how many peptides to fold per target.
             ec_domain_trimming: Trim signal peptide / EC domain before generation.
@@ -2730,6 +2753,7 @@ class Peptides(Resource):
             targeting_strategy=targeting_strategy,
             target_face=target_face,
             pocket_expansion_radius_a=pocket_expansion_radius_a,
+            receptor_flexible_residues=receptor_flexible_residues,
             auto_fold=auto_fold,
             top_n_fold=top_n_fold,
             ec_domain_trimming=ec_domain_trimming,
@@ -4338,6 +4362,231 @@ class Peptides(Resource):
         return [Peptide.model_validate(p) for p in items]
 
     # ------------------------------------------------------------------
+    # Selectivity / negative-selection validation (fold-compare)
+    # ------------------------------------------------------------------
+    #
+    # Post-hoc selectivity is the SUPPORTED negative-selection path: after
+    # generation + fold, co-fold each candidate binder against the on-target's
+    # isoforms (and any off-targets) and score the complexes to rank by
+    # selectivity margin. Uses the real fold-compare surface
+    # (/api/v1/fold-compare/*). Generation-TIME negative-selection bias against
+    # provided isoform structures is NOT wired into the current generator (the
+    # v6.5 pocket-conditioned model has no multi-structure repulsion term); it is
+    # documented as a future option. See validate_selectivity() to run this
+    # directly on a completed generation session.
+
+    def fold_compare(
+        self,
+        binder: str,
+        on_target: str,
+        *,
+        isoforms: str | Sequence[str] | None = None,
+        off_targets: Sequence[str] | None = None,
+        engine: str = "boltz2",
+        binder_id: str = "binder",
+        on_target_sequence: str | None = None,
+        organism: str | None = None,
+        species: str | None = None,
+        wait: bool = True,
+        poll_interval: float = 10.0,
+        timeout: float = 1800.0,
+    ) -> dict[str, Any]:
+        """Fold-and-score a designed binder against a target's isoforms + off-targets.
+
+        Negative-selection / selectivity validation for a designed binder. Co-folds
+        the binder against (a) the on-target's isoforms (``"all"`` or a chosen
+        subset) and (b) arbitrary off-target proteins, then scores each complex to
+        return a ranked selectivity report. Real folding engines + our own shared
+        MSA (no external MSA, no fabricated Kd/AUC).
+
+        Provided isoform STRUCTURES are supported by passing the isoform amino-acid
+        sequences: use ``on_target_sequence`` for an explicit on-target sequence,
+        and pass isoform sequences via ``off_targets`` (raw sequences are accepted
+        and folded verbatim) when you want to score against exact provided
+        structures rather than gene-enumerated canonicals.
+
+        POSTs to ``/api/v1/fold-compare/start`` and (when ``wait``) polls
+        ``/api/v1/fold-compare/{job_id}/status`` to a terminal state.
+
+        Args:
+            binder: Designed binder amino-acid sequence.
+            on_target: On-target gene symbol / UniProt accession (drives isoform
+                enumeration), or pass ``on_target_sequence`` for an explicit seq.
+            isoforms: ``"all"`` or a list of isoform ids / accessions / names.
+                ``None`` → off-targets only.
+            off_targets: Off-target specs — gene symbol, UniProt accession, OR a
+                raw amino-acid sequence (e.g. an isoform sequence pulled from a
+                provided structure).
+            engine: ``"boltz2"`` (default) or ``"protenix"``.
+            binder_id: Label for the binder in the report.
+            on_target_sequence: Explicit on-target sequence (overrides the resolved
+                canonical; isoforms still enumerate from ``on_target``).
+            organism: ``"human"`` (default) or ``"mouse"`` for gene/isoform
+                resolution. Falls back to the client ``default_organism``;
+                coerced to ``"human"`` when the key is not entitled (fail-closed),
+                so a crafted ``organism="mouse"`` never forces mouse. Raw
+                sequences are species-agnostic and unaffected.
+            species: Alias for ``organism`` (server-parity). ``organism`` wins.
+            wait: When True (default), poll to a terminal state and return the
+                report; else return the ``{job_id, ...}`` submit response.
+            poll_interval: Seconds between status polls when ``wait``.
+            timeout: Max seconds to wait when ``wait``.
+
+        Returns:
+            The ranked selectivity report (wait=True) or the raw submit dict.
+        """
+        if not binder or not isinstance(binder, str):
+            raise LigandAIValidationError("binder must be an amino-acid sequence")
+        if not on_target and not on_target_sequence:
+            raise LigandAIValidationError(
+                "on_target (gene / UniProt) or on_target_sequence is required",
+            )
+        body: dict[str, Any] = {
+            "binder": {"id": binder_id, "sequence": binder.strip().upper()},
+            "engine": engine,
+        }
+        # Fail-closed effective species (entitlement-gated). Always stamped so the
+        # server sees the SDK's resolved namespace; a non-entitled key -> human.
+        effective = self._resolve_organism(organism, species)
+        body["organism"] = effective
+        body["species"] = effective
+        if on_target_sequence:
+            body["on_target"] = {
+                "gene": on_target,
+                "sequence": on_target_sequence.strip().upper(),
+            }
+        else:
+            body["on_target"] = {"gene": on_target}
+        if isoforms is not None:
+            body["isoforms"] = isoforms if isoforms == "all" else list(isoforms)
+        if off_targets:
+            body["off_targets"] = list(off_targets)
+
+        submit = self._transport.request(
+            "POST", "/api/v1/fold-compare/start", json=body
+        ) or {}
+        if not wait:
+            return submit
+        job_id = submit.get("job_id") or submit.get("jobId")
+        if not job_id:
+            raise LigandAIValidationError(
+                f"fold-compare start returned no job_id: {submit}"
+            )
+        return self._poll_fold_compare(
+            job_id, poll_interval=poll_interval, timeout=timeout
+        )
+
+    def _resolve_organism(self, organism: str | None, species: str | None) -> str:
+        """Fail-closed effective species for a fold-compare call.
+
+        ``organism`` wins over ``species``; both fall back to the client default
+        and are coerced to ``"human"`` when the key is not entitled. Falls back
+        to ``"human"`` gracefully when no parent client is attached.
+        """
+        requested = organism if organism is not None else species
+        if self._client is not None:
+            return str(self._client._resolve_species(requested))
+        from ligandai.species import normalize_species
+
+        return str(normalize_species(requested)) if requested is not None else "human"
+
+    def _poll_fold_compare(
+        self,
+        job_id: str,
+        *,
+        poll_interval: float = 10.0,
+        timeout: float = 1800.0,
+    ) -> dict[str, Any]:
+        import time
+
+        start = time.time()
+        terminal = {"completed", "done", "succeeded", "failed", "cancelled", "error"}
+        while True:
+            status = self._transport.request(
+                "GET", f"/api/v1/fold-compare/{job_id}/status"
+            ) or {}
+            state = str(status.get("status") or status.get("state") or "").lower()
+            if state in terminal:
+                return status
+            if time.time() - start > timeout:
+                raise LigandAIWaitTimeout(f"fold-compare job timed out: {job_id}")
+            time.sleep(poll_interval)
+
+    def validate_selectivity(
+        self,
+        session_id: str,
+        on_target: str,
+        *,
+        isoforms: str | Sequence[str] | None = "all",
+        off_targets: Sequence[str] | None = None,
+        top_n: int = 10,
+        engine: str = "boltz2",
+        organism: str | None = None,
+        species: str | None = None,
+        wait: bool = True,
+        poll_interval: float = 10.0,
+        timeout: float = 1800.0,
+    ) -> list[dict[str, Any]]:
+        """Run isoform / off-target negative selection on a completed generation.
+
+        Convenience bridge: pulls the elite folded candidates from a finished
+        generation ``session_id`` via :meth:`get_elite`, takes the top ``top_n``
+        by iPSAE, and runs :meth:`fold_compare` on each against the on-target
+        isoforms + off-targets. This is the supported negative-selection path
+        from the generation workflow — design first, then score selectivity
+        against provided ET isoforms.
+
+        Args:
+            session_id: A completed generation session (from ``generate(...)``).
+            on_target: On-target gene / UniProt for isoform enumeration.
+            isoforms: ``"all"`` (default), a subset list, or None.
+            off_targets: Extra off-target specs (gene / UniProt / raw sequence —
+                pass isoform sequences from provided structures here).
+            top_n: How many top elite candidates to validate.
+            engine: Fold engine for the comparison.
+            organism: ``"human"`` (default) / ``"mouse"``. Falls back to the client
+                ``default_organism``; coerced to ``"human"`` when not entitled
+                (fail-closed). ``species`` is an accepted alias.
+            species: Alias for ``organism`` (server-parity). ``organism`` wins.
+            wait / poll_interval / timeout: Forwarded to :meth:`fold_compare`.
+
+        Returns:
+            List of ``{binder, fold_compare}`` dicts, one per validated candidate.
+        """
+        if top_n < 1:
+            raise LigandAIValidationError("top_n must be at least 1")
+        elite = self.get_elite(session_id=session_id)
+
+        def _ipsae(p: Peptide) -> float:
+            v = getattr(p, "ipsae", None)
+            return float(v) if isinstance(v, (int, float)) else -1.0
+
+        ranked = sorted(
+            (p for p in elite if getattr(p, "sequence", None)),
+            key=_ipsae,
+            reverse=True,
+        )[:top_n]
+
+        out: list[dict[str, Any]] = []
+        for p in ranked:
+            seq = str(p.sequence).strip().upper()
+            report = self.fold_compare(
+                binder=seq,
+                on_target=on_target,
+                isoforms=isoforms,
+                off_targets=off_targets,
+                engine=engine,
+                binder_id=str(getattr(p, "peptide_id", None) or seq[:12]),
+                organism=organism,
+                species=species,
+                wait=wait,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+            out.append({"binder": p, "fold_compare": report})
+        return out
+
+    # ------------------------------------------------------------------
     # v0.2.0 surface — paid-only /api/v1/peptides/*
     # ------------------------------------------------------------------
 
@@ -4750,6 +4999,10 @@ class AsyncPeptides(AsyncResource):
         # surrounding shell to make contacts, not just X itself. Set to 0 to
         # use the literal residues only.
         pocket_expansion_radius_a: float | None = 6.0,
+        # Receptor flexible residues — 1-based receptor residue indices the
+        # backend may relax (side-chain / limited backbone flexibility) during
+        # generation/docking. None (default) keeps the receptor rigid.
+        receptor_flexible_residues: Sequence[int] | None = None,
         auto_fold: bool = True,
         top_n_fold: int | None = None,
         ec_domain_trimming: bool = True,
@@ -4862,6 +5115,7 @@ class AsyncPeptides(AsyncResource):
             targeting_strategy=targeting_strategy,
             target_face=target_face,
             pocket_expansion_radius_a=pocket_expansion_radius_a,
+            receptor_flexible_residues=receptor_flexible_residues,
             auto_fold=auto_fold,
             top_n_fold=top_n_fold,
             ec_domain_trimming=ec_domain_trimming,
@@ -6019,6 +6273,157 @@ class AsyncPeptides(AsyncResource):
         payload = await self._transport.request("GET", f"/api/ptf/parallel/{session_id}/elite") or []
         items = payload if isinstance(payload, list) else payload.get("peptides", [])
         return [Peptide.model_validate(p) for p in items]
+
+    # --- Selectivity / negative-selection validation (async) ---
+
+    async def fold_compare(
+        self,
+        binder: str,
+        on_target: str,
+        *,
+        isoforms: str | Sequence[str] | None = None,
+        off_targets: Sequence[str] | None = None,
+        engine: str = "boltz2",
+        binder_id: str = "binder",
+        on_target_sequence: str | None = None,
+        organism: str | None = None,
+        species: str | None = None,
+        wait: bool = True,
+        poll_interval: float = 10.0,
+        timeout: float = 1800.0,
+    ) -> dict[str, Any]:
+        """Async variant of :meth:`Peptides.fold_compare`.
+
+        Fold-and-score a designed binder against a target's isoforms + off-targets
+        for negative-selection / selectivity validation. Species is resolved
+        fail-closed (non-entitled ``mouse`` -> ``human``); ``organism`` wins over
+        ``species``. See the sync method for full argument semantics.
+        """
+        if not binder or not isinstance(binder, str):
+            raise LigandAIValidationError("binder must be an amino-acid sequence")
+        if not on_target and not on_target_sequence:
+            raise LigandAIValidationError(
+                "on_target (gene / UniProt) or on_target_sequence is required",
+            )
+        body: dict[str, Any] = {
+            "binder": {"id": binder_id, "sequence": binder.strip().upper()},
+            "engine": engine,
+        }
+        effective = self._resolve_organism(organism, species)
+        body["organism"] = effective
+        body["species"] = effective
+        if on_target_sequence:
+            body["on_target"] = {
+                "gene": on_target,
+                "sequence": on_target_sequence.strip().upper(),
+            }
+        else:
+            body["on_target"] = {"gene": on_target}
+        if isoforms is not None:
+            body["isoforms"] = isoforms if isoforms == "all" else list(isoforms)
+        if off_targets:
+            body["off_targets"] = list(off_targets)
+
+        submit = await self._transport.request(
+            "POST", "/api/v1/fold-compare/start", json=body
+        ) or {}
+        if not wait:
+            return submit
+        job_id = submit.get("job_id") or submit.get("jobId")
+        if not job_id:
+            raise LigandAIValidationError(
+                f"fold-compare start returned no job_id: {submit}"
+            )
+        return await self._poll_fold_compare(
+            job_id, poll_interval=poll_interval, timeout=timeout
+        )
+
+    def _resolve_organism(self, organism: str | None, species: str | None) -> str:
+        """Fail-closed effective species for a fold-compare call (async client)."""
+        requested = organism if organism is not None else species
+        if self._client is not None:
+            return str(self._client._resolve_species(requested))
+        from ligandai.species import normalize_species
+
+        return str(normalize_species(requested)) if requested is not None else "human"
+
+    async def _poll_fold_compare(
+        self,
+        job_id: str,
+        *,
+        poll_interval: float = 10.0,
+        timeout: float = 1800.0,
+    ) -> dict[str, Any]:
+        import asyncio
+        import time
+
+        start = time.time()
+        terminal = {"completed", "done", "succeeded", "failed", "cancelled", "error"}
+        while True:
+            status = await self._transport.request(
+                "GET", f"/api/v1/fold-compare/{job_id}/status"
+            ) or {}
+            state = str(status.get("status") or status.get("state") or "").lower()
+            if state in terminal:
+                return status
+            if time.time() - start > timeout:
+                raise LigandAIWaitTimeout(f"fold-compare job timed out: {job_id}")
+            await asyncio.sleep(poll_interval)
+
+    async def validate_selectivity(
+        self,
+        session_id: str,
+        on_target: str,
+        *,
+        isoforms: str | Sequence[str] | None = "all",
+        off_targets: Sequence[str] | None = None,
+        top_n: int = 10,
+        engine: str = "boltz2",
+        organism: str | None = None,
+        species: str | None = None,
+        wait: bool = True,
+        poll_interval: float = 10.0,
+        timeout: float = 1800.0,
+    ) -> list[dict[str, Any]]:
+        """Async variant of :meth:`Peptides.validate_selectivity`.
+
+        Pulls the top ``top_n`` elite candidates from ``session_id`` (by iPSAE)
+        and runs :meth:`fold_compare` on each against the on-target isoforms +
+        off-targets. Species resolved fail-closed. See the sync method for full
+        argument semantics.
+        """
+        if top_n < 1:
+            raise LigandAIValidationError("top_n must be at least 1")
+        elite = await self.get_elite(session_id=session_id)
+
+        def _ipsae(p: Peptide) -> float:
+            v = getattr(p, "ipsae", None)
+            return float(v) if isinstance(v, (int, float)) else -1.0
+
+        ranked = sorted(
+            (p for p in elite if getattr(p, "sequence", None)),
+            key=_ipsae,
+            reverse=True,
+        )[:top_n]
+
+        out: list[dict[str, Any]] = []
+        for p in ranked:
+            seq = str(p.sequence).strip().upper()
+            report = await self.fold_compare(
+                binder=seq,
+                on_target=on_target,
+                isoforms=isoforms,
+                off_targets=off_targets,
+                engine=engine,
+                binder_id=str(getattr(p, "peptide_id", None) or seq[:12]),
+                organism=organism,
+                species=species,
+                wait=wait,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+            out.append({"binder": p, "fold_compare": report})
+        return out
 
     # --- v0.2.0 paid-only surface (async) ---
 
