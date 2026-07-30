@@ -79,7 +79,14 @@ from ligandai.resources.receptors import AsyncReceptors, Receptors
 from ligandai.resources.reports import AsyncReports, Reports
 from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
-from ligandai.types import ClientSessionUsage, Credits, UnlimitedCredits, User
+from ligandai.species import DEFAULT_SPECIES, Species, normalize_species
+from ligandai.types import (
+    ClientSessionUsage,
+    Credits,
+    SpeciesEntitlement,
+    UnlimitedCredits,
+    User,
+)
 from ligandai.version_check import emit_update_notice
 
 _logger = logging.getLogger("ligandai")
@@ -159,7 +166,14 @@ class _ClientCommon:
     _tier: Tier | None
     _base_url: str
 
-    def __init__(self, api_key: str | None, base_url: str) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        base_url: str,
+        *,
+        default_organism: str | Species = DEFAULT_SPECIES,
+        check_entitlement: bool = True,
+    ) -> None:
         self._api_key = api_key
         self._tier = _detect_tier(api_key)
         self._base_url = base_url
@@ -169,6 +183,13 @@ class _ClientCommon:
         self._credit_ledger: CreditLedger | None = None
         self._dedupe_lock = threading.Lock()
         self._api_key_hash: str | None = None
+        # Client-level default species for species-aware calls (human | mouse),
+        # normalized to the supported enum.
+        self._default_species: Species = normalize_species(default_organism)
+        self._check_entitlement = check_entitlement
+        # Cached entitlement decision (None until first fetched). Sync + async
+        # clients each populate it via their own ``entitlement()``.
+        self._entitlement: SpeciesEntitlement | None = None
 
     @property
     def api_key(self) -> str | None:
@@ -307,6 +328,92 @@ class _ClientCommon:
             required_tier="basic",
         )
 
+    # ─── Species / organism selection ────────────────────────────────────
+    #
+    # The species selector is an ENTITLED capability (superadmin or an org
+    # granted ``species_targeting``). The client mirrors the server's
+    # fail-closed rule: if the key is not entitled, ``mouse`` is coerced back to
+    # ``human`` LOCALLY so the SDK never forces a species the server would
+    # reject — and the SDK's own result labels match what the server does.
+    #
+    # ``entitlement()`` is the only network-bound piece and differs by client
+    # flavor (sync vs async); it lives on the concrete ``LigandAI`` /
+    # ``AsyncLigandAI`` subclasses. Everything below is pure and shared.
+
+    @property
+    def default_organism(self) -> Species:
+        """The client-level default species (``"human"`` | ``"mouse"``)."""
+        return self._default_species
+
+    @staticmethod
+    def _not_entitled_decision() -> SpeciesEntitlement:
+        """Fail-closed entitlement: human only. Used on any lookup error."""
+        return SpeciesEntitlement(
+            success=False,
+            entitled=False,
+            is_super_admin=False,
+            org_granted=False,
+            species=["human"],
+            default_species="human",
+        )
+
+    def _species_entitled(self) -> bool:
+        """Whether the caller may select a non-default (mouse) species.
+
+        Base behavior consults only the CACHED entitlement decision so it is
+        safe for both sync and async clients. The sync client overrides this to
+        lazily fetch ``GET /api/cross-species/entitlement`` on first use.
+
+        When ``check_entitlement`` is disabled the client optimistically defers
+        to the server (returns True) — the server remains the single source of
+        truth and will still coerce a non-entitled caller.
+
+        When no cached decision exists yet (async client that hasn't awaited
+        ``entitlement()``), this returns False — fail-closed. The async caller
+        should ``await client.entitlement()`` once to unlock a mouse selection;
+        absent that, the client coerces to human locally and the server still
+        enforces the real grant server-side.
+        """
+        if not self._check_entitlement:
+            return True
+        if self._entitlement is not None:
+            return self._entitlement.entitled
+        return False
+
+    def _resolve_species(self, requested: str | Species | None) -> Species:
+        """Resolve the EFFECTIVE species for a call (fail-closed).
+
+        Mirrors the server's ``effectiveSpecies``: an entitled caller gets
+        exactly the normalized species they asked for (or the client default); a
+        non-entitled caller is coerced to ``"human"`` so a crafted
+        ``organism="mouse"`` never takes effect. Applying this client-side keeps
+        the SDK's own result labels consistent with what the server actually
+        does.
+        """
+        species: Species = (
+            normalize_species(requested)
+            if requested is not None
+            else self._default_species
+        )
+        if species == "mouse" and not self._species_entitled():
+            return "human"
+        return species
+
+    def _apply_species(
+        self, params: dict[str, Any], requested: str | Species | None
+    ) -> Species:
+        """Stamp the effective ``organism`` (+ ``species`` mirror) on a payload.
+
+        "Flag mouse for mouse targets": when the effective species is mouse the
+        request carries ``organism=mouse`` (and the mirror ``species=mouse``) so
+        the server routes to the mouse atlas/ortholog path. Returns the
+        effective species so the caller can surface it on the result.
+        """
+        species = self._resolve_species(requested)
+        params["organism"] = species
+        params["species"] = species
+        return species
+
     def __repr__(self) -> str:
         tier = self._tier or "anonymous"
         return f"{type(self).__name__}(tier={tier!r}, base_url={self._base_url!r})"
@@ -353,9 +460,16 @@ class LigandAI(_ClientCommon):
         max_retries: int = DEFAULT_MAX_RETRIES,
         client_session_id: str | None = None,
         http_client: httpx.Client | None = None,
+        default_organism: str | Species = DEFAULT_SPECIES,
+        check_entitlement: bool = True,
     ) -> None:
         resolved_key = _resolve_api_key(api_key)
-        super().__init__(resolved_key, base_url)
+        super().__init__(
+            resolved_key,
+            base_url,
+            default_organism=default_organism,
+            check_entitlement=check_entitlement,
+        )
         emit_update_notice()
         _log_client_init("LigandAI", base_url, self._tier, resolved_key)
 
@@ -645,6 +759,39 @@ class LigandAI(_ClientCommon):
             return self.peptides.fold(sequences=target, **kwargs)
         return self.peptides.fold(sequences=[target], **kwargs)
 
+    # ─── Species / organism entitlement (sync, network-bound) ────────────
+
+    def entitlement(self, *, refresh: bool = False) -> SpeciesEntitlement:
+        """Fetch (and cache) the caller's species-selector entitlement.
+
+        Calls ``GET /api/cross-species/entitlement``. The result decides whether
+        a ``mouse`` organism is honored by the server; the SDK caches it so the
+        per-call fail-closed coercion is cheap. On any network/parse/HTTP error
+        the SDK fails CLOSED — it returns a not-entitled decision (human only),
+        exactly as the server does on a lookup error.
+
+        Args:
+            refresh: Re-fetch even if a cached decision exists.
+
+        Returns:
+            SpeciesEntitlement describing the grant.
+        """
+        if self._entitlement is not None and not refresh:
+            return self._entitlement
+        try:
+            data = self._transport.request("GET", "/api/cross-species/entitlement") or {}
+            self._entitlement = SpeciesEntitlement(**data)
+        except Exception:
+            # Fail closed: an unavailable/erroring endpoint never grants mouse.
+            self._entitlement = self._not_entitled_decision()
+        return self._entitlement
+
+    def _species_entitled(self) -> bool:
+        """Sync override: lazily fetch the entitlement decision on first use."""
+        if not self._check_entitlement:
+            return True
+        return self.entitlement().entitled
+
     def close(self) -> None:
         self._transport.close()
 
@@ -692,9 +839,16 @@ class AsyncLigandAI(_ClientCommon):
         max_retries: int = DEFAULT_MAX_RETRIES,
         client_session_id: str | None = None,
         http_client: httpx.AsyncClient | None = None,
+        default_organism: str | Species = DEFAULT_SPECIES,
+        check_entitlement: bool = True,
     ) -> None:
         resolved_key = _resolve_api_key(api_key)
-        super().__init__(resolved_key, base_url)
+        super().__init__(
+            resolved_key,
+            base_url,
+            default_organism=default_organism,
+            check_entitlement=check_entitlement,
+        )
         emit_update_notice()
         _log_client_init("AsyncLigandAI", base_url, self._tier, resolved_key)
 
@@ -762,6 +916,27 @@ class AsyncLigandAI(_ClientCommon):
         from ligandai._hardening import extract_and_validate_gpu
         extract_and_validate_gpu(kwargs)
         return await self.peptides.fold_batch(peptides, **kwargs)
+
+    # ─── Species / organism entitlement (async, network-bound) ───────────
+
+    async def entitlement(self, *, refresh: bool = False) -> SpeciesEntitlement:
+        """Async variant of :meth:`LigandAI.entitlement`.
+
+        Fetches (and caches) ``GET /api/cross-species/entitlement``. Await this
+        once to unlock a ``mouse`` selection on the async client; until then the
+        client fails closed to ``human`` locally (the server still enforces the
+        real grant regardless). Fails CLOSED (human only) on any error.
+        """
+        if self._entitlement is not None and not refresh:
+            return self._entitlement
+        try:
+            data = await self._transport.request(
+                "GET", "/api/cross-species/entitlement"
+            ) or {}
+            self._entitlement = SpeciesEntitlement(**data)
+        except Exception:
+            self._entitlement = self._not_entitled_decision()
+        return self._entitlement
 
     async def close(self) -> None:
         await self._transport.close()

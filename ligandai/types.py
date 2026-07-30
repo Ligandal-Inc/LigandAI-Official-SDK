@@ -2312,3 +2312,26 @@ class BatchFoldEvent(_LGModel):
 class StopAllResult(_LGModel):
     cancelled_count: int = Field(alias="cancelledCount")
     job_ids: list[str] = Field(alias="jobIds")
+
+
+# -- Species / organism targeting ---------------------------------------------
+
+
+class SpeciesEntitlement(_LGModel):
+    """Result of ``GET /api/cross-species/entitlement``.
+
+    Mirrors the server response shape. ``entitled`` is the single bit that
+    decides whether a ``mouse`` species selection is honored; the client uses it
+    to fail closed (coerce mouse -> human) when the key is not entitled.
+
+    On any network/parse/HTTP error the SDK constructs a not-entitled instance
+    (human only) so an unavailable endpoint never grants a non-default species.
+    """
+
+    success: bool = True
+    capability: str = "species_targeting"
+    entitled: bool = False
+    is_super_admin: bool = Field(alias="isSuperAdmin", default=False)
+    org_granted: bool = Field(alias="orgGranted", default=False)
+    species: list[str] = Field(default_factory=lambda: ["human"])
+    default_species: str = Field(alias="defaultSpecies", default="human")
