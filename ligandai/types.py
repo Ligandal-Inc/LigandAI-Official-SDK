@@ -1436,6 +1436,16 @@ class FoldResult(_LGModel):
     Populated by the Boltz-2 writer when schema_version >= 2."""
     iptm: float | None = None
     ipsae: float | None = None
+    """Complex-level iPSAE, dominated by receptor-self confidence on multimeric
+    targets — it stays high even when the peptide is not engaging. NOT the binder
+    metric; prefer :attr:`peptide_ipsae`. Retained for backward compatibility."""
+    peptide_ipsae: float | None = Field(default=None, alias="peptideIpsae")
+    """Peptide-receptor interface iPSAE — THE binder metric for Boltz-2 peptide
+    binders. ``None`` means the value was never computed (common on the
+    predict-batch path), NOT zero — check :attr:`peptide_ipsae_status` and do not
+    fall back to :attr:`ipsae`, which measures a different thing."""
+    peptide_ipsae_status: str | None = Field(default=None, alias="peptideIpsaeStatus")
+    """'ok' when :attr:`peptide_ipsae` is present; 'not_computed' when it is NULL."""
     plddt: float | None = None
     ptm: float | None = None
     ipae: float | None = None

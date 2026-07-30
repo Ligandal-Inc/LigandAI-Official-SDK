@@ -1020,6 +1020,11 @@ const score = (c, names) => {{
   for (const name of names) if (flat[name] !== undefined && flat[name] !== null) return flat[name];
   return null;
 }};
+// ⛔ iPSAE key order is load-bearing: score() is first-present-wins, so
+// peptide_ipsae (the peptide-receptor interface = THE binder metric) must come
+// before the complex-level ipsae/overall_ipsae, which is inflated by
+// receptor-self confidence on multimeric targets and would otherwise shadow it.
+const IPSAE_KEYS = ['peptide_ipsae','ipsae','overall_ipsae'];
 function renderRows() {{
   const select = document.getElementById('candidateSelect');
   const rows = document.getElementById('rows');
@@ -1032,7 +1037,7 @@ function renderRows() {{
     select.appendChild(opt);
     const tr = document.createElement('tr');
     tr.className = i === selected ? 'active' : '';
-    tr.innerHTML = `<td>${{c.rank}}</td><td>${{c.gene || ''}}</td><td class="sequence">${{(c.sequence || '').slice(0, 18)}}</td><td>${{fmt(score(c, ['ipsae','overall_ipsae','peptide_ipsae']))}}</td>`;
+    tr.innerHTML = `<td>${{c.rank}}</td><td>${{c.gene || ''}}</td><td class="sequence">${{(c.sequence || '').slice(0, 18)}}</td><td>${{fmt(score(c, IPSAE_KEYS))}}</td>`;
     tr.onclick = () => setSelected(i);
     rows.appendChild(tr);
   }});
@@ -1046,7 +1051,7 @@ function setSelected(index) {{
 async function renderCandidate() {{
   const c = candidates[selected];
   if (!c) return;
-  document.getElementById('ipsae').textContent = fmt(score(c, ['ipsae','overall_ipsae','peptide_ipsae']));
+  document.getElementById('ipsae').textContent = fmt(score(c, IPSAE_KEYS));
   document.getElementById('dg').textContent = fmt(score(c, ['delta_g','deltaG','bindingEnergy','v10_dg_best']));
   document.getElementById('iptm').textContent = fmt(score(c, ['iptm']));
   document.getElementById('plddt').textContent = fmt(score(c, ['plddt','mean_plddt','complex_plddt']));

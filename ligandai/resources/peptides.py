@@ -1019,6 +1019,11 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     cif_data = _first("cifContent", "cif_content", "cifData", "cif_data", "cif")
     iptm = _first("iptm", "ipTM")
     ipsae = _first("ipsae", "iPSAE")
+    # ⛔ peptide_ipsae is the BINDER metric (peptide-receptor interface iPSAE).
+    # Read it on its own — never coalesce into `ipsae`, which is the complex-level
+    # score inflated by receptor-self confidence on multimeric targets. A missing
+    # value means "not computed", not zero.
+    peptide_ipsae = _first("peptideIpsae", "peptide_ipsae")
     # server emits both a scalar mean_plddt AND an
     # array plddt (per-residue). FoldResult.plddt is a scalar — prefer the
     # mean if available, fall back to mean(plddt-array), else None.
@@ -1051,6 +1056,7 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
 
     iptm = _to_float(iptm)
     ipsae = _to_float(ipsae)
+    peptide_ipsae = _to_float(peptide_ipsae)
     ptm = _to_float(ptm)
     ipae = _to_float(ipae) if not isinstance(ipae, dict) else None
 
@@ -1062,6 +1068,7 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     for k, v in (
         ("iptm", iptm), ("ipsae", ipsae), ("ptm", ptm),
         ("mean_plddt", plddt), ("ipae", ipae),
+        ("peptide_ipsae", peptide_ipsae),
     ):
         if v is not None and k not in metrics:
             try:
@@ -1081,6 +1088,13 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
             "hasStructure": has_structure,
             "iptm": iptm,
             "ipsae": ipsae,
+            "peptideIpsae": peptide_ipsae,
+            # Mirror the server's derivation so the field is meaningful even on
+            # older payloads that predate peptideIpsaeStatus.
+            "peptideIpsaeStatus": (
+                _first("peptideIpsaeStatus", "peptide_ipsae_status")
+                or ("ok" if peptide_ipsae is not None else "not_computed")
+            ),
             "plddt": plddt,
             "ptm": ptm,
             "ipae": ipae,

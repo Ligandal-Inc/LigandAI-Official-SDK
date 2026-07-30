@@ -622,7 +622,13 @@ print(job.batch_id, job.total_cost_credits)
 results = job.wait(on_progress=lambda s: print(s["done"], "/", s["total"]))
 for fold in results:
     if fold is not None:
-        print(fold.iptm, fold.ipsae)
+        # peptide_ipsae is the binder metric. It is None on the fold_batch path
+        # (which skips the peptide iPSAE step) — check peptide_ipsae_status
+        # rather than falling back to fold.ipsae, which is complex-level.
+        if fold.peptide_ipsae_status == "ok":
+            print(fold.peptide_ipsae)
+        else:
+            print("peptide iPSAE not computed; complex ipsae:", fold.ipsae)
 
 # Custom PDB receptor
 job = client.peptides.fold_batch(
