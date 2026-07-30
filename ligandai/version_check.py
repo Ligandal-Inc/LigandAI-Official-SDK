@@ -21,6 +21,10 @@ EXPECTED_REPOSITORIES = (
     "github.com/ligandal-inc/ligandai-official-sdk",
     "github.com/ligandal/ligandai-python-sdk",
 )
+# Backwards-compatible alias. Shipped as a single string through 0.6.4, widened
+# to the tuple above before 0.7.6. Kept so the published-superset gate stays
+# green and any caller that imported the old name still resolves.
+EXPECTED_REPOSITORY = EXPECTED_REPOSITORIES[0]
 
 _VERSION_NOTICE_CACHE: str | None = None
 _VERSION_NOTICE_CHECKED = False
