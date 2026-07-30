@@ -5,6 +5,139 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+
+## [0.7.8] - 2026-07-30
+
+Released on top of the published `0.7.6`. Folds in two drafts that were written
+locally but never published (numbered `0.7.6` and `0.7.7` in this file — those
+numbers went to different, separately-published releases), and adds
+species/organism targeting plus fold-compare selectivity.
+
+### Added — species / organism targeting (`bd-dre-7x9bc`)
+- `ligandai.species` module: `Species` enum, `normalize_species`, `is_mouse`,
+  `DEFAULT_SPECIES`, `SPECIES_TARGETING_CAPABILITY` — byte-compatible with the
+  server's `normalizeSpecies`.
+- `LigandAI(..., default_organism=..., check_entitlement=...)` and
+  `client.entitlement()` (sync + async) → `GET /api/cross-species/entitlement`,
+  returning `SpeciesEntitlement`.
+- Per-call `organism` / `species` on `receptors.search`, `receptors.by_gene`,
+  `discovery.tissue_markers`, `discovery.cell_type_markers`,
+  `discovery.gene_expression` (sync + async).
+- **Fail-closed**: an unentitled key requesting `organism="mouse"` is coerced to
+  `"human"` client-side as well as server-side; entitlement lookup failures also
+  fail closed to human.
+
+### Added — fold-compare isoform / off-target selectivity (`bd-dre-7x9bc`)
+- `peptides.fold_compare(...)` → `POST /api/v1/fold-compare/start` + status
+  polling; compare a binder against selected isoforms or named off-target
+  proteins with Boltz-2 or Protenix, scored through DeltaForge.
+- `peptides.validate_selectivity(...)` — sources elite binders via `get_elite`,
+  ranks by iPSAE and fans out fold-compare runs.
+- New generation setting `receptor_flexible_residues` (wire key
+  `flexibleResidues`), alongside the existing `pocket_expansion_radius_a` and
+  `ec_domain_trimming`.
+
+### Target-discovery funnel — drafted as 0.7.7, never published (`bd-LIGANDAI_ALPHA_V2-5p57t`)
+
+Make the built-in target-discovery (transcriptomics) funnel natively
+discoverable so a fresh agent uses `client.discovery` instead of hand-stitching
+GTEx + CellGuide / CellxGene (`bd-LIGANDAI_ALPHA_V2-5p57t`).
+
+#### Fixed
+
+- **`discovery.tissue_markers()` / `cell_type_markers()` no longer raise on the
+  live server response.** The GTEx `top-markers` and scRNA/custom `analyze-fast`
+  endpoints return ranked rows under a `markers` array (gene keyed as
+  `gene_name`), not a `top` array — `MarkerResponse` required `top` and rejected
+  the real payload. `MarkerResponse` now normalizes `markers` (with
+  `gene_name` → `gene`), a bare `top` array, and an empty body all into `.top`,
+  and maps the server's `count` into `total`. Mirrors the existing
+  `ComparisonResponse` normalization.
+
+#### Added
+
+- **`ligandai.guide()` / `LigandAI.guide()` / `AsyncLigandAI.guide()`** — print
+  (or return) a concise map of the canonical workflows, including the
+  target-discovery funnel, with a pointer to the shipped `AGENTS.md` and
+  `.claude/skills/ligandai/` docs. Referenced from `ligandai.__doc__` and the
+  `LigandAI` class docstring so an agent reading `help(LigandAI)` is told to call
+  it. No network call.
+- **`.claude/skills/ligandai/discovery.md`** — new agent skill teaching the
+  discovery funnel (resolve identifiers → SI-ranked surface receptors →
+  differential/BBB ranking → custom-dataset quickstart → chain into design).
+  Listed in `SKILL.md` (now "5 workflows").
+- **AGENTS.md "Workflow 5 — Target discovery (transcriptomics)"** plus a
+  "start here for discovery" pointer near the top.
+- **README "Target discovery (transcriptomics)" section** with the funnel and
+  custom-transcriptomics quickstart.
+
+#### Changed
+
+- **`Discovery` / `AsyncDiscovery` docstrings** enriched with the funnel
+  framing, when-to-use guidance, the `receptor_only` surface filter, and the
+  custom-dataset routing on `tissue_markers`, `cell_type_markers`,
+  `upload_dataset`, `compare_targets`, and `transport_vasculome` — so
+  `help(client.discovery)` teaches the funnel.
+- **`CLAUDE.md`** internal-path reference scrubbed (no absolute paths in the
+  public package).
+
+
+#### First-run ergonomics — drafted as 0.7.6, never published (`bd-LIGANDAI_ALPHA_V2-9huj4`)
+
+First-run ergonomics fixes surfaced by a fresh `pip install ligandai` + cold
+PD-L1 run (`bd-LIGANDAI_ALPHA_V2-9huj4`). Supersedes the internal 0.7.5
+version bump (never published).
+
+#### Fixed
+
+- **`peptides.estimate_cost()` / `synthesis.estimate_cost()` no longer raise on
+  the live server response.** `CostEstimate.breakdown` was typed
+  `dict[str, int]`, but `GET /api/billing/estimate` now nests `params` and
+  `rates` objects inside `breakdown` — pydantic rejected the nested dicts with
+  "Input should be a valid integer". `breakdown` is now `dict[str, Any]`, and
+  `credits` / `cost_usd` default to `0` so a partial or restructured payload
+  parses instead of raising. Extra top-level keys are still preserved (base
+  `extra="allow"`).
+- **`structures.list_isoforms()` / `list_species()` and
+  `linker_modifications.list_uaa_palette()` / `list_payload_libraries()`** now
+  tolerate a bare-list **or** wrapped-dict server response (matching their
+  sibling `candidates()` / list helpers) instead of raising `AttributeError`
+  when the server returns the list directly. All four keep their declared
+  `list[...]` return type.
+
+#### Added
+
+- **`peptides.reattach(job_id)` (sync + async)** — re-create a *waitable*
+  `Job` / `AsyncJob` for an in-flight or completed parallel-generation session
+  from its id alone, so a caller who kept only the `session_id` (e.g. after a
+  disconnect) can resume polling: `client.peptides.reattach(session_id).wait()`.
+  Binds to `GET /api/ptf/parallel/{id}/status` and resolves to a
+  `GenerationResult` exactly like the handle `generate()` returns.
+- **`jobs.get(job_id)` parallel-gen fallback** — `session_parallel_*` ids live
+  in the PTF parallel store, not the generic jobs tables, so the bare
+  `GET /api/jobs/{id}` lookup 404s. `jobs.get()` now falls back to
+  `GET /api/ptf/parallel/{id}/status` for those ids and normalizes the response
+  into a `JobInfo` snapshot (non-parallel ids still re-raise the 404). To
+  *resume polling*, prefer `peptides.reattach(id)`.
+- **`socks` optional dependency** — `pip install ligandai[socks]` pulls in
+  `httpx[socks]` (the `socksio` backend) for callers behind a SOCKS proxy
+  (`socks5://` / `socks5h://` via `HTTPS_PROXY` / `ALL_PROXY`). Not a base
+  dependency.
+- **`UnlimitedCredits`** is exported from the package root for `isinstance`
+  checks against unlimited balances.
+
+#### Changed
+
+- **`client.credits` no longer reads `0` for unlimited / superadmin accounts.**
+  It now returns an `UnlimitedCredits` — an `int` subclass that compares as
+  effectively-infinite (so `cost <= client.credits` is `True`) but renders as
+  `"unlimited"`. `isinstance(client.credits, int)` and arithmetic are
+  unchanged; check `client.credits.is_unlimited` to branch. The one-shot
+  balance note is now informational ("unlimited credit balance … displays as
+  'unlimited'") instead of the alarming "implausible credits balance" warning.
+  The `credits` property docstring clarifies property-vs-method usage.
+
+
 ## [0.7.6] - 2026-07-12
 
 ### Added — `legal` resource (programmatic ToS / EULA review + acceptance)

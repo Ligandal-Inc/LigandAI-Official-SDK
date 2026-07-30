@@ -38,19 +38,23 @@ _BALANCE_WARNED = False  # one-shot warning per process
 
 
 def _warn_if_sentinel_balance(c: Credits) -> Credits:
-    """Emit a one-shot stderr warning when a sentinel balance is detected.
+    """Emit a one-shot, informational stderr note when an unlimited (sentinel)
+    balance is detected.
 
     Normalization (balance/credits aliasing, is_unlimited flag) is handled
-    inside :class:`Credits` itself via a model validator. This function
-    layers the user-visible warning so callers notice tier-resolution
-    bugs the first time they hit them in a process.
+    inside :class:`Credits` itself via a model validator. This note tells the
+    caller that the balance is unlimited (so ``client.credits`` renders as
+    ``"unlimited"`` rather than a giant number) and offers a recourse if a
+    finite balance was expected — without the alarming "implausible balance"
+    framing that confused legitimate superadmin / unlimited accounts.
     """
     global _BALANCE_WARNED
     if c.is_unlimited and not _BALANCE_WARNED:
         print(
-            f"[ligandai] WARNING: implausible credits balance ({c.balance:,}) "
-            "— likely tier resolution bug or superadmin sentinel. "
-            "Contact support@ligandai.com if you are not a superadmin.",
+            "[ligandai] This account has an unlimited credit balance "
+            "(superadmin / unlimited tier); client.credits displays as "
+            "'unlimited'. If you expected a finite balance, contact "
+            "support@ligandai.com.",
             file=sys.stderr,
         )
         _BALANCE_WARNED = True

@@ -25,15 +25,49 @@ class Receptors(Resource):
     require auth.
     """
 
+    def _stamp_organism(
+        self, params: dict[str, Any], organism: str | None, species: str | None
+    ) -> None:
+        """Fail-closed stamp of the effective ``organism``/``species``.
+
+        Species selection is entitlement-gated: a non-entitled key can never
+        force ``mouse`` — it is coerced to ``human`` locally. No-op when no
+        parent client is attached (e.g. a standalone ``Receptors`` instance).
+
+        ReceptorDB browse/search is a public, mostly-anonymous surface, so the
+        default-human case stays byte-identical to the legacy wire (no
+        ``organism`` param) — the field is only stamped when the caller
+        explicitly requests a species OR the client default is non-human. Either
+        way the effective species is entitlement-gated (mouse -> human when not
+        entitled).
+        """
+        requested = organism if organism is not None else species
+        if self._client is None:
+            return
+        if requested is None and self._client.default_organism == "human":
+            return
+        self._client._apply_species(params, requested)
+
     def search(
         self,
         query: str,
         oligomeric_state: str | None = None,
         limit: int = 10,
+        *,
+        organism: str | None = None,
+        species: str | None = None,
     ) -> List[ReceptorComplex]:
+        """Search ReceptorDB complexes.
+
+        :param organism: species namespace — ``"human"`` (default) or
+            ``"mouse"``. Falls back to the client ``default_organism``; coerced to
+            ``"human"`` when the key is not entitled (fail-closed).
+        :param species: alias for ``organism`` (server-parity). ``organism`` wins.
+        """
         params: dict[str, object] = {"query": query, "limit": limit}
         if oligomeric_state is not None:
             params["oligomeric_state"] = oligomeric_state
+        self._stamp_organism(params, organism, species)
         payload = self._transport.request("GET", "/api/receptordb/search", params=params) or []
         items = payload if isinstance(payload, list) else payload.get("results", [])
         return [ReceptorComplex.model_validate(c) for c in items]
@@ -85,8 +119,22 @@ class Receptors(Resource):
             if not page.complexes:
                 return  # safety
 
-    def by_gene(self, gene: str) -> List[ReceptorComplex]:
-        payload = self._transport.request("GET", f"/api/receptordb/by-gene/{gene}") or []
+    def by_gene(
+        self,
+        gene: str,
+        *,
+        organism: str | None = None,
+        species: str | None = None,
+    ) -> List[ReceptorComplex]:
+        """Complexes for a gene. ``organism`` (``"human"`` default / ``"mouse"``)
+        selects the namespace, fail-closed to human when not entitled;
+        ``species`` is an alias.
+        """
+        params: dict[str, Any] = {}
+        self._stamp_organism(params, organism, species)
+        payload = self._transport.request(
+            "GET", f"/api/receptordb/by-gene/{gene}", params=params or None
+        ) or []
         items = payload if isinstance(payload, list) else payload.get("complexes", [])
         return [ReceptorComplex.model_validate(c) for c in items]
 
@@ -141,15 +189,38 @@ class Receptors(Resource):
 
 
 class AsyncReceptors(AsyncResource):
+    def _stamp_organism(
+        self, params: dict[str, Any], organism: str | None, species: str | None
+    ) -> None:
+        """Fail-closed stamp — see :meth:`Receptors._stamp_organism`.
+
+        Default-human stays byte-identical to the legacy wire; only stamps when
+        a species is requested or the client default is non-human.
+        """
+        requested = organism if organism is not None else species
+        if self._client is None:
+            return
+        if requested is None and self._client.default_organism == "human":
+            return
+        self._client._apply_species(params, requested)
+
     async def search(
         self,
         query: str,
         oligomeric_state: str | None = None,
         limit: int = 10,
+        *,
+        organism: str | None = None,
+        species: str | None = None,
     ) -> List[ReceptorComplex]:
+        """Async ReceptorDB search. ``organism`` (``"human"`` default /
+        ``"mouse"``) selects the namespace, fail-closed to human when not
+        entitled; ``species`` is an alias.
+        """
         params: dict[str, object] = {"query": query, "limit": limit}
         if oligomeric_state is not None:
             params["oligomeric_state"] = oligomeric_state
+        self._stamp_organism(params, organism, species)
         payload = await self._transport.request("GET", "/api/receptordb/search", params=params) or []
         items = payload if isinstance(payload, list) else payload.get("results", [])
         return [ReceptorComplex.model_validate(c) for c in items]
@@ -201,8 +272,22 @@ class AsyncReceptors(AsyncResource):
             if not page.complexes:
                 return
 
-    async def by_gene(self, gene: str) -> List[ReceptorComplex]:
-        payload = await self._transport.request("GET", f"/api/receptordb/by-gene/{gene}") or []
+    async def by_gene(
+        self,
+        gene: str,
+        *,
+        organism: str | None = None,
+        species: str | None = None,
+    ) -> List[ReceptorComplex]:
+        """Async complexes for a gene. ``organism`` (``"human"`` default /
+        ``"mouse"``) selects the namespace, fail-closed to human when not
+        entitled; ``species`` is an alias.
+        """
+        params: dict[str, Any] = {}
+        self._stamp_organism(params, organism, species)
+        payload = await self._transport.request(
+            "GET", f"/api/receptordb/by-gene/{gene}", params=params or None
+        ) or []
         items = payload if isinstance(payload, list) else payload.get("complexes", [])
         return [ReceptorComplex.model_validate(c) for c in items]
 

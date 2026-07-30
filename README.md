@@ -138,6 +138,17 @@ Both local databases are mode 0600 under a 0700 parent directory.
 pip install ligandai
 ```
 
+**Behind a SOCKS proxy?** httpx needs the `socksio` backend to route through a
+`socks5://` / `socks5h://` proxy (`HTTPS_PROXY` / `ALL_PROXY`); without it the
+first request raises an `ImportError`. Install the extra:
+
+```bash
+pip install ligandai[socks]
+```
+
+Optional extras: `ligandai[socks]` (SOCKS proxy support),
+`ligandai[viz]` (matplotlib charts).
+
 The SDK checks PyPI once per process when a client is created. If a newer valid
 `ligandal/ligandai-python-sdk` release exists, it emits:
 
@@ -180,6 +191,92 @@ job = client.peptides.generate(
 result = job.wait(timeout=1800)
 print(f"Got {len(result.peptides)} peptides, top iPSAE: {result.peptides[0].ipsae}")
 ```
+
+**Resuming after a disconnect.** A generation run keeps going server-side even
+if your process exits. Persist `job.id` and reattach later to resume polling:
+
+```python
+session_id = job.id          # save this somewhere durable
+
+# ... later, in a fresh process / after a disconnect ...
+result = client.peptides.reattach(session_id).wait()
+```
+
+`client.jobs.get(session_id)` returns a one-shot `JobInfo` status snapshot for
+the same parallel-generation id; `reattach()` returns a *waitable* `Job`.
+
+### Target discovery (transcriptomics)
+
+Don't know which gene to design against yet? Use the built-in `client.discovery`
+funnel — the platform already computes the specificity-index (SI) ranking over
+GTEx and single-cell atlases server-side, so **you never hand-stitch GTEx +
+CellGuide / CellxGene yourself.** Every ranking call returns a `MarkerResponse`;
+read `.top` (a list of `TissueMarker` with `.gene`, `.si`, `.receptor`, `.rank`).
+
+```python
+client = LigandAI()
+
+# 1) Resolve identifiers first — exact GTEx strings (don't guess the spelling).
+client.discovery.tissues()         # ['Kidney - Cortex', 'Liver', ...]
+client.discovery.organ_systems()   # ['Nervous', 'Digestive', ...]
+
+# 2) SI-ranked surface receptors enriched in the tissue (GTEx bulk).
+#    receptor_only=True is THE cell-surface filter; exclude_tissues demotes
+#    broadly-shared, off-target-prone genes.
+markers = client.discovery.tissue_markers(
+    target_tissues=["Kidney - Cortex"],
+    exclude_tissues=["Liver", "Lung"],
+    receptor_only=True,
+    top_n=200,
+)
+gene = markers.top[0].gene
+print(markers.top[0].si, markers.top[0].receptor)   # specificity index, surface flag
+
+# 3) Hand the winning gene straight into design.
+job = client.peptides.generate(gene=gene, num_peptides=50,
+                               auto_fold=True, top_n_fold=10)
+result = job.wait(timeout=1800)
+```
+
+**Refine the ranking** when a whole-tissue cut is too coarse:
+
+```python
+# Single-cell resolution (Academia+):
+client.discovery.cell_type_markers(
+    scrna_tissue="kidney", target_cell_types=["proximal_tubule"], receptor_only=True,
+)
+
+# SHARED vs DIFFERENTIAL selectivity across groups (gtex / geneset / custom):
+resp = client.discovery.compare_targets([
+    {"name": "target", "type": "gtex", "tissue": "Kidney - Cortex"},
+    {"name": "ref",    "type": "gtex", "tissue": "Liver"},
+], receptor_only=True)
+print(resp.differential_genes, resp.shared_genes)
+
+# BBB transcytosis shuttles for CNS delivery (Enterprise):
+client.discovery.transport_vasculome(modality="monovalent", specificity_weight=0.5)
+```
+
+**Custom transcriptomics quickstart** — upload your own counts, then run the
+SAME SI ranking on them. Passing `custom_dataset_targets` routes
+`tissue_markers` to the `analyze-fast` endpoint:
+
+```python
+# dataset_type: "bulk" | "scrna" | "scRNA-seq" | "microarray"
+ds = client.discovery.upload_dataset("counts.h5ad", dataset_type="bulk")
+
+markers = client.discovery.tissue_markers(
+    # CustomDatasetTarget aliases (in ligandai.types): datasetId (required),
+    # cellTypes, samples. The dict form below is equivalent.
+    custom_dataset_targets=[{"datasetId": ds.id, "cellTypes": ["proximal_tubule"]}],
+    receptor_only=True,
+    top_n=200,
+)
+top_gene = markers.top[0].gene
+```
+
+`client.discovery.list_datasets()` finds earlier uploads;
+`client.discovery.import_geo("GSE12345")` ingests a public GEO series instead.
 
 ### Designing against a specific PDB ID + chain
 
@@ -302,7 +399,7 @@ For agent-specific billing, token, API-key, and Claude Skill routing, see
 | `client.receptors` | `/api/receptordb/*` | search, browse, download PDBs |
 | `client.structures` | `/api/structure/*`, `/api/gene-resolver/*` | gene → PDB / AlphaFold |
 | `client.proteins` | `/api/protein-info/*`, `/api/protein-variants/*` | UniProt info, variants, custom PDBs |
-| `client.discovery` | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*` | tissue markers, scRNA, GEO import |
+| `client.discovery` | `/api/transcriptomics/*`, `/api/scrna/*`, `/api/geo-import/*`, `/api/transport-vasculome/*` | target-discovery funnel: SI-ranked tissue/cell-type surface markers, compare_targets, BBB shuttles, custom-dataset/GEO upload (see "Target discovery") |
 | `client.diseases` | `/api/disease-viewer/*` | disease search, mutations |
 | `client.goals` | `/api/autoresearch/*` | persistent goal-directed AutoResearch runs |
 | `client.peptides` | `/api/ptf/parallel/*`, `/api/folding/*`, `/api/v1/deltaforge/score-pdb` | generate, fold, score |

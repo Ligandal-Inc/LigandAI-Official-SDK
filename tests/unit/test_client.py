@@ -266,10 +266,13 @@ async def test_async_construct() -> None:
 
 
 def test_client_credits_property_masks_sentinel(httpx_mock: HTTPXMock) -> None:
-    """`client.credits` returns 0 (not the giant int) when server signals
-    is_unlimited. The full Credits object stays on ``client._credits`` for
-    callers who need to distinguish.
+    """`client.credits` returns an int-like ``UnlimitedCredits`` (renders as
+    "unlimited", NOT the giant sentinel and NOT a misleading 0) when the server
+    signals is_unlimited. The full Credits object stays on ``client._credits``
+    for callers who need the raw value.
     """
+    from ligandai import UnlimitedCredits
+
     c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
     httpx_mock.add_response(
         url=f"{BASE}/api/credits",
@@ -281,7 +284,13 @@ def test_client_credits_property_masks_sentinel(httpx_mock: HTTPXMock) -> None:
         },
     )
 
-    assert c.credits == 0  # NOT the 1e16 sentinel
+    bal = c.credits
+    assert isinstance(bal, int)  # backward-compatible: still an int
+    assert isinstance(bal, UnlimitedCredits)
+    assert str(bal) == "unlimited" and f"{bal}" == "unlimited"
+    assert bal != 0  # NOT a misleading zero
+    assert bal.is_unlimited is True
+    assert bal >= 1_000_000  # compares as effectively-infinite for cost checks
     # Power users can still introspect the raw object
     assert c._credits is not None
     assert c._credits.is_unlimited is True
@@ -310,6 +319,8 @@ def test_client_credits_property_masks_auto_detected_sentinel(
     The Credits model auto-flips is_unlimited=True at the 1e10 threshold;
     `client.credits` should still mask it.
     """
+    from ligandai import UnlimitedCredits
+
     c = LigandAI(api_key="lgai_pro_x", base_url=BASE, max_retries=1)
     httpx_mock.add_response(
         url=f"{BASE}/api/credits",
@@ -317,5 +328,8 @@ def test_client_credits_property_masks_auto_detected_sentinel(
         json={"balance": 1_000_000_000_000, "tier": "pro"},  # 1e12, no flag
     )
 
-    assert c.credits == 0  # masked despite missing isUnlimited
+    bal = c.credits
+    assert isinstance(bal, UnlimitedCredits)  # surfaced as unlimited, not a bare 0
+    assert str(bal) == "unlimited"
+    assert bal != 0
     assert c._credits.is_unlimited is True

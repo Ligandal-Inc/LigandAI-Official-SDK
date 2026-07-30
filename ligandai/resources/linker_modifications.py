@@ -177,7 +177,7 @@ class LinkerModifications(Resource):
         result = self._transport.request(
             "GET", "/api/v1/linker_modifications/uaa_palette",
         ) or {}
-        return result.get("palette") or []
+        return list(result if isinstance(result, list) else (result.get("palette") or []))
 
     # ---- Mode A: generation-loop fold with linker mods ----
 
@@ -229,7 +229,7 @@ class LinkerModifications(Resource):
         result = self._transport.request(
             "GET", "/api/v1/payload_optimization/libraries",
         ) or {}
-        return result.get("libraries") or []
+        return list(result if isinstance(result, list) else (result.get("libraries") or []))
 
     def get_payload_library(self, library_key: str) -> dict[str, Any]:
         """Return a single library with all entries."""
@@ -342,7 +342,7 @@ class AsyncLinkerModifications(AsyncResource):
         result = await self._transport.request(
             "GET", "/api/v1/linker_modifications/uaa_palette",
         ) or {}
-        return result.get("palette") or []
+        return list(result if isinstance(result, list) else (result.get("palette") or []))
 
     async def fold_with_linker_mods(
         self,
@@ -382,7 +382,7 @@ class AsyncLinkerModifications(AsyncResource):
         result = await self._transport.request(
             "GET", "/api/v1/payload_optimization/libraries",
         ) or {}
-        return result.get("libraries") or []
+        return list(result if isinstance(result, list) else (result.get("libraries") or []))
 
     async def get_payload_library(self, library_key: str) -> dict[str, Any]:
         if self._client is not None:

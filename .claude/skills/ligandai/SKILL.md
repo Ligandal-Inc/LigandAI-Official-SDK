@@ -73,7 +73,7 @@ job = client.peptides.generate(
 | `client.account` | tier, credits, billing, top-up, usage, session_usage | `examples/09_account_quota_tier.py`, `examples/18_error_handling_tier_gating.py` |
 | `client.bivalent` | bispecific design (mode1/mode2 + linker optimization, pro+) | `examples/03_bivalent.py`, `examples/03b_bivalent_mode1.py` |
 | `client.charts` | server-rendered matplotlib charts | `examples/21_charts_visualization.py` |
-| `client.discovery` | tissue/cell-type markers, GEO import, transport-vasculome | `examples/02_end_to_end.py` |
+| `client.discovery` | **target-discovery funnel** — SI-ranked tissue/cell-type surface markers (GTEx + custom upload/GEO), compare_targets, transport-vasculome (BBB shuttles) — see `discovery.md` | `examples/02_end_to_end.py` |
 | `client.diseases` | disease search, mutations catalog | `examples/19_msa_memory_reports_diseases.py` |
 | `client.folds` | hotspot partition + pocket expansion (Stream D) | `examples/14_folds_partition_expand_hotspot.py` |
 | `client.goals` | persistent AutoResearch runs | `examples/22_goals_planning.py` |
@@ -88,10 +88,19 @@ job = client.peptides.generate(
 | `client.structures` | get / candidates / from_pdb / from_alphafold / resolve / list / get_pdb / analyze | `examples/07_pdb_id_chain_design.py`, `examples/13_structures_listing_pdb_pull.py` |
 | `client.synthesis` | options / estimate / recommend / cart / orders / Adaptyv list/get/create/submit / linker_options / recommend_linker / binding_orientation / generation_mask_guidance / amide_quote | `examples/02_end_to_end.py`, `examples/17_synthesis_adaptyv.py` |
 
-## The 4 workflows the user will ask for
+## The 5 workflows the user will ask for
 
-See `generate.md`, `fold.md`, `synthesis.md`, `program.md` next to this file
-for compact, ready-to-paste recipes.
+See `discovery.md`, `generate.md`, `fold.md`, `synthesis.md`, `program.md` next
+to this file for compact, ready-to-paste recipes.
+
+- `discovery.md` — **target discovery (transcriptomics).** Start here for "find
+  targets" / "which receptors are enriched in tissue/cell-type X". The
+  SI-ranking funnel (`client.discovery.tissue_markers(..., receptor_only=True)`,
+  GTEx + custom datasets) is native — don't hand-stitch GTEx/CellGuide.
+- `generate.md` — design binders against a gene / PDB ID / custom CIF / pocket.
+- `fold.md` — Boltz-2 complex folding + hotspot partitioning.
+- `synthesis.md` — Adaptyv BLI / SPPS ordering.
+- `program.md` — programs / projects / sessions.
 
 ## Error handling
 
