@@ -435,6 +435,7 @@ def _generation_body(
     num_peptides: int | None,
     length_range: tuple[int, int],
     target_residues: list[ResidueRange] | None,
+    avoid_residues: list[ResidueRange] | None,
     target_chains: list[str] | None,
     fold_partners: _FoldPartnerMode | list[str] | None,
     targeting_strategy: _TargetingStrategy | None,
@@ -631,14 +632,38 @@ def _generation_body(
         )
         body["ecTrimming"] = cfg
     # Hotspot → pocket expansion. When the user passes a single residue
-    # (or a small set), the server should include every residue within
-    # ``pocket_expansion_radius_a`` Å of any hotspot atom so the design
-    # pocket has enough surface area for a real binding interface.
-    # Passed only when there are residues to expand; default 6.0 Å mirrors
-    # the platform's "shell of contacts" pocket convention.
-    if target_residues and pocket_expansion_radius_a and pocket_expansion_radius_a > 0:
+    # (or a small set), the server includes every residue within
+    # ``pocket_expansion_radius_a`` Å of any hotspot atom in the design
+    # pocket. Default 6.0 Å mirrors the platform's "shell of contacts"
+    # pocket convention. ``0.0`` is a valid and meaningful value — it
+    # disables expansion so only the literal listed residues are used
+    # (the server reads pocketRadiusA=0 as "hotspots-only, no expansion").
+    # MUST check ``is not None`` (not truthiness): 0.0 is falsy but real.
+    if target_residues and pocket_expansion_radius_a is not None and pocket_expansion_radius_a >= 0:
+        body["pocketRadiusA"] = float(pocket_expansion_radius_a)
         body["pocketExpansionRadiusA"] = float(pocket_expansion_radius_a)
-        body["expandHotspotPocket"] = True
+        body["expandHotspotPocket"] = pocket_expansion_radius_a > 0
+
+    # Avoid residues — receptor regions the peptide must NOT bind. Serialized
+    # as ``avoidRegions`` (top-level body key), which the Express layer reads
+    # alongside ``targetRegions`` and forwards to FastAPI as ``avoid_residues``.
+    # The server uses these to subtract residues from the design pocket so the
+    # generation conditioning actively steers away from the orthosteric site or
+    # any other user-specified region.
+    # Uses the same ResidueRange shape as target_residues.
+    if avoid_residues is not None:
+        serialized_avoid = _serialize_residue_ranges(avoid_residues)
+        if serialized_avoid is not None:
+            # Rewrite to the shape Express reads: {chain, startResidue, endResidue}
+            body["avoidRegions"] = [
+                {
+                    "chain": r.get("chain", "A"),
+                    "startResidue": r.get("start", r.get("startResidue", 0)),
+                    "endResidue": r.get("end", r.get("endResidue", 0)),
+                }
+                for r in serialized_avoid
+                if isinstance(r, dict)
+            ]
 
     # Receptor flexible residues — 1-based receptor residue indices the backend
     # is allowed to relax during generation/docking (side-chain / limited
@@ -2502,6 +2527,13 @@ class Peptides(Resource):
         num_peptides: int | None = None,
         length_range: tuple[int, int] = (20, 70),
         target_residues: list[ResidueRange] | None = None,
+        # Receptor regions the peptide must NOT bind. The server subtracts these
+        # from the design pocket so generation conditioning steers away from the
+        # listed residues (e.g. the canonical orthosteric site). Same shape as
+        # target_residues: list of ResidueRange (or dicts with chain/start/end).
+        # When combined with target_residues, the server uses the intersection
+        # (target minus avoid) as the actual design surface.
+        avoid_residues: list[ResidueRange] | None = None,
         target_chains: list[str] | None = None,
         fold_partners: _FoldPartnerMode | list[str] | None = None,
         # When target_residues are supplied, the SDK auto-switches the strategy
@@ -2529,7 +2561,9 @@ class Peptides(Resource):
         # of any listed hotspot atom in the design pocket. This is the right
         # default for "design against residue X" — the peptide needs the
         # surrounding shell to make contacts, not just X itself. Set to 0 to
-        # use the literal residues only.
+        # use the literal residues only (no expansion into the orthosteric site).
+        # 0.0 is a valid, meaningful value — the server honors it as
+        # "hotspots-only" regardless of how many residues surround the target.
         pocket_expansion_radius_a: float | None = 6.0,
         # Receptor flexible residues — 1-based receptor residue indices the
         # backend may relax (side-chain / limited backbone flexibility) during
@@ -2785,6 +2819,7 @@ class Peptides(Resource):
             num_peptides=num_peptides,
             length_range=length_range,
             target_residues=target_residues,
+            avoid_residues=avoid_residues,
             target_chains=target_chains,
             fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
@@ -5007,6 +5042,8 @@ class AsyncPeptides(AsyncResource):
         num_peptides: int | None = None,
         length_range: tuple[int, int] = (20, 70),
         target_residues: list[ResidueRange] | None = None,
+        # Receptor regions the peptide must NOT bind. See Peptides.generate docs.
+        avoid_residues: list[ResidueRange] | None = None,
         target_chains: list[str] | None = None,
         fold_partners: _FoldPartnerMode | list[str] | None = None,
         # When target_residues are supplied, the SDK auto-switches the strategy
@@ -5034,7 +5071,9 @@ class AsyncPeptides(AsyncResource):
         # of any listed hotspot atom in the design pocket. This is the right
         # default for "design against residue X" — the peptide needs the
         # surrounding shell to make contacts, not just X itself. Set to 0 to
-        # use the literal residues only.
+        # use the literal residues only (no expansion into the orthosteric site).
+        # 0.0 is a valid, meaningful value — the server honors it as
+        # "hotspots-only" regardless of how many residues surround the target.
         pocket_expansion_radius_a: float | None = 6.0,
         # Receptor flexible residues — 1-based receptor residue indices the
         # backend may relax (side-chain / limited backbone flexibility) during
@@ -5147,6 +5186,7 @@ class AsyncPeptides(AsyncResource):
             num_peptides=num_peptides,
             length_range=length_range,
             target_residues=target_residues,
+            avoid_residues=avoid_residues,
             target_chains=target_chains,
             fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
