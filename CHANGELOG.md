@@ -6,6 +6,101 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.8.0] - 2026-07-31
+
+### Fixed — explicit `pocket_expansion_radius_a=0.0` was silently dropped (`bd-LIGANDAI_ALPHA_V2-6zyvh`)
+
+`peptides.generate()` guarded the parameter with a truthiness test, so `0.0` —
+the way you say *"bind exactly these residues, do not widen the pocket"* — was
+read as "not set" and never left the client. The server then applied its default
+pocket expansion, and designs drifted off the requested residues.
+
+The guard is now `is not None`, and the payload carries `pocketRadiusA` (the key
+the API actually reads) alongside the legacy `pocketExpansionRadiusA`. A radius
+of `0.0` now correctly sets `expandHotspotPocket=False` server-side. Every other
+numeric parameter in the resource was audited for the same falsy-zero class of
+bug.
+
+### Added — `avoid_residues` on `peptides.generate()` (`bd-LIGANDAI_ALPHA_V2-6zyvh`)
+
+Negative steering. Same shape as `target_residues` (a list of `ResidueRange`, or
+dicts with `chain`/`start`/`end`). The server subtracts these from the design
+pocket, so generation conditioning steers away from them. Combined with
+`target_residues`, the effective design surface is *target minus avoid* — which
+is how you target one face of a receptor while excluding the canonical
+orthosteric pocket on the other.
+
+```python
+from ligandai.types import ResidueRange
+
+client.peptides.generate(
+    gene="BRD4",
+    num_peptides=100,
+    target_residues=[ResidueRange(chain="A", start=601, end=640)],
+    avoid_residues=[ResidueRange(chain="A", start=76, end=140)],
+    pocket_expansion_radius_a=0.0,   # exactly these residues, no widening
+)
+```
+
+Note: supplying `target_residues` auto-switches `targeting_strategy` to
+`"pocket_targeted"`. Pass `"full_surface"` explicitly to keep the residues as
+soft hints instead.
+
+### Added — `client.evaluator` (`bd-LIGANDAI_ALPHA_V2-6bybp`)
+
+Post-fold structural analysis over a batch of designs, so allosteric intent can
+be verified empirically rather than by inspection:
+
+- `evaluator.filter_folds(fold_job_ids, criteria=...)` — structural filter over
+  a completed fold batch by customer-defined criteria.
+- `evaluator.empirical_evaluate(...)` — agentic pass over the batch reporting
+  where each peptide *actually* contacts the receptor versus where it was asked
+  to.
+- `evaluator.chat(...)` — chat grounded in that evaluated set.
+
+### Added — `client.goals` goal-driven campaigns (`bd-dre-1vij1`)
+
+Parity with the Node SDK. Drive an abstract objective end-to-end
+(generate → fold → score → refine) under a credit ceiling:
+
+```python
+campaign = client.goals.drive(
+    receptor_sequence=seq,
+    goal_type="allosteric",
+    gene="BRD4",
+    goal="bind the ET domain, avoid the canonical acetyl-lysine site",
+    avoid_residues=[{"chain": "A", "residue": 82}],
+    max_iterations=5,
+    max_credits=5000,
+)
+for event in campaign.stream():
+    ...
+result = campaign.wait()
+```
+
+`goal_type` is one of `allosteric` / `hotspot` / `avoidance` / `custom`. The
+handle also exposes `.cancel()` and `.cross_validate()`; the lower-level
+`goals.campaign_scan/start/status/stream/cancel/cross_validate` methods remain
+available. Campaigns no longer require `seed_peptides` — seeds are generated for
+you when omitted.
+
+Note on metrics: `peptide_ipsae` — the interface iPSAE of the binder chain — is
+the binder metric used throughout. Overall `ipsae` is dominated by receptor
+self-confidence on multimeric targets and is not a reliable binding indicator.
+
+### Added — `client.proteins.receptor_profile()` (`bd-LIGANDAI_ALPHA_V2-ooxkl`)
+
+Decision-oriented receptor intelligence: domain topology, pocket inventory and
+targeting recommendations in one call.
+
+### Fixed — server-internal bookkeeping no longer echoed in responses (`bd-dre-gudk1`)
+
+`GenerationResult.parameters` surfaced internal over-generation bookkeeping keys
+that are not part of the public API and did not reflect what you requested. They
+are stripped client-side, and the server no longer emits them. `num_peptides` is
+authoritative: request N, receive N.
+
+
 ## [0.7.9] - 2026-07-30
 
 ### Fixed — peptide binder metric correctness (`bd-LIGANDAI_ALPHA_V2-u4xc7`)
