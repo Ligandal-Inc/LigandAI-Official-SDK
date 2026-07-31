@@ -60,6 +60,7 @@ from ligandai.resources.analysis import Analysis, AsyncAnalysis
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
+from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
 from ligandai.resources.folds import AsyncFolds, Folds
@@ -511,6 +512,9 @@ class LigandAI(_ClientCommon):
         self.peptide: Peptides = self.peptides
         # DeltaForge scoring namespace (score_pdb / score_fold / batch_score_fold).
         self.deltaforge: DeltaForge = DeltaForge(self._transport, client=self)
+        # Post-fold structural criteria filter + empirical evaluator + grounded chat.
+        # [bd-LIGANDAI_ALPHA_V2-6bybp]
+        self.evaluator: Evaluator = Evaluator(self._transport, client=self)
         self.programs: Programs = Programs(self._transport)
         self.proteins: Proteins = Proteins(self._transport)
         self.receptors: Receptors = Receptors(self._transport, client=self)
@@ -890,6 +894,9 @@ class AsyncLigandAI(_ClientCommon):
         # singular alias + DeltaForge scoring namespace.
         self.peptide: AsyncPeptides = self.peptides
         self.deltaforge: AsyncDeltaForge = AsyncDeltaForge(self._transport, client=self)
+        # Post-fold structural criteria filter + empirical evaluator + grounded chat.
+        # [bd-LIGANDAI_ALPHA_V2-6bybp]
+        self.evaluator: AsyncEvaluator = AsyncEvaluator(self._transport, client=self)
         self.programs: AsyncPrograms = AsyncPrograms(self._transport)
         self.proteins: AsyncProteins = AsyncProteins(self._transport)
         self.receptors: AsyncReceptors = AsyncReceptors(self._transport, client=self)
