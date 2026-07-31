@@ -11,6 +11,7 @@ from ligandai.types import (
     ProteinInfo,
     ProteinVariant,
     ReceptorAtlas,
+    ReceptorProfile,
     ReceptorIntelligence,
     ReceptorTopology,
     UserProtein,
@@ -62,6 +63,41 @@ class Proteins(Resource):
             raise ValueError("Pass gene= or genes=")
         return ReceptorIntelligence.model_validate(
             self._transport.request("GET", f"/api/receptor-intelligence/{gene}") or {"gene": gene}
+        )
+
+    def receptor_profile(self, gene: str) -> ReceptorProfile:
+        """Decision-oriented Receptor Intelligence profile for ``gene``.
+
+        ``GET /api/receptor-intelligence/profile/{gene}`` — requires an
+        **academia / pro / enterprise** plan or higher.
+
+        Use this to guide design rather than to read the atlas. It answers the two
+        questions the raw blocks don't:
+
+        * *Should I design against this target, and how?* → ``target_triage``
+          (druggability, surface class, signaling state, ``modality_hint`` with the
+          rule behind it, the resolved structure tier, and risk ``flags``).
+        * *What does this receptor imply about a binder that hit it?* →
+          ``binder_context`` (internalization fate/kinetics, coupling and arrestins,
+          rotamer hotspot residues, citation PMIDs).
+
+        Non-signaling targets return ``available=False`` with ``known_target`` and
+        ``receptordb_complexes`` instead of an error — they are still designable.
+
+        >>> prof = client.proteins.receptor_profile("OPRM1")
+        >>> ri = prof.receptor_intelligence
+        >>> ri["target_triage"]["modality_hint"]
+        'peptide_favourable'
+        >>> [f["code"] for f in ri["target_triage"]["flags"]]
+        ['fast_internalization']
+
+        Complements :meth:`receptor_atlas` (raw curated overlay) and
+        :meth:`receptor_intelligence` (pro+ endocytosis/biased-agonism profile).
+        """
+        return ReceptorProfile.model_validate(
+            self._transport.request(
+                "GET", f"/api/receptor-intelligence/profile/{gene}"
+            ) or {"gene": gene}
         )
 
     def receptor_atlas(self, gene: str, full: bool = False) -> ReceptorAtlas:
@@ -218,6 +254,20 @@ class AsyncProteins(AsyncResource):
             raise ValueError("Pass gene= or genes=")
         return ReceptorIntelligence.model_validate(
             await self._transport.request("GET", f"/api/receptor-intelligence/{gene}") or {"gene": gene}
+        )
+
+    async def receptor_profile(self, gene: str) -> ReceptorProfile:
+        """Async variant of :meth:`Proteins.receptor_profile`.
+
+        Decision-oriented receptor profile — ``target_triage`` before generation,
+        ``binder_context`` after folding. Requires academia/pro/enterprise or higher.
+        Non-signaling targets return ``available=False`` with ReceptorDB context
+        rather than an error.
+        """
+        return ReceptorProfile.model_validate(
+            await self._transport.request(
+                "GET", f"/api/receptor-intelligence/profile/{gene}"
+            ) or {"gene": gene}
         )
 
     async def receptor_atlas(self, gene: str, full: bool = False) -> ReceptorAtlas:

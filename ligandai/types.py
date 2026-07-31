@@ -1736,6 +1736,43 @@ class ReceptorIntelligence(_LGModel):
     biased_agonism: dict[str, Any] | None = Field(default=None, alias="biasedAgonism")
 
 
+class ReceptorProfile(_LGModel):
+    """Decision-oriented Receptor Intelligence profile
+    (``GET /api/receptor-intelligence/profile/{gene}``).
+
+    Returned by :meth:`Proteins.receptor_profile`. Requires an
+    **academia / pro / enterprise** plan or higher.
+
+    This is the managed *output* view: where :class:`ReceptorAtlas` hands back the
+    raw curated blocks, this reorganises them around the two decisions you actually
+    make, and is the surface the website and both SDKs share.
+
+    ``receptor_intelligence`` carries:
+
+    * ``available`` — ``False`` when the target has no row in the receptor-SIGNALING
+      atlas (GPCRs, ion channels, nuclear receptors, transporters). That is a
+      coverage boundary, **not** an invalid target: ``known_target`` and
+      ``receptordb_complexes`` tell you the platform still knows it and it remains
+      designable. UMOD is the worked example.
+    * ``target_triage`` — BEFORE generation: ``druggability``, ``surface_class``,
+      ``signaling_state``, ``modality_hint`` (+ ``modality_rule``, the plain-text
+      rule behind it), the resolved ``structure`` (source/pdb_code/tier/chains),
+      and ``flags`` — each with a ``code`` and human ``detail``.
+    * ``binder_context`` — AFTER folding: ``internalization`` (rate class, fate,
+      arrestin/clathrin dependence, PMIDs), ``coupling`` (G proteins, arrestins,
+      curation + citations), and ``hotspot_residues``.
+    * ``provenance`` — atlas build metadata and coverage count.
+
+    Absent blocks mean *no data*, never *no risk*. Only ``modality_hint`` and
+    ``flags`` are derived; both ship the rule text so they can be audited.
+    """
+
+    gene: str
+    receptor_intelligence: dict[str, Any] | None = None
+    structure: dict[str, Any] | None = None
+    suggestions: list[str] | None = None
+
+
 class ReceptorAtlas(_LGModel):
     """Deterministic Receptor Intelligence atlas overlay
     (``GET /api/receptor-intelligence/atlas/{gene}`` and ``.../full``).
