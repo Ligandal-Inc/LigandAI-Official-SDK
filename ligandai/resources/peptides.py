@@ -970,6 +970,21 @@ def _norm_seq(s: Sequence | str | dict[str, Any]) -> dict[str, Any]:
     return dict(s)
 
 
+# Server-side bookkeeping keys that are not part of the public request contract.
+# ``parameters`` echoes the server's resolved job config, so a key the server
+# adds for its own accounting would otherwise surface in user-facing output and
+# read like a knob a caller can set. Scrubbed here as defence in depth — the
+# server is the authority and already omits these.
+_NON_PUBLIC_PARAMETER_KEYS = frozenset({"internalPoolPeptidesPerTarget"})
+
+
+def _public_parameters(params: Any) -> Any:
+    """Drop server-internal bookkeeping keys from an echoed config object."""
+    if not isinstance(params, dict):
+        return params
+    return {k: v for k, v in params.items() if k not in _NON_PUBLIC_PARAMETER_KEYS}
+
+
 def _parse_generation(payload: dict[str, Any]) -> GenerationResult:
     """Coerce a server result payload into :class:`GenerationResult`."""
     out: dict[str, Any] = {
@@ -978,7 +993,7 @@ def _parse_generation(payload: dict[str, Any]) -> GenerationResult:
         "gene": payload.get("gene") or _first_target_gene(payload) or "",
         "peptides": _extract_peptides(payload),
         "totalGenerated": payload.get("totalGenerated") or payload.get("total"),
-        "parameters": payload.get("parameters") or payload.get("config"),
+        "parameters": _public_parameters(payload.get("parameters") or payload.get("config")),
     }
     return GenerationResult.model_validate(out)
 
@@ -2424,7 +2439,9 @@ def _generation_result_from_session(
         )
 
     if result.get("parameters") is None:
-        result["parameters"] = session.get("parameters") or session.get("config")
+        result["parameters"] = _public_parameters(
+            session.get("parameters") or session.get("config")
+        )
 
     return result
 
