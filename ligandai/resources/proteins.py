@@ -186,10 +186,30 @@ class Proteins(Resource):
         """Upload a custom PDB / CIF / mmCIF / ENT file to your private
         protein library and return the registered :class:`UserProtein`.
 
-        Available to all authenticated tiers (free included). Pass the
-        returned ``protein.id`` (or ``protein.variant_id`` if exposed) as
-        ``variant_id=`` to :meth:`Peptides.generate` to design against the
-        uploaded structure.
+        Available to all authenticated tiers (free included).
+
+        Pass the returned ``protein.id`` as ``user_pdb_id=`` to
+        :meth:`Peptides.generate` to design against the uploaded structure::
+
+            protein = client.proteins.upload_pdb("brd4_et.pdb", gene="BRD4")
+            job = client.peptides.generate(
+                gene="BRD4",              # routing / label only
+                user_pdb_id=protein.id,   # <- YOUR coordinates
+                num_peptides=200,
+            )
+
+        ``user_pdb_id`` is what emits ``userPdbId`` +
+        ``pdbId="userpdb_<id>"`` + ``activeStructureSource="user_pdb"`` on the
+        wire, and that triple is what makes the server load your file instead
+        of the canonical structure for ``gene``.
+
+        .. warning::
+           Do **not** pass this id as ``variant_id=``. That argument resolves
+           against the separate ``protein_variants`` store (populated by
+           :meth:`Proteins.save_fold_as_variant`), which has an INDEPENDENT id
+           sequence. An id from this method will either miss — silently falling
+           back to the canonical gene structure — or collide with an unrelated
+           variant row and design against the wrong protein entirely.
         """
         path = Path(file)
         ext = path.suffix.lower()

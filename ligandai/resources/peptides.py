@@ -1151,13 +1151,13 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
 # ─── Ensemble co-fold helpers (cofold) ──────────────────────────────────────
 #
 # The ensemble co-fold surface (POST /api/v1/cofold/start) folds the SAME chains
-# on 1-5 engines (esmfold2, boltz2, protenix, openfold3, promera) in parallel. MSA is a
+# on 1-6 engines (esmfold2, boltz2, protenix, openfold3, promera, opendde) in parallel. MSA is a
 # single shared control for the whole ensemble (our-own MSA server) — there is
 # NO per-engine MSA setting. Any MSA key in ``per_engine`` is rejected here,
 # client-side, BEFORE the request reaches the wire (the server strips again).
 
 #: Known ensemble engines (canonical lowercase). Mirrors the server.
-COFOLD_ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera")
+COFOLD_ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera", "opendde")
 
 #: MSA keys never permitted in a per-engine override. Mirrors the server-side
 #: ``FORBIDDEN_PER_ENGINE_MSA_KEYS`` — MSA is shared, never per-engine.
@@ -1172,7 +1172,7 @@ def _cofold_normalize_engines(engines: list[str] | tuple[str, ...]) -> list[str]
     """Validate + de-dupe (preserving order) the requested engine list."""
     if not engines:
         raise ValueError(
-            "engines required (1-5 of: esmfold2, boltz2, protenix, openfold3, promera)"
+            "engines required (1-6 of: esmfold2, boltz2, protenix, openfold3, promera, opendde)"
         )
     seen: set[str] = set()
     out: list[str] = []
@@ -2747,10 +2747,11 @@ class Peptides(Resource):
                 peptide. ReceptorDB defaults to 4; set 1 to reduce runtime.
             fold_engines: Opt-in ENSEMBLE auto-fold. ``None`` (default) or
                 ``["boltz2"]`` keeps the legacy single-Boltz-2 Phase-2 auto-fold
-                unchanged. Provide 1-4 of ``esmfold2``/``boltz2``/``protenix``/
-                ``openfold3`` (a list with >1 engine, or any engine other than
-                boltz2) to fold each top-N peptide × conformation on every listed
-                engine. Each engine **bills separately** (free-pays-credits — any
+                unchanged. Provide 1-5 of ``esmfold2``/``boltz2``/``protenix``/
+                ``openfold3``/``opendde`` (a list with >1 engine, or any engine
+                other than boltz2) to fold each top-N peptide × conformation on
+                every listed engine. ``opendde`` is opt-in only and never a
+                default. Each engine **bills separately** (free-pays-credits — any
                 tier with a positive credit balance may run it; a zero-balance
                 caller is rejected the same way the single path is), mirroring
                 :meth:`cofold`.
@@ -3610,18 +3611,33 @@ class Peptides(Resource):
         includeStructures: bool | None = None,
         auditId: str | None = None,
     ) -> "Job[dict[str, Any]]":
-        """Ensemble co-fold — fold the SAME chains on 1-4 engines in parallel.
+        """Ensemble co-fold — fold the SAME chains on 1-5 engines in parallel.
 
         Each engine runs in its own single-B200 container; the result is a
         per-engine record (canonical scores best-of + ranges) plus an optional
         DeltaForge v10.2 score on each engine's best structure.
 
+        **Engine notes:**
+
+        ``boltz2`` (default) — Boltz-2, the platform default. Recommended for
+        all peptide-binder tasks. In our 200-fold no-MSA benchmark (complexes
+        from >= 2023-06-02), Boltz-2 outperforms OpenDDE on structure recovery
+        (DockQ 0.353 vs 0.197) and binder discrimination (peptide iPSAE AUROC
+        0.625 vs 0.556) at roughly one-third the GPU cost.
+
+        ``opendde`` (opt-in) — AF3-lineage all-atom co-folding model from
+        Aureka AI Research (656 M params, Apache-2.0, training-data cutoff
+        2021-09-30). Emits a PAE matrix; peptide iPSAE IS computable. Does
+        not predict Kd. Reported strength is antibody–antigen / MSA-driven
+        co-folding, which we have not benchmarked. Never a default; never
+        included in a default ensemble.
+
         Args:
             chains: 1-8 chains. Receptor chain(s) first, peptide last (a bare
                 string or dict with no ``kind`` defaults to ``peptide`` when it
                 is the last of a multi-chain payload, else ``receptor``).
-            engines: 1-4 of ``esmfold2``, ``boltz2``, ``protenix``,
-                ``openfold3``.
+            engines: 1-5 of ``esmfold2``, ``boltz2``, ``protenix``,
+                ``openfold3``, ``opendde`` (opt-in; see engine notes below).
             per_engine: NON-MSA setting overrides keyed by engine. **MSA keys
                 are rejected** — MSA is a single shared control (``shared_msa``),
                 never per-engine.

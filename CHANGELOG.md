@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.8.1] — 2026-07-31
+
+### Added — OpenDDE as opt-in co-fold engine (`bd-LIGANDAI_ALPHA_V2-pbetz`)
+
+`"opendde"` is now a valid engine tag in `peptides.cofold(engines=[...])` and
+in the `fold_engines` parameter of `peptides.generate()` / `peptides.search()`.
+
+**What it is:** AF3-lineage all-atom co-folding model from Aureka AI Research
+(656 M params, Apache-2.0, training-data cutoff 2021-09-30). Emits a PAE
+matrix so peptide iPSAE is computable. Does not predict Kd.
+
+**Performance vs. Boltz-2:** In our internal 200-fold no-MSA benchmark (complexes
+released >= 2023-06-02, outside both models' training cutoffs), Boltz-2
+outperformed OpenDDE on structure recovery (DockQ mean 0.353 vs. 0.197) and
+binder discrimination (peptide iPSAE AUROC 0.625 vs. 0.556) at roughly one-third
+the GPU cost. **Boltz-2 remains the default and recommended engine.** OpenDDE's
+reported strength is antibody–antigen / MSA-driven co-folding, which we have not
+benchmarked.
+
+**Opt-in contract:** `"opendde"` is never a default, never auto-added to a
+default ensemble or cascade. Pass it explicitly:
+
+```python
+result = client.peptides.cofold(chains, engines=["boltz2", "opendde"])
+```
+
+`fold_calibration.ENGINES` and `_ENGINE_ALIASES` updated with canonical tag
+`"opendde"` and aliases `"open_dde"`, `"openddev1"`. No calibration constants
+were invented — distributions are built empirically from real fold records, as
+with all other engines.
+
+`goals._VALID_ENGINES` is intentionally unchanged — OpenDDE is not added to
+goal campaigns (same policy as `"promera"`; no server-side evidence it is
+supported there).
+
+### Fixed — `Peptide.fold_id` rejected real server responses
+
+`fold_id` was typed `str`, but the platform emits `foldId` as an **integer** on
+the peptide-listing routes. Every real `peptides.list()` / `peptides.get()` against
+production therefore raised
+`ValidationError: Input should be a valid string ... input_value=61811`.
+It now accepts either shape and normalises to `str`, so downstream uses such as
+`/api/v1/peptides/{p.fold_id}` keep working. Caught by the live integration suite;
+unit tests never saw it because they exercise fixtures, not the server.
+
 ## [0.8.0] - 2026-07-31
 
 ### Fixed — explicit `pocket_expansion_radius_a=0.0` was silently dropped (`bd-LIGANDAI_ALPHA_V2-6zyvh`)

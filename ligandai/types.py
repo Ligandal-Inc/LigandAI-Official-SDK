@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # -- Base ---------------------------------------------------------------------
 
@@ -946,7 +946,19 @@ class Peptide(_LGModel):
     deltaforge_kd: float | None = Field(default=None, alias="deltaforgeKd")
     classification: str | None = None
     rank: int | None = None
+    # The platform emits foldId as an INTEGER on the peptide-listing routes
+    # (/api/v1/peptides, /peptides/{id}) and as a string elsewhere. Declaring it
+    # str-only made every real `peptides.list()` / `.get()` raise
+    # ValidationError("Input should be a valid string ... input_value=61811").
+    # Accept both and normalise to str, so downstream uses like
+    # f"/api/v1/peptides/{p.fold_id}" keep working regardless of which shape the
+    # server sent. Caught by the live integration suite, not by unit tests.
     fold_id: str | None = Field(default=None, alias="foldId")
+
+    @field_validator("fold_id", mode="before")
+    @classmethod
+    def _coerce_fold_id(cls, v: object) -> object:
+        return str(v) if isinstance(v, int) else v
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
     # Academia+ tier guidance scores (populated when the corresponding guidance
     # module was active during generation)

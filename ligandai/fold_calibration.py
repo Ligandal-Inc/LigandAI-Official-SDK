@@ -54,7 +54,7 @@ __all__ = [
     "standing",
 ]
 
-ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera")
+ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera", "opendde")
 METRICS: tuple[str, ...] = ("iptm", "ipsae", "ptm", "plddt", "deltaforge")
 
 # Goodness-percentile labels (annotation only — derived from the engine's own
@@ -92,6 +92,9 @@ _ENGINE_ALIASES: dict[str, str] = {
     "promera": "promera",
     "promera2606": "promera",
     "promerav1": "promera",
+    "opendde": "opendde",
+    "open_dde": "opendde",
+    "openddev1": "opendde",
 }
 
 _METRIC_ALIASES: dict[str, str] = {
