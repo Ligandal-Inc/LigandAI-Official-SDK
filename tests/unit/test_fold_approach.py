@@ -42,18 +42,23 @@ class TestResolveApproach:
 class TestFoldBodyApproachWiring:
     def test_default_body_uses_boltz2_affinity(self):
         body = _fold_body(["MPEPTIDESEQ"])
-        assert body["model"] == "boltz2_affinity"
+        # `model` is the legacy QUEUE LANE (boltz2|alphafold2), not the engine.
+        # The engine travels in foldApproach/fold_approach. Asserting the engine
+        # name here encoded a real bug: the server replies 400 "Invalid model.
+        # Choose boltz2 or alphafold2" for anything else.
+        assert body["model"] == "boltz2"
         assert body["foldApproach"] == "boltz2_affinity"
         assert body["fold_approach"] == "boltz2_affinity"
 
     def test_explicit_esmfold2(self):
         body = _fold_body(["MPEPTIDESEQ"], fold_approach="esmfold2")
-        assert body["model"] == "esmfold2"
+        assert body["model"] == "boltz2"  # queue lane, not engine
         assert body["foldApproach"] == "esmfold2"
 
     def test_esmfold2_fast(self):
         body = _fold_body(["MPEPTIDESEQ"], fold_approach="esmfold2_fast")
-        assert body["model"] == "esmfold2_fast"
+        assert body["model"] == "boltz2"  # queue lane, not engine
+        assert body["foldApproach"] == "esmfold2_fast"
 
     def test_num_seeds_overrides_trajectories(self):
         body = _fold_body(["MPEPTIDESEQ"], num_seeds=8, num_trajectories=2)

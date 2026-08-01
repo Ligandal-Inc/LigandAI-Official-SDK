@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.8.3] — 2026-08-01
+
+### Fixed — `peptides.fold()` was rejected by production
+
+`_fold_body` put the **fold_approach** value into the **model** field. Those are two
+different server vocabularies:
+
+* `model` — the legacy folding-queue lane, strictly `boltz2` | `alphafold2`
+  (`/api/folding/{submit,predict,batch}`; `job_queue.ts` types it that way).
+* `fold_approach` — the engine: `boltz2_affinity` | `esmfold2` | `esmfold2_fast` |
+  `protenix_v2` | `openfold3` | `promera` | `opendde`.
+
+So a default fold posted `model="boltz2_affinity"` and the platform replied
+`400 Invalid model. Choose boltz2 or alphafold2`. Every `client.fold()` /
+`peptides.fold()` call that did not explicitly override `fold_approach` failed
+against production.
+
+`model` is now mapped to the queue-lane vocabulary while the engine continues to
+travel in `foldApproach`/`fold_approach`, so engine selection is unchanged.
+
+Three unit tests asserted `body["model"] == "esmfold2"` and similar — they encoded
+the bug rather than the server contract, and were corrected. The three live e2e
+fold tests, previously failing, now pass.
+
 ## [0.8.2] — 2026-07-31
 
 ### Fixed — `__version__` no longer drifts from the released version

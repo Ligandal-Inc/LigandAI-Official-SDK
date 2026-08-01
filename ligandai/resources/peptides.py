@@ -833,6 +833,20 @@ def _resolve_segment_config(
 _VALID_FOLD_APPROACHES = ("boltz2_affinity", "esmfold2", "esmfold2_fast")
 
 
+def _legacy_queue_model(approach: str) -> str:
+    """Map a ``fold_approach`` onto the legacy folding-queue ``model`` vocabulary.
+
+    ``/api/folding/{submit,predict,batch}`` accept only ``boltz2`` or ``alphafold2``
+    — that field selects the queue lane, not the engine. Every fold_approach the SDK
+    supports runs on the boltz2 lane; the engine itself is carried separately in
+    ``fold_approach``/``foldApproach``, which the backend reads.
+
+    ``alphafold2`` is reachable only by passing ``fold_approach="alphafold2"``
+    explicitly, and is preserved here so that path keeps working.
+    """
+    return "alphafold2" if approach == "alphafold2" else "boltz2"
+
+
 def _resolve_fold_approach(fold_approach: str | None) -> str:
     """Normalize / validate ``fold_approach`` before HTTP submit.
 
@@ -903,7 +917,20 @@ def _fold_body(
         else (num_trajectories if num_trajectories is not None else diffusion_samples)
     )
     body: dict[str, Any] = {
-        "model": approach,
+        # `model` and `fold_approach` are DIFFERENT server vocabularies and must not
+        # be conflated:
+        #   model         -> the legacy folding queue lane, strictly boltz2|alphafold2
+        #                    (server/routes.ts /api/folding/{submit,predict,batch};
+        #                     job_queue.ts types it as 'boltz2' | 'alphafold2')
+        #   fold_approach -> the engine: boltz2_affinity | esmfold2 | esmfold2_fast |
+        #                    protenix_v2 | openfold3 | promera | opendde
+        # This sent the fold_approach value in `model`, so a default fold posted
+        # model="boltz2_affinity" and the route replied
+        # 400 "Invalid model. Choose boltz2 or alphafold2" — i.e. peptides.fold()
+        # was broken against production for every caller who did not override it.
+        # The engine still travels in foldApproach/fold_approach below, so engine
+        # selection is unaffected; only the queue lane is now named correctly.
+        "model": _legacy_queue_model(approach),
         "foldApproach": approach,
         "fold_approach": approach,
         "gpuCount": gpu_count,
