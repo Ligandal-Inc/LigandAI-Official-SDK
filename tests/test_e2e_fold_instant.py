@@ -99,7 +99,12 @@ def test_batch_stream_yields_per_fold(live_client: LigandAI) -> None:
     )
 
     events = []
-    for event in batch.stream(timeout=600.0, poll_interval=2.0):
+    # 600s is enough when this test runs alone (~95s), but not when the whole
+    # suite is running and several folds are queued against the same warm pool —
+    # it timed out inside an 11m52s full-suite run while passing in isolation
+    # moments earlier. Raised so a slow queue is not reported as a fold failure;
+    # a genuine hang still fails, just later.
+    for event in batch.stream(timeout=1200.0, poll_interval=2.0):
         events.append(event)
 
     assert len(events) == len(peptides), (
