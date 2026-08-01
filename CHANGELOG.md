@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.8.2] — 2026-07-31
+
+### Fixed — `__version__` no longer drifts from the released version
+
+`ligandai/_version.py` carried a hand-maintained literal that had to be kept in
+sync with `pyproject.toml` by hand. It drifted: 0.8.1 shipped reporting
+`__version__ == "0.8.0"`, and because that value feeds the User-Agent on every
+request (`_http._build_user_agent`), server-side client-version telemetry was
+wrong for the whole release.
+
+It now derives from the installed distribution metadata via
+`importlib.metadata.version("ligandai")`, so the reported version cannot disagree
+with what was actually installed. The literal remains only as a fallback for a
+bare source checkout with no distribution metadata.
+
 ## [0.8.1] — 2026-07-31
 
 ### Added — OpenDDE as opt-in co-fold engine (`bd-LIGANDAI_ALPHA_V2-pbetz`)
