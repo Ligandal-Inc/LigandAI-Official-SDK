@@ -701,38 +701,30 @@ class LigandAIConcurrencyLimit(LigandAIError):
 def _message_already_surfaces_url(message: str, url: str) -> bool:
     """Whether ``message`` already puts ``url`` in front of the user.
 
-    The server's human-readable ``message`` is now REQUIRED to carry the
-    absolute acceptance URL in plain text, because clients pinned to old SDK
-    versions (0.8.3 and earlier), ``curl`` and bare ``requests`` only ever
+    The server's human-readable ``message`` is REQUIRED to carry the absolute
+    acceptance URL in plain text, permanently, because clients pinned to old
+    SDK versions (0.8.3 and earlier), ``curl`` and bare ``requests`` only ever
     surface the error string — they know nothing about ``.acceptance_url``.
-    That requirement is permanent, not a stopgap: pinned installs persist
-    indefinitely.
+    Pinned installs persist indefinitely, so this is not a stopgap.
 
-    Consequence for this module: the fold below must be **idempotent**. A
-    naive append would produce a doubled URL for every current-server 403.
-    This predicate is the guard. It is deliberately generous — a false
-    "already present" costs nothing (``.acceptance_url`` is still attached to
-    the exception either way), while a false "absent" produces the doubled
-    URL we are trying to avoid.
+    Consequence: the fold below must be **idempotent**, or every
+    current-server 403 shows the URL twice.
 
-    Recognised as already-present:
+    ⛔ THE RULE IS EXACT SUBSTRING CONTAINMENT ON THE RAW URL. Nothing is
+    normalised, trimmed, unescaped or canonicalised before the comparison.
 
-    - the URL verbatim;
-    - the URL with ``&`` HTML-escaped as ``&amp;`` in the server prose (or the
-      message unescaped back to ``&``) — query strings carry ``&`` between
-      ``return_to`` and ``channel``, so this is the realistic escaping hazard;
-    - the URL modulo a trailing slash on either side.
+    This is a **cross-SDK parity contract**, not a local implementation
+    choice: ``docs/clickwrap_legal_acceptance.md`` §3.6 requires the Python
+    and Node SDKs to be semantically identical, and the two mappers have been
+    verified byte-identical by executing both over the same payload shapes.
+    Node's guard is `!message.includes(acceptanceUrl)` — plain containment.
+    Any "improvement" here that normalises first (unescaping ``&amp;``,
+    stripping a trailing slash, canonicalising the query string) silently
+    diverges from Node and reintroduces the doubling on one side only, which
+    is the exact bug class the parity contract exists to prevent. Change this
+    only by changing both SDKs together.
     """
-    if not url:
-        return True
-    if url in message:
-        return True
-    if url.replace("&", "&amp;") in message:
-        return True
-    if url in message.replace("&amp;", "&"):
-        return True
-    stripped = url.rstrip("/")
-    return bool(stripped) and stripped in message
+    return not url or url in message
 
 
 def error_from_response(

@@ -196,37 +196,52 @@ def test_message_fold_appends_when_legacy_server_message_lacks_url() -> None:
     assert str(err).endswith(f"Accept at: {url}")
 
 
-@pytest.mark.parametrize(
-    "server_message_url",
-    [
-        # Verbatim.
-        "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect",
-        # HTML-escaped query separator — the realistic escaping hazard, since
-        # the query string joins return_to and channel with `&`.
-        "https://ligandai.com/legal/accept?return_to=x&amp;channel=sdk_redirect",
-        # Trailing slash drift between the field and the prose.
-        "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect/",
-    ],
-)
-def test_message_fold_idempotent_across_url_spelling_variants(
-    server_message_url: str,
-) -> None:
-    """Near-miss spellings in the prose still count as already-present.
+def test_message_fold_uses_exact_containment_not_normalisation() -> None:
+    """⛔ PARITY CONTRACT: the guard is EXACT substring containment, nothing more.
 
-    A false "absent" doubles the URL; a false "present" costs nothing because
-    `.acceptance_url` is attached to the exception either way. The predicate is
-    deliberately generous in that direction.
+    Node's guard is `!message.includes(acceptanceUrl)`. The two mappers have
+    been verified byte-identical by executing both over the same payload
+    shapes, so Python must not be "smarter" here — a normalising comparison on
+    one side only reintroduces the doubling on the other.
+
+    This test pins the consequence explicitly so the behaviour is a decision on
+    record rather than an accident: a near-miss spelling in the prose (here, an
+    HTML-escaped `&`) does NOT count as present, and the canonical URL is
+    appended. Both SDKs do this, identically.
     """
     url = "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect"
+    escaped = "https://ligandai.com/legal/accept?return_to=x&amp;channel=sdk_redirect"
     err = error_from_response(
         403,
         {
             "code": "LEGAL_ACCEPTANCE_REQUIRED",
             "acceptanceUrl": url,
-            "message": f"Accept the terms at {server_message_url} to continue.",
+            "message": f"Accept the terms at {escaped} to continue.",
         },
     )
-    assert "Accept at:" not in str(err)
+    assert str(err).endswith(f"Accept at: {url}")
+
+
+def test_message_fold_prose_url_is_never_parsed() -> None:
+    """A DIFFERENT URL in the prose does not suppress the fold, and never wins.
+
+    The structured field is always authoritative for `.acceptance_url`; the
+    server's prose is never parsed for a URL. Both SDKs behave this way — the
+    ambiguous case was pinned deliberately on both sides.
+    """
+    canonical = "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect"
+    err = error_from_response(
+        403,
+        {
+            "code": "LEGAL_ACCEPTANCE_REQUIRED",
+            "acceptanceUrl": canonical,
+            "message": "Accept at https://ligandai.com/some/other/page first.",
+        },
+    )
+    assert err.acceptance_url == canonical  # structured field wins, always
+    assert str(err).endswith(f"Accept at: {canonical}")
+    # The server's own prose is preserved, not stripped or rewritten.
+    assert "https://ligandai.com/some/other/page" in str(err)
 
 
 def test_message_fold_against_the_real_server_message() -> None:
@@ -267,33 +282,30 @@ def test_message_fold_against_the_real_server_message() -> None:
     assert err.acceptance_url == url
 
 
-def test_message_fold_predicate_never_appends_where_substring_match_would_not() -> None:
-    """⛔ PARITY-CRITICAL INVARIANT (and the answer to W1's fragility caveat).
+def test_message_fold_predicate_is_exactly_containment() -> None:
+    """⛔ PARITY-CRITICAL: the predicate is EQUIVALENT to `url in message`.
 
-    The predicate is a strict SUPERSET of exact-substring containment: checks 3-5
-    (HTML-escaped `&`, unescaped message, trailing-slash drift) can only ever add
-    "already present" verdicts. They can never cause an append that plain
-    `url in message` would have suppressed.
-
-    So the guard cannot be weakened into re-introducing the doubling — which is
-    the failure mode W1 warned about. Anyone "improving" this must preserve the
-    property asserted here: exact containment ALWAYS wins first.
+    Not a superset, not a subset — equivalent. This is the executable statement
+    of the cross-SDK rule, and it is what stops anyone from quietly adding a
+    normalising step (the fragility W1 flagged): any such step makes this
+    assertion fail.
     """
     from ligandai.errors import _message_already_surfaces_url
 
     url = "https://ligandai.com/legal/accept?return_to=%2Ffold&channel=sdk_redirect"
-    for message in [
+    messages = [
         f"prefix {url} suffix",
         url,
         f"{url}.",
         f"Open this URL to review and accept: {url}",
         f"line one\nOpen this URL: {url}",
-    ]:
-        assert (url in message) is True
-        assert _message_already_surfaces_url(message, url) is True
-
-    # And the genuinely-absent case still appends.
-    assert _message_already_surfaces_url("no url here at all", url) is False
+        "no url here at all",
+        url.replace("&", "&amp;"),  # near-miss: NOT containment, must append
+        url.rstrip("t"),  # near-miss
+        "",
+    ]
+    for message in messages:
+        assert _message_already_surfaces_url(message, url) == (url in message), message
 
 
 def test_message_fold_never_rewrites_server_wording() -> None:
