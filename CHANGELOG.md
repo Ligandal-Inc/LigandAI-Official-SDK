@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.10.0] — 2026-08-03
+
+### Added — actionable legal-acceptance 403 + headless-safe browser redirect (`bd-dre-0audd.8`)
+
+Court-ready clickwrap enforcement (`docs/clickwrap_legal_acceptance.md`, epic
+`bd-dre-0audd`) reaches the platform's public API surface as a specific,
+catchable error instead of an undifferentiated 403.
+
+- New `ligandai.LigandAILegalAcceptanceRequired`, subclassing
+  `LigandAIForbidden` — existing `except LigandAIForbidden` handlers keep
+  working unchanged; catch the subclass to drive resolution. Carries
+  `.acceptance_url`, `.needs_tos`, `.needs_eula`.
+- `error_from_response()` now detects the legal-acceptance gate ahead of the
+  generic `Forbidden` fallthrough, accepting **both** server shapes
+  (Contract C): the new `code == 'LEGAL_ACCEPTANCE_REQUIRED'` /
+  `acceptanceUrl` payload, and the legacy
+  `error == 'terms_not_accepted'` / `code == 'E014'` / `action_url` payload
+  emitted by the API-key validators. The actionable URL is folded into the
+  exception message (matching `LigandAICreditError`'s pattern), not just
+  stashed on an attribute.
+- `client.legal.resolve_interactively(error, retry=None, *,
+  auto_open_browser=False, poll_interval=3.0, timeout=300.0)` (sync + async)
+  — the opt-in browser-redirect + poll-and-resume flow. Nothing runs
+  automatically; call it from your own `except LigandAILegalAcceptanceRequired`
+  block. `auto_open_browser` defaults **off** — a library that pops a
+  browser window unprompted inside a server process is hostile. When a
+  `retry` callable is supplied it is invoked **at most once**, only after
+  `GET /api/legal/status` confirms acceptance.
+- **Headless/CI never hangs.** New `ligandai._headless.is_noninteractive_environment()`
+  (no prior headless/CI/TTY detection existed anywhere in this SDK) checks
+  `CI`/`GITHUB_ACTIONS`, stdin TTY, and `DISPLAY`/`WAYLAND_DISPLAY` on Linux.
+  `resolve_interactively()` checks this — and whether `webbrowser.open()`
+  actually found a browser — **before** touching the network, and re-raises
+  the original error immediately (with `.acceptance_url` still attached)
+  rather than blocking. Every wait is bounded by `timeout`, enforced even
+  when interactive.
+- `ligandai legal status` / `ligandai legal accept` CLI subcommands
+  (`--json`, `--no-browser`, `--timeout`).
+- `Legal.accept()` / `AsyncLegal.accept()` keep their `tos_version` /
+  `eula_version` parameters for signature back-compat, but are now
+  documented as advisory: the server resolves the *current* document
+  version itself and does not trust a client-supplied version string. New
+  code should prefer `accept_current()`.
+- Fixed `ligandai.cli._make_client()`, which imported a `LigandAIClient`
+  name that never existed in `ligandai/__init__.py` — every `ligandai
+  credits *` and (now) `ligandai legal *` command reaching it raised
+  `ImportError` before making a request. Now constructs `ligandai.LigandAI`.
+
 ## [0.9.0] — 2026-08-02
 
 ### Added — PDE (predicted distance error) is callable (`bd-LIGANDAI_ALPHA_V2-du0xv`)

@@ -247,6 +247,71 @@ class LigandAIForbidden(LigandAIError):
         self.reason = reason
 
 
+class LigandAILegalAcceptanceRequired(LigandAIForbidden):
+    """403 — the authenticated user must accept the Terms of Service and/or
+    EULA before this request can proceed.
+
+    Subclasses :class:`LigandAIForbidden` so existing ``except
+    LigandAIForbidden`` handlers keep working unchanged. Catch this subclass
+    specifically to drive the SDK's interactive resolution flow via
+    ``client.legal.resolve_interactively(...)``
+    (:meth:`ligandai.resources.legal.Legal.resolve_interactively`).
+
+    Server contract (Contract C, ``docs/clickwrap_legal_acceptance.md``
+    §3.6)::
+
+        {
+          "error": "Legal acceptance required",
+          "code": "LEGAL_ACCEPTANCE_REQUIRED",
+          "needsToS": true,
+          "needsEULA": true,
+          "acceptanceUrl": "https://ligandai.com/legal/accept?return_to=...&channel=sdk_redirect",
+          "message": "..."
+        }
+
+    The legacy shape emitted by the API-key validators before Contract C
+    still maps here for back-compat::
+
+        {"error": "terms_not_accepted", "code": "E014", "action_url": "https://ligandai.com/terms"}
+
+    Attributes
+    ----------
+    acceptance_url : str | None
+        Absolute URL the caller should open in a browser to review and
+        accept the current documents. ``None`` only if the server omitted
+        it entirely.
+    needs_tos : bool
+        Whether the outstanding acceptance includes the Terms of Service.
+    needs_eula : bool
+        Whether the outstanding acceptance includes the EULA.
+
+    Example — headless-safe handling with interactive resolution::
+
+        try:
+            job = client.folds.predict(...)
+        except LigandAILegalAcceptanceRequired as e:
+            # Explicit opt-in: nothing about this happens automatically.
+            job = client.legal.resolve_interactively(
+                e, retry=lambda: client.folds.predict(...), auto_open_browser=True,
+            )
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        acceptance_url: str | None = None,
+        needs_tos: bool = True,
+        needs_eula: bool = True,
+        reason: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, reason=reason, **kwargs)
+        self.acceptance_url = acceptance_url
+        self.needs_tos = needs_tos
+        self.needs_eula = needs_eula
+
+
 class LigandAINotFoundError(LigandAIError):
     """404 — resource (gene, complex, job, etc.) not found."""
 
@@ -762,6 +827,56 @@ def error_from_response(
                 required_tier=payload.get("requiredTier")
                 or payload.get("required_tier")
                 or payload.get("tier_required"),
+                **common,
+            )
+        # Legal-acceptance gate (Contract C, docs/clickwrap_legal_acceptance.md
+        # §3.6). Detected BEFORE the generic Forbidden fallthrough so callers
+        # can catch the specific subclass and drive the browser-redirect +
+        # resume flow. Two server shapes in the wild, both accepted:
+        #   - Contract C:  code == 'LEGAL_ACCEPTANCE_REQUIRED'
+        #                  or error == 'Legal acceptance required'
+        #   - legacy:      error == 'terms_not_accepted' or code == 'E014'
+        #                  (server/middleware/api-key-validator.ts:281,
+        #                   server/enterprise-api-routes.ts:1343,1451)
+        is_legal_error = bool(
+            code == "LEGAL_ACCEPTANCE_REQUIRED"
+            or err_kind_403 == "legal acceptance required"
+            or err_kind_403 == "terms_not_accepted"
+            or code == "E014"
+        )
+        if is_legal_error:
+            acceptance_url_raw = (
+                payload.get("acceptanceUrl")
+                or payload.get("acceptance_url")
+                # Legacy field name (api-key-validator.ts / enterprise-api-routes.ts).
+                or payload.get("action_url")
+            )
+            acceptance_url = str(acceptance_url_raw) if acceptance_url_raw else None
+            needs_tos_raw = payload.get("needsToS")
+            if needs_tos_raw is None:
+                needs_tos_raw = payload.get("needs_tos")
+            needs_eula_raw = payload.get("needsEULA")
+            if needs_eula_raw is None:
+                needs_eula_raw = payload.get("needs_eula")
+            if needs_tos_raw is None and needs_eula_raw is None:
+                # Legacy payloads never distinguished which document was
+                # outstanding — the legacy gate required both. Default both
+                # True rather than silently under-reporting what's needed.
+                needs_tos, needs_eula = True, True
+            else:
+                needs_tos = bool(needs_tos_raw)
+                needs_eula = bool(needs_eula_raw)
+            # Mirror LigandAICreditError's rich pattern: put the actionable
+            # URL directly in the message so it shows up in tracebacks/logs
+            # even for callers who never inspect `.acceptance_url`.
+            full_message = message
+            if acceptance_url and acceptance_url not in full_message:
+                full_message = f"{message} Accept at: {acceptance_url}"
+            return LigandAILegalAcceptanceRequired(
+                full_message,
+                acceptance_url=acceptance_url,
+                needs_tos=needs_tos,
+                needs_eula=needs_eula,
                 **common,
             )
         return LigandAIForbidden(

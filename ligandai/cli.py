@@ -13,6 +13,7 @@ keys revoke  Delete the local wallet file (does NOT call the backend).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -263,6 +264,42 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Dollar amount per reload event.",
     )
 
+    # ── legal ─────────────────────────────────────────────────────────────────
+    legal_parser = sub.add_parser(
+        "legal",
+        help="Review + accept the Terms of Service / EULA (docs/clickwrap_legal_acceptance.md).",
+    )
+    legal_sub = legal_parser.add_subparsers(dest="legal_command", title="legal sub-commands")
+
+    # legal status
+    legal_status_parser = legal_sub.add_parser(
+        "status",
+        help="Show current ToS/EULA acceptance status.",
+    )
+    legal_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit raw JSON instead of a formatted summary.",
+    )
+
+    # legal accept
+    legal_accept_parser = legal_sub.add_parser(
+        "accept",
+        help="Accept the current ToS/EULA via the browser-redirect flow.",
+    )
+    legal_accept_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open a browser automatically; just print the acceptance URL and poll.",
+    )
+    legal_accept_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECS",
+        help="Max seconds to wait for acceptance to be recorded (default: 300).",
+    )
+
     return parser
 
 
@@ -270,18 +307,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _make_client(args: argparse.Namespace):
-    """Construct a LigandAIClient honoring --base-url and env-based auth.
+    """Construct a :class:`~ligandai.LigandAI` client honoring --base-url and
+    env-based auth (``LIGANDAI_API_KEY`` / ``LIGANDAI_TEST_API_KEY``).
 
     Imported lazily so unit tests can patch this without dragging in the full
     transport stack.
+
+    Note: this previously imported a nonexistent ``LigandAIClient`` name (no
+    such export ever existed in ``ligandai/__init__.py``), so every CLI
+    command that reached this helper — ``credits`` included — raised
+    ``ImportError`` before making a single request. Fixed here as a
+    prerequisite for `ligandai legal status`/`accept`, which call it too.
     """
-    from ligandai import LigandAIClient
+    from ligandai import LigandAI
 
     kwargs: dict[str, Any] = {}
     base_url = getattr(args, "base_url", None)
     if base_url:
         kwargs["base_url"] = base_url
-    return LigandAIClient(**kwargs)
+    return LigandAI(**kwargs)
 
 
 def _format_progress_bar(pct: int, width: int = 40) -> str:
@@ -403,6 +447,103 @@ def cmd_credits_auto(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─── legal commands ────────────────────────────────────────────────────────
+
+
+def cmd_legal_status(args: argparse.Namespace) -> int:
+    """`ligandai legal status`."""
+    try:
+        client = _make_client(args)
+        status = client.legal.status()
+    except Exception as exc:
+        print(f"ligandai legal status: failed: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2))
+        return 0
+
+    tos_ok = bool(status.get("tosAccepted"))
+    eula_ok = bool(status.get("eulaAccepted"))
+    current = status.get("currentVersions") or {}
+    accepted = status.get("userAcceptedVersions") or {}
+    print(
+        f"  ToS  : {'accepted' if tos_ok else 'NOT accepted':<13} "
+        f"(current v{current.get('tos')}, yours v{accepted.get('tos') or '-'})"
+    )
+    print(
+        f"  EULA : {'accepted' if eula_ok else 'NOT accepted':<13} "
+        f"(current v{current.get('eula')}, yours v{accepted.get('eula') or '-'})"
+    )
+    if status.get("needsReAcceptance"):
+        print("  A newer version is available. Run `ligandai legal accept`.")
+    elif not (tos_ok and eula_ok):
+        print("  Run `ligandai legal accept` to accept.")
+    return 0
+
+
+def cmd_legal_accept(args: argparse.Namespace) -> int:
+    """`ligandai legal accept` — browser-redirect + poll-and-resume flow.
+
+    Builds the same ``/legal/accept?channel=sdk_redirect`` URL the server's
+    403 would carry (docs/clickwrap_legal_acceptance.md §3.6), then reuses
+    :meth:`ligandai.resources.legal.Legal.resolve_interactively` to open it
+    (unless ``--no-browser``) and poll ``GET /api/legal/status`` until the
+    user accepts or ``--timeout`` elapses. Headless/CI-safe: if this process
+    can't hand a human a browser click,
+    :func:`ligandai._headless.is_noninteractive_environment` makes
+    ``resolve_interactively`` fail fast with the URL rather than hang.
+    """
+    from ligandai._constants import DEFAULT_LEGAL_POLL_TIMEOUT_SECS
+    from ligandai.errors import LigandAILegalAcceptanceRequired
+
+    try:
+        client = _make_client(args)
+        status = client.legal.status()
+    except Exception as exc:
+        print(f"ligandai legal accept: failed to check status: {exc}", file=sys.stderr)
+        return 1
+
+    tos_ok = bool(status.get("tosAccepted"))
+    eula_ok = bool(status.get("eulaAccepted"))
+    if tos_ok and eula_ok and not status.get("needsReAcceptance"):
+        print("Already accepted — nothing to do.")
+        return 0
+
+    base_url = (
+        getattr(args, "base_url", None)
+        or os.environ.get("LIGANDAI_BASE_URL")
+        or "https://ligandai.com"
+    )
+    acceptance_url = f"{base_url.rstrip('/')}/legal/accept?channel=sdk_redirect"
+    err = LigandAILegalAcceptanceRequired(
+        "You must accept the Terms of Service and End User License Agreement "
+        f"to continue. Accept at: {acceptance_url}",
+        acceptance_url=acceptance_url,
+        needs_tos=not tos_ok,
+        needs_eula=not eula_ok,
+    )
+    print(f"Open this URL to review and accept: {acceptance_url}")
+
+    try:
+        client.legal.resolve_interactively(
+            err,
+            auto_open_browser=not getattr(args, "no_browser", False),
+            timeout=getattr(args, "timeout", None) or DEFAULT_LEGAL_POLL_TIMEOUT_SECS,
+        )
+    except LigandAILegalAcceptanceRequired:
+        print(
+            "Did not detect acceptance before timing out (or this is a "
+            "non-interactive/headless environment). Open the URL above and "
+            "run `ligandai legal accept` again once you've accepted.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Accepted. Thank you.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -427,6 +568,15 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_credits_auto(args)
         else:
             parser.parse_args(["credits", "--help"])
+            return 1
+    elif args.command == "legal":
+        sub = getattr(args, "legal_command", None)
+        if sub == "status":
+            return cmd_legal_status(args)
+        elif sub == "accept":
+            return cmd_legal_accept(args)
+        else:
+            parser.parse_args(["legal", "--help"])
             return 1
     else:
         parser.print_help()

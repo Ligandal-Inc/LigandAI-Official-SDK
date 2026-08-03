@@ -133,6 +133,15 @@ DEFAULT_RETRY_MAX_DELAY: float = 30.0
 DEFAULT_POLL_INTERVAL_SECS: float = 2.0
 DEFAULT_JOB_TIMEOUT_SECS: float = 1800.0  # 30 minutes — generation+fold can take this long
 
+# Legal-acceptance interactive resolution defaults (SDK-side browser-redirect
+# + resume flow, docs/clickwrap_legal_acceptance.md §3.6). Distinct from the
+# job-polling defaults above: this is a human clicking through a clickwrap
+# dialog in a browser, not a GPU job — hence a shorter poll interval (react
+# quickly once the human clicks accept) and a much shorter hard timeout (300s
+# is generous for a browser click; a stuck GPU job legitimately needs 30 min).
+DEFAULT_LEGAL_POLL_INTERVAL_SECS: float = 3.0
+DEFAULT_LEGAL_POLL_TIMEOUT_SECS: float = 300.0
+
 
 # ─── GPU policy ───────────────────────────────────────────────────────────────
 #
