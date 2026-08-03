@@ -1632,8 +1632,12 @@ class FoldResult(_LGModel):
     + ``has_structure=False`` triggers the durable-wait re-poll loop."""
     pae_matrix: list[list[float]] | None = Field(default=None, alias="paeMatrix")
     """Decoded PAE matrix (residue x residue). None for tier < pro/academia OR
-    when ``pae_matrix_uri`` has not been hydrated yet — call
-    ``client.folds.download_pae(job_id)`` to fetch."""
+    when ``pae_matrix_uri`` has not been hydrated yet.
+
+    ⛔ To fetch it, call ``client.folds.download_pae(peptide.fold_id)``. It takes
+    ``ptf_fold_results.id`` — the fold ROW primary key — NOT this object's
+    :attr:`job_id`. ``FoldResult`` carries no integer PK, so look the design up
+    via ``client.peptides.search(...)`` and use the ``fold_id`` from there."""
     cif_data: str | None = Field(default=None, alias="cifData")
     """Full mmCIF content (inline). May be None even when ``pdb_data`` is set
     (older fold writers only emit PDB)."""

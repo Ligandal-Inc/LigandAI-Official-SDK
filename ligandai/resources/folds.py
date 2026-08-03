@@ -73,6 +73,57 @@ if TYPE_CHECKING:
 _DEFAULT_PAE_SCALE_ANGSTROM = 32.0 / 255.0
 
 
+# ⛔ WRONG-IDENTIFIER GUARD.
+#
+# ``GET /api/v1/folds/:foldId/pae`` parses the path segment with
+# ``parseInt(foldIdRaw, 10)`` and looks it up as ``ptf_fold_results.id``
+# (server/pae-routes.ts:70-95). It is a fold-ROW primary key, not a job id.
+#
+# The hazard is not that a job id 404s — it is that job ids are routinely
+# all-digit strings, so ``download_pae(fold.job_id)`` parses cleanly to some
+# unrelated row number and can return **another fold's matrix with a 200**.
+# Silent wrong data beats a loud error every time, so refuse it here.
+_PAE_ID_HELP = (
+    "This endpoint takes ptf_fold_results.id — the integer primary key of the "
+    "fold row. Use `peptide.fold_id` from peptides.search()/list(), or `row['id']` "
+    "from structures.list(). FoldResult.job_id is a JOB id and is NOT accepted: "
+    "job ids are often all-digit, so the server would parse one as a row id and "
+    "return a different fold's matrix."
+)
+
+
+def _resolve_fold_result_id(
+    fold_result_id: int | str | None,
+    fold_id: int | str | None = None,
+) -> int:
+    """Validate and normalise the ``ptf_fold_results.id`` path parameter."""
+    if fold_result_id is not None and fold_id is not None and str(fold_result_id) != str(fold_id):
+        raise ValueError(
+            "Pass either fold_result_id or its deprecated alias fold_id, not both "
+            f"with different values (got {fold_result_id!r} and {fold_id!r})."
+        )
+    raw = fold_result_id if fold_result_id is not None else fold_id
+    if raw is None:
+        raise ValueError(f"fold_result_id is required. {_PAE_ID_HELP}")
+    if isinstance(raw, bool):  # bool is an int subclass; never a valid PK.
+        raise ValueError(f"fold_result_id must be a positive integer, got {raw!r}. {_PAE_ID_HELP}")
+    if isinstance(raw, int):
+        value = raw
+    else:
+        text = str(raw).strip()
+        if not text.isdigit():
+            raise ValueError(
+                f"fold_result_id must be a positive integer primary key, got {raw!r}. "
+                f"{_PAE_ID_HELP}"
+            )
+        value = int(text)
+    if value <= 0:
+        raise ValueError(
+            f"fold_result_id must be a positive integer primary key, got {raw!r}. {_PAE_ID_HELP}"
+        )
+    return value
+
+
 class HotspotSpec(TypedDict, total=False):
     """One hotspot or pocket residue.
 
@@ -159,29 +210,57 @@ class Folds(Resource):
 
     def download_pae(
         self,
-        fold_id: int | str,
+        fold_result_id: int | str | None = None,
         *,
         decode: bool = True,
+        fold_id: int | str | None = None,
     ) -> "np.ndarray | bytes":
         """Download the PAE (Predicted Aligned Error) matrix for a folded structure.
 
         Tier-gated: academia, pro, or enterprise. Free/basic tiers raise
         :class:`LigandAITierError` client-side before the request is sent.
 
-        :param fold_id: ``ptf_fold_results.id`` (integer PK).
+        ⛔ IDENTIFIER. This takes ``ptf_fold_results.id`` — the integer primary
+        key of the fold ROW. It does **not** take a job id. Passing
+        :attr:`FoldResult.job_id <ligandai.types.FoldResult.job_id>` is the
+        classic error, and because job ids are frequently all-digit strings the
+        server would happily parse one as a primary key and return **a
+        different fold's matrix**. This method therefore validates the
+        identifier client-side and refuses anything that is not a positive
+        integer.
+
+        Where to get the right value:
+
+        * ``peptide.fold_id`` from :meth:`Peptides.search` / :meth:`Peptides.list`
+          — this is the ``ptf_fold_results`` PK (returned as an int, normalised
+          to ``str`` by the model).
+        * ``row["id"]`` from :meth:`Structures.list`.
+
+        :class:`FoldResult` — what :meth:`Peptides.fold` returns — carries only
+        ``job_id`` and exposes no integer PK, so a fold result cannot be handed
+        to this method directly. Look the design up via
+        :meth:`Peptides.search` to obtain its ``fold_id``.
+
+        :param fold_result_id: ``ptf_fold_results.id`` (positive integer PK).
         :param decode:  If ``True`` (default), return an NxN ``float32`` numpy
                         array in Ångströms. If ``False``, return raw uint8 bytes
                         (the on-wire ``.npy`` payload).
+        :param fold_id: Deprecated alias for ``fold_result_id``, kept so
+                        ``download_pae(fold_id=...)`` keyword calls written
+                        against <=0.9.0 keep working.
         :returns:       ``np.ndarray`` (NxN ``float32``) when ``decode=True``,
                         else ``bytes`` (raw uint8 ``.npy`` payload).
+        :raises ValueError:           identifier is missing, or is not a
+                                      positive integer primary key.
         :raises LigandAITierError:    caller's tier < academia.
-        :raises LigandAINotFoundError: ``fold_id`` not found or PAE not yet computed.
+        :raises LigandAINotFoundError: fold not found or PAE not yet computed.
         """
+        resolved = _resolve_fold_result_id(fold_result_id, fold_id)
         if self._client is not None:
             self._client._require_feature("pae_download")
         resp = self._transport.request(
             "GET",
-            f"/api/v1/folds/{fold_id}/pae",
+            f"/api/v1/folds/{resolved}/pae",
             headers={"Accept": "application/octet-stream"},
             expect_json=False,
         )
@@ -201,8 +280,16 @@ class Folds(Resource):
         )
         return arr_uint8.astype(np.float32) * scale
 
-    def get_pae_summary(self, fold_id: int | str) -> dict[str, Any]:
+    def get_pae_summary(
+        self,
+        fold_result_id: int | str | None = None,
+        *,
+        fold_id: int | str | None = None,
+    ) -> dict[str, Any]:
         """Fetch PAE summary statistics — open to all tiers.
+
+        Same identifier rules as :meth:`download_pae`: this is
+        ``ptf_fold_results.id`` (positive integer PK), not a job id.
 
         :returns: Dict with ``shape``, ``min``, ``max``, ``mean``, ``p95``,
                   ``per_chain_pair_max``, ``scale_angstrom_per_unit``. Useful
@@ -211,7 +298,7 @@ class Folds(Resource):
         """
         return self._transport.request(
             "GET",
-            f"/api/v1/folds/{fold_id}/pae/summary",
+            f"/api/v1/folds/{_resolve_fold_result_id(fold_result_id, fold_id)}/pae/summary",
         ) or {}
 
     # ─── Fold result recovery ──────────────────────────────────────────────
@@ -253,7 +340,11 @@ class Folds(Resource):
         immediately.
         """
         import time as _time
-        from ligandai.errors import LigandAIError, LigandAITimeoutError
+        from ligandai.errors import (
+            LigandAIError,
+            LigandAILegalAcceptanceRequired,
+            LigandAITimeoutError,
+        )
 
         path = f"/api/folding/jobs/{job_id}/recover-from-modal"
         body = {"wait": bool(wait), "timeout": float(timeout)}
@@ -268,6 +359,12 @@ class Folds(Resource):
         while _time.monotonic() < deadline:
             try:
                 state = self._transport.request("GET", f"/api/folding/jobs/{job_id}") or {}
+            except LigandAILegalAcceptanceRequired:
+                # ⛔ Not a transient poll failure. Retrying every 2s until the
+                # budget expires ends in LigandAITimeoutError("did not land
+                # structural data"), sending the user to debug a Modal
+                # callback that was never broken. Surface the URL now.
+                raise
             except LigandAIError:
                 _time.sleep(2.0)
                 continue
@@ -323,16 +420,23 @@ class AsyncFolds(AsyncResource):
 
     async def download_pae(
         self,
-        fold_id: int | str,
+        fold_result_id: int | str | None = None,
         *,
         decode: bool = True,
+        fold_id: int | str | None = None,
     ) -> "np.ndarray | bytes":
-        """Async mirror of :meth:`Folds.download_pae`."""
+        """Async mirror of :meth:`Folds.download_pae`.
+
+        Takes ``ptf_fold_results.id`` (positive integer PK), NOT a job id — see
+        :meth:`Folds.download_pae` for the identifier rules and why a job id is
+        rejected client-side.
+        """
+        resolved = _resolve_fold_result_id(fold_result_id, fold_id)
         if self._client is not None:
             self._client._require_feature("pae_download")
         resp = await self._transport.request(
             "GET",
-            f"/api/v1/folds/{fold_id}/pae",
+            f"/api/v1/folds/{resolved}/pae",
             headers={"Accept": "application/octet-stream"},
             expect_json=False,
         )
@@ -352,9 +456,17 @@ class AsyncFolds(AsyncResource):
         )
         return arr_uint8.astype(np.float32) * scale
 
-    async def get_pae_summary(self, fold_id: int | str) -> dict[str, Any]:
-        """Async mirror of :meth:`Folds.get_pae_summary` — open to all tiers."""
+    async def get_pae_summary(
+        self,
+        fold_result_id: int | str | None = None,
+        *,
+        fold_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Async mirror of :meth:`Folds.get_pae_summary` — open to all tiers.
+
+        Takes ``ptf_fold_results.id`` (positive integer PK), not a job id.
+        """
         return await self._transport.request(
             "GET",
-            f"/api/v1/folds/{fold_id}/pae/summary",
+            f"/api/v1/folds/{_resolve_fold_result_id(fold_result_id, fold_id)}/pae/summary",
         ) or {}

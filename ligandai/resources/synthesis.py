@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping, Sequence as _Sequence
+from typing import Any, Literal
 
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
@@ -22,6 +23,230 @@ from ligandai.types import (
     SynthesisQuote,
     SynthesisRecommendation,
 )
+
+# ── Adaptyv experiment body construction ────────────────────────────────────
+#
+# ⛔ WIRE SHAPE. ``POST /api/adaptyv/experiments`` requires ``{name,
+# experiment_spec}`` (server/adaptyv-routes.ts:297) and answers anything else
+# with ``400 {"error": "name and experiment_spec are required"}``. Releases up
+# to and including 0.9.0 posted ``{name, targetId, sequences, includeBli}``, so
+# every ``adaptyv_create()`` call ever made against production failed. The
+# server contract is the correct one — it mirrors Adaptyv Foundry's own
+# ``/experiments`` schema, which the route proxies to — so the fix belongs
+# here, on the client.
+#
+# Inside the spec, ``sequences`` is a JSON OBJECT keyed by design name, NOT a
+# list::
+#
+#     {"cand-1": {"aa_string": "...", "control": false,
+#                 "metadata": {"tag_location": "N"}}}
+#
+# ⛔ ``aa_string`` is the BARE BINDER CORE. Adaptyv expresses in E. coli
+# cell-free and appends its own TwinStrep+splitGFP assay tag per design; a
+# sequence submitted with a tag already attached gets a second one.
+
+_ADAPTYV_DEFAULT_ANTIGEN_CONCENTRATIONS: list[float] = [1000.0, 316.2, 100.0, 31.6, 0.0]
+
+
+def _adaptyv_tag_location(tag_position: str | None) -> str:
+    """``n_term``/``c_term`` → the ``tag_location`` letter Adaptyv expects."""
+    return "C" if str(tag_position or "").lower().startswith("c") else "N"
+
+
+def _adaptyv_sequence_entry(
+    item: AdaptyvSequence | Mapping[str, Any] | str,
+    index: int,
+    tag_location: str,
+    key_hint: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Normalise one caller-supplied sequence into ``(name, spec_entry)``.
+
+    Accepts an :class:`~ligandai.types.AdaptyvSequence`, a mapping using either
+    the SDK's ``sequence`` key or the wire's ``aa_string`` key, or a bare
+    amino-acid string.
+    """
+    if isinstance(item, AdaptyvSequence):
+        raw: dict[str, Any] = item.model_dump(exclude_none=True)
+    elif isinstance(item, Mapping):
+        raw = dict(item)
+    elif isinstance(item, str):
+        raw = {"sequence": item}
+    else:
+        raise TypeError(
+            f"sequences[{index}] must be an AdaptyvSequence, a mapping, or a string; "
+            f"got {type(item).__name__}"
+        )
+
+    aa = raw.get("aa_string") or raw.get("aaString") or raw.get("sequence")
+    aa = str(aa or "").strip().upper()
+    if not aa:
+        raise ValueError(
+            f"sequences[{index}] has no amino-acid sequence. Provide 'sequence' "
+            "(SDK form) or 'aa_string' (wire form)."
+        )
+
+    name = key_hint or raw.get("name") or raw.get("id") or f"seq-{index + 1}"
+    name = str(name).strip() or f"seq-{index + 1}"
+
+    entry: dict[str, Any] = {
+        "aa_string": aa,
+        "control": bool(raw.get("control", False)),
+        "metadata": dict(raw.get("metadata") or {"tag_location": tag_location}),
+    }
+    # Anything else the caller attached (quantity, notes, ...) rides along
+    # untouched rather than being silently dropped by an allow-list.
+    for k, v in raw.items():
+        if k not in {
+            "aa_string", "aaString", "sequence", "name", "id", "control", "metadata"
+        } and v is not None:
+            entry.setdefault(k, v)
+    return name, entry
+
+
+def _adaptyv_sequences_object(
+    sequences: Any, tag_location: str
+) -> dict[str, dict[str, Any]]:
+    """Build the ``experiment_spec.sequences`` OBJECT from any accepted form."""
+    out: dict[str, dict[str, Any]] = {}
+    items: list[tuple[str | None, Any]]
+    if isinstance(sequences, Mapping):
+        items = [(str(k), v) for k, v in sequences.items()]
+    elif isinstance(sequences, _Sequence) and not isinstance(sequences, (str, bytes)):
+        items = [(None, v) for v in sequences]
+    else:
+        raise TypeError(
+            "sequences must be a list of AdaptyvSequence/dict/str, or a dict keyed "
+            f"by design name; got {type(sequences).__name__}"
+        )
+    if not items:
+        raise ValueError("sequences is empty — Adaptyv rejects an experiment with no designs.")
+
+    for i, (key_hint, item) in enumerate(items):
+        name, entry = _adaptyv_sequence_entry(item, i, tag_location, key_hint)
+        if name in out:
+            # Silently overwriting would drop a design from a real, paid order.
+            raise ValueError(
+                f"duplicate sequence name {name!r}. Adaptyv keys designs by name, so "
+                "every entry needs a distinct one."
+            )
+        out[name] = entry
+    return out
+
+
+def _build_adaptyv_experiment_body(
+    *,
+    name: str,
+    target_id: str | None,
+    sequences: Any,
+    include_bli: bool,
+    method: str | None,
+    experiment_type: str | None,
+    n_replicates: int,
+    antigen_concentrations: _Sequence[float] | None,
+    synthesis_mode: str,
+    tag_position: str,
+    parameters: Mapping[str, Any] | None,
+    experiment_spec: Mapping[str, Any] | None,
+    extra: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Assemble the ``{name, experiment_spec, ...}`` body the route requires.
+
+    ``experiment_spec``, when given, is used verbatim as the base and the
+    derived keys only fill gaps — the documented escape hatch for spec fields
+    this signature does not model.
+    """
+    if not str(name or "").strip():
+        raise ValueError("name is required.")
+
+    tag_location = _adaptyv_tag_location(tag_position)
+    spec: dict[str, Any] = dict(experiment_spec or {})
+
+    if sequences is not None:
+        spec["sequences"] = _adaptyv_sequences_object(sequences, tag_location)
+    if not spec.get("sequences"):
+        raise ValueError(
+            "sequences is required — pass the designs, or an experiment_spec that "
+            "already carries a 'sequences' object."
+        )
+
+    # include_bli=True  → a binding-affinity run measured by BLI.
+    # include_bli=False → expression/screening only; no assay method is sent,
+    #                     because 'method' is what tells Adaptyv to run BLI.
+    spec.setdefault("experiment_type", experiment_type or ("affinity" if include_bli else "screening"))
+    resolved_method = method or ("bli" if include_bli else None)
+    if resolved_method:
+        spec.setdefault("method", resolved_method)
+    if target_id:
+        spec.setdefault("target_id", target_id)
+    spec.setdefault("n_replicates", int(n_replicates))
+    if spec["experiment_type"] == "affinity" or resolved_method:
+        spec.setdefault(
+            "antigen_concentrations",
+            list(antigen_concentrations)
+            if antigen_concentrations is not None
+            else list(_ADAPTYV_DEFAULT_ANTIGEN_CONCENTRATIONS),
+        )
+    if parameters:
+        merged = dict(parameters)
+        merged.update(spec.get("parameters") or {})
+        spec["parameters"] = merged
+
+    body: dict[str, Any] = {
+        "name": str(name).strip(),
+        "experiment_spec": spec,
+        "synthesis_mode": synthesis_mode,
+        "tag_position": tag_position,
+    }
+    if extra:
+        body.update({k: v for k, v in extra.items() if v is not None})
+    return body
+
+
+_ADAPTYV_CREATE_DOC = """Create a draft Adaptyv experiment and populate it with sequences.
+
+        Creates a DRAFT. Nothing is quoted or charged until
+        :meth:`adaptyv_submit` is called separately.
+
+        ⛔ ``sequences`` must carry BARE BINDER CORES. Adaptyv expresses in
+        E. coli cell-free and appends its own TwinStrep+splitGFP assay tag to
+        each design; submitting an already-tagged construct produces a
+        double-tagged protein.
+
+        :param name:      Human-readable experiment name.
+        :param target_id: Adaptyv target UUID, from :meth:`adaptyv_search_targets`.
+        :param sequences: Designs, as a list of
+            :class:`~ligandai.types.AdaptyvSequence` / dicts / bare strings, or
+            a dict keyed by design name. Each is normalised into the wire's
+            ``{name: {aa_string, control, metadata}}`` object.
+        :param include_bli: ``True`` (default) requests a BLI affinity run.
+            ``False`` requests expression/screening only.
+        :param method: Assay method — ``"bli"`` or ``"spr"``. Defaults to
+            ``"bli"`` when ``include_bli``.
+        :param experiment_type: Defaults to ``"affinity"`` when ``include_bli``,
+            else ``"screening"``.
+        :param n_replicates: Replicates per design (default 3).
+        :param antigen_concentrations: Titration series in nM. Defaults to
+            ``[1000.0, 316.2, 100.0, 31.6, 0.0]``.
+        :param synthesis_mode: ``"recombinant"`` (default) or ``"chemical"``.
+        :param tag_position: ``"n_term"`` (default) or ``"c_term"``. Drives the
+            per-sequence ``metadata.tag_location``.
+        :param parameters: Extra ``experiment_spec.parameters`` entries.
+        :param experiment_spec: A pre-built spec used as the base, for fields
+            this signature does not model. Derived keys only fill gaps.
+        :param extra: Extra top-level body keys (e.g. ``webhook_url``,
+            ``skip_draft``, ``orientation_recommendations``).
+
+        Typical flow::
+
+            targets = client.synthesis.adaptyv_search_targets("EGFR")
+            exp = client.synthesis.adaptyv_create(
+                name="EGFR BLI validation",
+                target_id=targets[0].id,
+                sequences=[AdaptyvSequence(name="cand1", sequence="ACDEF...")],
+            )
+            # Separate, deliberate step — this one costs money:
+            # client.synthesis.adaptyv_submit(exp.id)
+        """
 
 
 class Synthesis(Resource):
@@ -182,38 +407,41 @@ class Synthesis(Resource):
     def adaptyv_create(
         self,
         name: str,
-        target_id: str,
-        sequences: list[AdaptyvSequence | dict],
+        target_id: str | None = None,
+        sequences: list[AdaptyvSequence | dict | str] | dict[str, Any] | None = None,
         include_bli: bool = True,
+        *,
+        method: str | None = None,
+        experiment_type: str | None = None,
+        n_replicates: int = 3,
+        antigen_concentrations: _Sequence[float] | None = None,
+        synthesis_mode: str = "recombinant",
+        tag_position: str = "n_term",
+        parameters: Mapping[str, Any] | None = None,
+        experiment_spec: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> AdaptyvExperiment:
-        """Create a new Adaptyv experiment and populate it with sequences.
-
-        Typical flow::
-
-            targets = client.synthesis.adaptyv_search_targets("EGFR")
-            seqs = [AdaptyvSequence(name="cand1", sequence="ACDEF...")]
-            exp = client.synthesis.adaptyv_create(
-                name="EGFR BLI validation",
-                target_id=targets[0].id,
-                sequences=seqs,
-                include_bli=True,
-            )
-        """
-        normalized = [
-            s.model_dump(by_alias=True) if isinstance(s, AdaptyvSequence) else s
-            for s in sequences
-        ]
+        body = _build_adaptyv_experiment_body(
+            name=name,
+            target_id=target_id,
+            sequences=sequences,
+            include_bli=include_bli,
+            method=method,
+            experiment_type=experiment_type,
+            n_replicates=n_replicates,
+            antigen_concentrations=antigen_concentrations,
+            synthesis_mode=synthesis_mode,
+            tag_position=tag_position,
+            parameters=parameters,
+            experiment_spec=experiment_spec,
+            extra=extra,
+        )
         payload = self._transport.request(
-            "POST",
-            "/api/adaptyv/experiments",
-            json={
-                "name": name,
-                "targetId": target_id,
-                "sequences": normalized,
-                "includeBli": include_bli,
-            },
+            "POST", "/api/adaptyv/experiments", json=body
         ) or {}
         return AdaptyvExperiment.model_validate(payload)
+
+    adaptyv_create.__doc__ = _ADAPTYV_CREATE_DOC
 
     def adaptyv_submit(self, experiment_id: str) -> AdaptyvExperiment:
         """Submit a draft Adaptyv experiment for synthesis + BLI validation."""
@@ -535,25 +763,41 @@ class AsyncSynthesis(AsyncResource):
     async def adaptyv_create(
         self,
         name: str,
-        target_id: str,
-        sequences: list[AdaptyvSequence | dict],
+        target_id: str | None = None,
+        sequences: list[AdaptyvSequence | dict | str] | dict[str, Any] | None = None,
         include_bli: bool = True,
+        *,
+        method: str | None = None,
+        experiment_type: str | None = None,
+        n_replicates: int = 3,
+        antigen_concentrations: _Sequence[float] | None = None,
+        synthesis_mode: str = "recombinant",
+        tag_position: str = "n_term",
+        parameters: Mapping[str, Any] | None = None,
+        experiment_spec: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> AdaptyvExperiment:
-        normalized = [
-            s.model_dump(by_alias=True) if isinstance(s, AdaptyvSequence) else s
-            for s in sequences
-        ]
+        body = _build_adaptyv_experiment_body(
+            name=name,
+            target_id=target_id,
+            sequences=sequences,
+            include_bli=include_bli,
+            method=method,
+            experiment_type=experiment_type,
+            n_replicates=n_replicates,
+            antigen_concentrations=antigen_concentrations,
+            synthesis_mode=synthesis_mode,
+            tag_position=tag_position,
+            parameters=parameters,
+            experiment_spec=experiment_spec,
+            extra=extra,
+        )
         payload = await self._transport.request(
-            "POST",
-            "/api/adaptyv/experiments",
-            json={
-                "name": name,
-                "targetId": target_id,
-                "sequences": normalized,
-                "includeBli": include_bli,
-            },
+            "POST", "/api/adaptyv/experiments", json=body
         ) or {}
         return AdaptyvExperiment.model_validate(payload)
+
+    adaptyv_create.__doc__ = _ADAPTYV_CREATE_DOC
 
     async def adaptyv_submit(self, experiment_id: str) -> AdaptyvExperiment:
         return AdaptyvExperiment.model_validate(
