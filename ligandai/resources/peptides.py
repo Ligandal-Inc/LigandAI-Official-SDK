@@ -1106,6 +1106,31 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
         plddt = None
     ptm = _first("ptm")
     ipae = _first("ipae")
+
+    # ── PDE (predicted distance error), migration 170 ────────────────────────
+    # ⛔ Each of these is probed on its OWN keys. interface_pde_min must NEVER
+    # fall back to gpde or interface_gpde: those are complex-level statistics,
+    # so substituting one would report a different quantity under a name that
+    # promises the interface — the same class of error as coalescing
+    # peptide_ipsae into ipsae. A missing value means "not computed".
+    #
+    # The tags are read in the same pass and validated onto the model together
+    # with the numbers, because a PDE value without its engine/kind/scale
+    # cannot be compared to any other PDE value.
+    gpde = _first("gpde")
+    interface_gpde = _first("interfaceGpde", "interface_gpde")
+    interface_pde_min = _first("interfacePdeMin", "interface_pde_min")
+    # A bare `pde` key is accepted LAST as a defensive alias for the
+    # DB-generated cross-engine column, so the canonical names always win. A
+    # non-numeric `pde` (e.g. a nested block) coerces to None below rather than
+    # poisoning the field.
+    pde_rankable = _first("pdeRankable", "pde_rankable", "pde")
+    pde_engine = _first("pdeEngine", "pde_engine")
+    pde_kind = _first("pdeKind", "pde_kind")
+    pde_scale = _first("pdeScale", "pde_scale")
+    pde_interpretation = _first("pdeInterpretation", "pde_interpretation")
+    pde_units = _first("pdeUnits", "pde_units")
+
     chain_pair_iptm = _first("chainPairIptm", "chain_pair_iptm")
     per_chain = _first("perChain", "per_chain", "per_chain_metrics")
     pae_url = _first("paeUrl", "pae_url")
@@ -1126,6 +1151,27 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     peptide_ipsae = _to_float(peptide_ipsae)
     ptm = _to_float(ptm)
     ipae = _to_float(ipae) if not isinstance(ipae, dict) else None
+    gpde = _to_float(gpde)
+    interface_gpde = _to_float(interface_gpde)
+    interface_pde_min = _to_float(interface_pde_min)
+    pde_rankable = _to_float(pde_rankable)
+
+    def _to_tag(v: Any) -> str | None:
+        return v if isinstance(v, str) and v else None
+
+    pde_engine = _to_tag(pde_engine)
+    pde_kind = _to_tag(pde_kind)
+    pde_scale = _to_tag(pde_scale)
+    pde_interpretation = _to_tag(pde_interpretation)
+    pde_units = _to_tag(pde_units)
+
+    # Older payloads carry the raw components but not the DB-generated
+    # cross-engine column. Recompute it from the tags rather than leaving the
+    # caller to apply the native+angstrom rule by hand — that rule is exactly
+    # what gets forgotten. Anything short of native+angstrom stays None, which
+    # is a refusal to compare across engines, not a missing measurement.
+    if pde_rankable is None and pde_kind == "native" and pde_scale == "angstrom":
+        pde_rankable = interface_pde_min
 
     if not isinstance(metrics, dict):
         metrics = {}
@@ -1136,6 +1182,19 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
         ("iptm", iptm), ("ipsae", ipsae), ("ptm", ptm),
         ("mean_plddt", plddt), ("ipae", ipae),
         ("peptide_ipsae", peptide_ipsae),
+        # ⛔ `metrics` is a flat dict[str, float] — a value placed here arrives
+        # WITHOUT its engine/kind/scale tags, so only a PDE number that is
+        # self-qualifying may go in. `pde_rankable` is exactly that: it is
+        # non-None if and only if the value is a native read on a verified
+        # Angstrom scale, i.e. safe to compare against any other fold's
+        # pde_rankable. The raw gpde / interface_gpde / interface_pde_min are
+        # deliberately NOT back-filled here — untagged, they are numbers no
+        # caller can interpret, and a `metrics["interface_pde_min"]` that
+        # silently mixes Boltz-2's unverified scale with Protenix Angstroms is
+        # precisely the cross-engine error this design exists to prevent. Read
+        # them from `fold.pde`, where the tags cannot be detached.
+        # LOWER IS BETTER for this key, unlike every other entry in the dict.
+        ("pde_rankable", pde_rankable),
     ):
         if v is not None and k not in metrics:
             try:
@@ -1165,6 +1224,36 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
             "plddt": plddt,
             "ptm": ptm,
             "ipae": ipae,
+            # PDE (migration 170). Values and tags are validated as ONE unit —
+            # there is no path here that sets a PDE number without also setting
+            # the engine/kind/scale that say whether it may be compared.
+            "gpde": gpde,
+            "interfaceGpde": interface_gpde,
+            "interfacePdeMin": interface_pde_min,
+            "pdeRankable": pde_rankable,
+            "pdeEngine": pde_engine,
+            "pdeKind": pde_kind,
+            "pdeScale": pde_scale,
+            # Direction is stated, never inferred from the field name. Defaults
+            # to 'lower_is_better' whenever any PDE number is present, so a
+            # payload predating the server-side tag still tells the caller which
+            # way to sort — PDE runs opposite to ipSAE/iPTM/pLDDT.
+            "pdeInterpretation": (
+                pde_interpretation
+                or (
+                    "lower_is_better"
+                    if any(
+                        v is not None
+                        for v in (gpde, interface_gpde, interface_pde_min, pde_rankable)
+                    )
+                    else None
+                )
+            ),
+            "pdeUnits": (
+                pde_units
+                or ("angstrom" if pde_scale == "angstrom"
+                    else ("unverified" if pde_scale == "unverified" else None))
+            ),
             "chainPairIptm": chain_pair_iptm,
             "perChain": per_chain,
             "paeUrl": pae_url,
@@ -4240,6 +4329,8 @@ class Peptides(Resource):
         plddt_min: float | None = None,
         kd_max: float | None = None,
         dg_max: float | None = None,
+        pde_max: float | None = None,
+        pde_engine: str | None = None,
         binder_pct_min: float | None = None,
         length_min: int | None = None,
         length_max: int | None = None,
@@ -4275,6 +4366,24 @@ class Peptides(Resource):
             kd_max: Maximum predicted Kd in Molar (e.g. ``1e-8`` = 10 nM).
             dg_max: Maximum predicted ΔG in kcal/mol (negative is better; pass
                 ``-8.0`` for "ΔG ≤ -8 kcal/mol").
+            pde_max: Maximum predicted distance error in Angstroms. PDE runs
+                OPPOSITE to iPSAE/iPTM/pLDDT — **lower is better** — so this is
+                a ceiling, not a floor. On the 199-fold labelled holdout the MIN
+                interface PDE scored AUROC 0.806 [0.743, 0.862], statistically
+                indistinguishable from iPSAE's 0.811.
+
+                ⛔ Without ``pde_engine`` this filters the server's
+                ``pde_rankable`` column, which is NULL for any fold whose PDE is
+                a PAE-derived proxy or sits on an unverified scale (Boltz-2).
+                Those folds are therefore EXCLUDED rather than compared on an
+                incompatible scale. That is deliberate: a PDE number is only
+                comparable to another PDE number from an engine on the same
+                scale.
+            pde_engine: Pin the query to a single fold engine (a FoldEngineId,
+                e.g. ``"protenix"``). Required if you want ``pde_max`` to filter
+                the raw ``interface_pde_min`` — including proxy / unverified-
+                scale rows — since within one engine the values are mutually
+                comparable even when they are not comparable across engines.
             binder_pct_min: Minimum DeltaForge binder probability (0..1).
             length_min / length_max: Peptide length range in residues.
             is_elite: Server-flagged elite (iPSAE ≥ 0.80 by default).
@@ -4301,7 +4410,12 @@ class Peptides(Resource):
             conformation: Exact conformation string filter.
             program_id / session_id / pdb_id: Scope filters.
             sort: Sort key — one of ``ipsae`` | ``iptm`` | ``plddt`` |
-                ``kd`` | ``dg`` | ``length`` | ``created_at``.
+                ``kd`` | ``dg`` | ``pde`` | ``length`` | ``created_at``.
+
+                ``sort="pde"`` ranks on ``pde_rankable`` (cross-engine safe)
+                unless ``pde_engine`` pins the query, in which case it ranks on
+                the raw ``interface_pde_min`` for that engine. Pair it with
+                ``order="asc"`` — lower PDE is better.
             order: ``"asc"`` or ``"desc"`` (default ``"desc"``).
             limit: Page size (max 200).
             offset: Pagination offset.
@@ -4330,6 +4444,13 @@ class Peptides(Resource):
         if plddt_min is not None: params["plddt_min"] = plddt_min
         if kd_max is not None: params["kd_max"] = kd_max
         if dg_max is not None: params["dg_max"] = dg_max
+        # PDE (migration 170). LOWER IS BETTER, so this is a MAX threshold.
+        # Without pde_engine the server filters pde_rankable — the DB-generated
+        # cross-engine-safe column — so proxy and unverified-scale folds are
+        # excluded rather than silently mixed in. Supplying pde_engine pins the
+        # query to one engine and filters the raw interface_pde_min instead.
+        if pde_max is not None: params["pde_max"] = pde_max
+        if pde_engine is not None: params["pde_engine"] = pde_engine
         if binder_pct_min is not None: params["binder_pct_min"] = binder_pct_min
         if length_min is not None: params["length_min"] = length_min
         if length_max is not None: params["length_max"] = length_max
@@ -6287,6 +6408,8 @@ class AsyncPeptides(AsyncResource):
         plddt_min: float | None = None,
         kd_max: float | None = None,
         dg_max: float | None = None,
+        pde_max: float | None = None,
+        pde_engine: str | None = None,
         binder_pct_min: float | None = None,
         length_min: int | None = None,
         length_max: int | None = None,
@@ -6335,6 +6458,13 @@ class AsyncPeptides(AsyncResource):
         if plddt_min is not None: params["plddt_min"] = plddt_min
         if kd_max is not None: params["kd_max"] = kd_max
         if dg_max is not None: params["dg_max"] = dg_max
+        # PDE (migration 170). LOWER IS BETTER, so this is a MAX threshold.
+        # Without pde_engine the server filters pde_rankable — the DB-generated
+        # cross-engine-safe column — so proxy and unverified-scale folds are
+        # excluded rather than silently mixed in. Supplying pde_engine pins the
+        # query to one engine and filters the raw interface_pde_min instead.
+        if pde_max is not None: params["pde_max"] = pde_max
+        if pde_engine is not None: params["pde_engine"] = pde_engine
         if binder_pct_min is not None: params["binder_pct_min"] = binder_pct_min
         if length_min is not None: params["length_min"] = length_min
         if length_max is not None: params["length_max"] = length_max

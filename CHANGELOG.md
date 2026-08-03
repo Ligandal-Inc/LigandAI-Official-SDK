@@ -6,6 +6,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.9.0] — 2026-08-02
+
+### Added — PDE (predicted distance error) is callable (`bd-LIGANDAI_ALPHA_V2-du0xv`)
+
+PDE now travels alongside ipSAE on every fold-score surface. It is a distinct
+signal from PAE, not a derivative of it: PDE is symmetric and frame-free where
+PAE is asymmetric (measured max|M − Mᵀ| = 19.81 Å for PAE vs 0.0000 for PDE).
+Symmetrised PAE correlates r = 0.898 with PDE but leaves 19.4 % of the variance
+unexplained.
+
+On the 199-fold labelled holdout the **MIN** interface PDE scored AUROC 0.806
+[0.743, 0.862] — statistically indistinguishable from ipSAE's 0.811 — while the
+interface **MEAN** scored only 0.755. So the min is the ranking scalar.
+
+**⛔ LOWER IS BETTER.** PDE runs opposite to ipSAE / iPTM / pLDDT. The direction
+is reported on the wire (`pde_interpretation == "lower_is_better"`) rather than
+left to be inferred from a field name.
+
+#### `FoldResult` and `Peptide`
+
+Both now carry the flat wire fields:
+
+| Attribute | Wire name | Meaning |
+| --- | --- | --- |
+| `gpde` | `gpde` | Complex-level contact-probability-weighted mean PDE, Å |
+| `interface_gpde` | `interfaceGpde` | Same statistic, binder↔receptor pairs only, Å |
+| `interface_pde_min` | `interfacePdeMin` | **MIN** interface PDE, Å — the ranking scalar |
+| `pde_rankable` | `pdeRankable` | Cross-engine-safe PDE (see below) |
+| `pde_engine` | `pdeEngine` | FoldEngineId that produced the value |
+| `pde_kind` | `pdeKind` | `'native'` (engine's token_pair_pde head) or `'proxy'` (PAE-derived) |
+| `pde_scale` | `pdeScale` | `'angstrom'` (verified) or `'unverified'` |
+| `pde_interpretation` | `pdeInterpretation` | `'lower_is_better'` |
+| `pde_units` | `pdeUnits` | `'angstrom'` \| `'unverified'` \| `None` |
+
+`Peptide` additionally gained `peptide_ipsae` / `peptide_ipsae_status`, which
+`/api/v1/peptides/{list,search}` has been returning but the model never typed.
+
+#### ⛔ The cross-engine rule, and the new `PdeScores` model
+
+A PDE number is comparable to another PDE number **only when both came from
+engines on the same scale**. Boltz-2 reports `complex_pde` / `complex_ipde` on a
+scale never verified against the Angstrom-scale gPDE that OpenDDE and Protenix
+emit (the same engine reports `complex_plddt` on 0–1 where those report 0–100),
+and a PAE-derived surrogate is a different quantity from a native
+`token_pair_pde` read — not a lower-quality version of one.
+
+`pde_rankable` is the structural gate: non-`None` **if and only if**
+`pde_kind == 'native'` **and** `pde_scale == 'angstrom'`.
+
+The new `ligandai.PdeScores` model is the shape where a value and its tags
+cannot be separated, reachable from either model via a `.pde` accessor:
+
+```python
+fold = client.peptides.fold(seq, receptor).wait()
+
+if (pde := fold.pde) and pde.cross_engine_rank_value is not None:
+    print(f"{pde.cross_engine_rank_value:.2f} Å ({pde.engine}, lower is better)")
+
+# Raw value — valid ONLY within one engine.
+fold.pde.interface_pde_min
+```
+
+`cross_engine_rank_value` returns `None` for a proxy or unverified-scale fold.
+That is a refusal to compare, not a missing measurement — the fold may carry a
+perfectly good `interface_pde_min` that simply is not on a scale you can put
+next to another engine's.
+
+#### ⛔ Anti-coalescing
+
+`interface_pde_min` is **never** back-filled from `gpde` or `interface_gpde`.
+Those measure the whole complex and the interface mean respectively, so
+substituting one would report a different quantity under a name that promises
+the interface min — the same class of error as coalescing `peptide_ipsae` into
+`ipsae`. `None` means "not computed", not zero.
+
+The flat `FoldResult.metrics` dict strips tags by construction, so it carries
+**only** `pde_rankable` — the one PDE scalar that is self-qualifying. `gpde`,
+`interface_gpde` and `interface_pde_min` are deliberately withheld from it: a
+`metrics["interface_pde_min"]` silently mixing Boltz-2's unverified scale with
+Protenix Angstroms is precisely the error this design prevents. Read them from
+`fold.pde`.
+
+#### `peptides.search()` — new filters (sync + async)
+
+- **`pde_max`** — maximum PDE in Å. A ceiling, not a floor. Without
+  `pde_engine` the server filters `pde_rankable`, so proxy and
+  unverified-scale folds are *excluded* rather than compared on an incompatible
+  scale.
+- **`pde_engine`** — pin the query to one FoldEngineId; switches `pde_max` to
+  filtering the raw `interface_pde_min`, which is legitimate within a single
+  engine.
+- **`sort="pde"`** — ranks on `pde_rankable` (or the raw column when
+  `pde_engine` is pinned). Pair with `order="asc"`.
+
+#### Tests
+
+`tests/unit/test_fold_result_pde.py`, modelled on the existing
+`test_fold_result_peptide_ipsae.py` anti-coalescing cover.
+
 ## [0.8.3] — 2026-08-01
 
 ### Fixed — `peptides.fold()` was rejected by production

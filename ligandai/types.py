@@ -898,6 +898,54 @@ class StabilityScores(_LGModel):
     dppiv_vulnerable: bool | None = Field(default=None, alias="dppiv_vulnerable")
     trp_count: int | None = Field(default=None, alias="trp_count")
 
+    # -- Cavaco half-life regression -----------------------------------------
+    # Cavaco et al. 2021 (PMID 33641212):
+    #   ln(t½) = 2.226 + 0.053·NP% − 1.515·W(0,1) + 1.290·Y(0,1) − 1.052·pI(0,1)
+    # A SECOND, INDEPENDENT estimator from ``predicted_halflife_min`` (which is a
+    # trained SeqConvMLP head). The paper's (0,1) normalisation is not recorded in
+    # our source, so W/Y are presence indicators and pI is min-max scaled over
+    # 3-12: ``cavaco_ln_t_half`` is INDICATIVE and valid for RANKING only, never
+    # as a quantitative t½. The raw components are surfaced so the ordering — the
+    # part that depends only on the unambiguous coefficient signs — can be checked.
+    cavaco_ln_t_half: float | None = Field(
+        default=None, alias="cavaco_ln_t_half",
+        description="ln(t½) from the Cavaco regression. RANKING ONLY — not a quantitative half-life.",
+    )
+    cavaco_halflife_score: float | None = Field(
+        default=None, alias="cavaco_halflife_score",
+        description="Monotone 0-1 rank transform of cavaco_ln_t_half (higher = longer-lived).",
+    )
+    cavaco_np_percent: float | None = Field(
+        default=None, alias="cavaco_np_percent",
+        description="Nonpolar residue percentage (AVILMFPGW). Extends half-life.",
+    )
+    cavaco_n_trp: int | None = Field(default=None, alias="cavaco_n_trp")
+    cavaco_has_trp: float | None = Field(
+        default=None, alias="cavaco_has_trp",
+        description="Trp presence indicator used for the W(0,1) term. Trp SHORTENS half-life.",
+    )
+    cavaco_n_tyr: int | None = Field(default=None, alias="cavaco_n_tyr")
+    cavaco_has_tyr: float | None = Field(
+        default=None, alias="cavaco_has_tyr",
+        description="Tyr presence indicator used for the Y(0,1) term. Tyr EXTENDS half-life.",
+    )
+    cavaco_isoelectric_point: float | None = Field(
+        default=None, alias="cavaco_isoelectric_point",
+        description="Computed pI (EMBOSS pKa table). High pI SHORTENS half-life (renal clearance).",
+    )
+    cavaco_pI_norm: float | None = Field(
+        default=None, alias="cavaco_pI_norm",
+        description="pI min-max scaled over 3-12 for the pI(0,1) term.",
+    )
+    cavaco_contributions: dict[str, Any] | None = Field(
+        default=None, alias="cavaco_contributions",
+        description="Signed per-term contributions to ln(t½): intercept, np_percent, trp, tyr, pI.",
+    )
+    cavaco_caveat: str | None = Field(
+        default=None, alias="cavaco_caveat",
+        description="Normalisation caveat carried from the server. Read it before quoting an absolute t½.",
+    )
+
 
 class ImmunoScores(_LGModel):
     """Immunogenicity scores emitted by the guided design worker.
@@ -1050,6 +1098,79 @@ class Peptide(_LGModel):
                     "peptidePerReceptor, chainPairs, plddtDetails. Same shape as "
                     "ptf_fold_results.fold_metric_details JSONB column.",
     )
+    # ── PDE (predicted distance error), migration 170 ────────────────────────
+    # Returned by /api/v1/peptides/{list,search,:id} and /api/v1/structures/list.
+    # ⛔ Never read one of these numbers without pde_engine / pde_kind /
+    # pde_scale — use the bundled `pde` accessor below. See PdeScores.
+    peptide_ipsae: float | None = Field(
+        default=None, alias="peptideIpsae",
+        description="Peptide<->receptor interface iPSAE — THE binder metric. None means "
+                    "not computed; never falls back to the complex-level `ipsae`.",
+    )
+    peptide_ipsae_status: str | None = Field(
+        default=None, alias="peptideIpsaeStatus",
+        description="'ok' when peptide_ipsae is present, 'not_computed' when it is NULL.",
+    )
+    gpde: float | None = Field(
+        default=None,
+        description="Complex-level contact-probability-weighted mean PDE, Angstroms.",
+    )
+    interface_gpde: float | None = Field(
+        default=None, alias="interfaceGpde",
+        description="gPDE restricted to binder<->receptor token pairs, Angstroms.",
+    )
+    interface_pde_min: float | None = Field(
+        default=None, alias="interfacePdeMin",
+        description="MIN interface PDE, Angstroms. LOWER IS BETTER. Never back-filled "
+                    "from gpde/interface_gpde. Comparable only within one engine.",
+    )
+    pde_rankable: float | None = Field(
+        default=None, alias="pdeRankable",
+        description="Cross-engine-safe PDE — equals interface_pde_min only when "
+                    "pde_kind='native' AND pde_scale='angstrom', else None. Rank on this.",
+    )
+    pde_engine: str | None = Field(
+        default=None, alias="pdeEngine",
+        description="FoldEngineId that produced the PDE value.",
+    )
+    pde_kind: str | None = Field(
+        default=None, alias="pdeKind",
+        description="'native' (engine's token_pair_pde head) or 'proxy' (PAE-derived).",
+    )
+    pde_scale: str | None = Field(
+        default=None, alias="pdeScale",
+        description="'angstrom' (verified) or 'unverified' (Boltz-2).",
+    )
+    pde_interpretation: str | None = Field(
+        default=None, alias="pdeInterpretation",
+        description="'lower_is_better' — the direction, stated rather than inferred.",
+    )
+    pde_units: str | None = Field(
+        default=None, alias="pdeUnits",
+        description="'angstrom' | 'unverified' | None.",
+    )
+
+    @property
+    def pde(self) -> PdeScores | None:
+        """PDE bundled with its provenance tags, or ``None`` if none reported.
+
+        Mirrors :attr:`FoldResult.pde`. Use
+        ``peptide.pde.cross_engine_rank_value`` to rank a search result set that
+        may span fold engines; it returns ``None`` for proxy / unverified-scale
+        rows rather than letting them into the ordering.
+        """
+        block = PdeScores(
+            gpde=self.gpde,
+            interfaceGpde=self.interface_gpde,
+            interfacePdeMin=self.interface_pde_min,
+            pdeRankable=self.pde_rankable,
+            pdeEngine=self.pde_engine,
+            pdeKind=self.pde_kind,
+            pdeScale=self.pde_scale,
+            pdeInterpretation=self.pde_interpretation,
+            pdeUnits=self.pde_units,
+        )
+        return block if block else None
 
 
 class GeneSummary(_LGModel):
@@ -1408,6 +1529,87 @@ class ReceptorChain(_LGModel):
     type: str | None = None  # 'protein' | 'dna' | 'rna'
 
 
+class PdeScores(_LGModel):
+    """PDE (predicted distance error) bundled WITH the provenance that makes it
+    interpretable.
+
+    PDE is a distinct signal from PAE, not a derivative of it: PDE is symmetric
+    and frame-free where PAE is asymmetric. On the 199-fold labelled holdout,
+    :attr:`interface_pde_min` scored AUROC 0.806 [0.743, 0.862] — statistically
+    indistinguishable from iPSAE's 0.811 — while the interface MEAN scored only
+    0.755. So the MIN is the ranking scalar, and **lower is better**: the
+    opposite direction to iPSAE / iPTM / pLDDT.
+
+    ⛔ **A bare PDE number is uninterpretable.** It is comparable to another PDE
+    number only when both came from engines on the same scale. Boltz-2's
+    ``complex_pde``/``complex_ipde`` has never been verified against the
+    Angstrom-scale gPDE that OpenDDE and Protenix emit, and a PAE-derived
+    surrogate (``kind='proxy'``) is a different quantity from a native
+    ``token_pair_pde`` read. That is why this model exists: it is the only shape
+    in the SDK where a PDE value and its :attr:`engine` / :attr:`kind` /
+    :attr:`scale` tags cannot be separated.
+
+    Rank, sort and filter across engines on :attr:`cross_engine_rank_value`
+    (equivalently: the server's DB-generated ``pdeRankable``). Reading
+    :attr:`interface_pde_min` directly is valid only when the comparison set is
+    pinned to a single engine — pass ``pde_engine=`` to
+    :meth:`~ligandai.resources.peptides.Peptides.search` to do that.
+    """
+
+    gpde: float | None = None
+    """Complex-level contact-probability-weighted mean PDE, Angstroms."""
+    interface_gpde: float | None = Field(default=None, alias="interfaceGpde")
+    """Same statistic restricted to binder<->receptor token pairs, Angstroms."""
+    interface_pde_min: float | None = Field(default=None, alias="interfacePdeMin")
+    """MIN interface PDE, Angstroms. LOWER IS BETTER. The ranking scalar.
+
+    ``None`` means "not computed" — never back-filled from :attr:`gpde` or
+    :attr:`interface_gpde`, which measure the whole complex rather than the
+    interface."""
+    rankable: float | None = Field(default=None, alias="pdeRankable")
+    """DB-generated cross-engine gate: equals :attr:`interface_pde_min` only when
+    ``kind == 'native'`` and ``scale == 'angstrom'``, else ``None``. Prefer
+    :attr:`cross_engine_rank_value`, which falls back to recomputing this from
+    the tags for payloads that predate the generated column."""
+    engine: str | None = Field(default=None, alias="pdeEngine")
+    """FoldEngineId that produced the value (e.g. ``'boltz2'``, ``'protenix'``)."""
+    kind: str | None = Field(default=None, alias="pdeKind")
+    """``'native'`` — read from the engine's own token_pair_pde head.
+    ``'proxy'`` — reconstructed from PAE or another surrogate."""
+    scale: str | None = Field(default=None, alias="pdeScale")
+    """``'angstrom'`` — verified Angstrom scale. ``'unverified'`` — scale not
+    established (Boltz-2 lands here)."""
+    interpretation: str | None = Field(default=None, alias="pdeInterpretation")
+    """Always ``'lower_is_better'`` when the server states a direction."""
+    units: str | None = Field(default=None, alias="pdeUnits")
+    """``'angstrom'`` | ``'unverified'`` | ``None``."""
+
+    @property
+    def is_cross_engine_comparable(self) -> bool:
+        """True only for a native read on a verified Angstrom scale."""
+        return self.kind == "native" and self.scale == "angstrom"
+
+    @property
+    def cross_engine_rank_value(self) -> float | None:
+        """The ONLY value safe to rank/sort/filter across fold engines.
+
+        ``None`` when this fold's PDE is a proxy or sits on an unverified scale
+        — which is a refusal to compare, not a missing measurement. Read
+        :attr:`interface_pde_min` if you have pinned the comparison to one
+        engine.
+        """
+        if self.rankable is not None:
+            return self.rankable
+        return self.interface_pde_min if self.is_cross_engine_comparable else None
+
+    def __bool__(self) -> bool:
+        """Falsy when no PDE number was reported at all."""
+        return any(
+            v is not None
+            for v in (self.gpde, self.interface_gpde, self.interface_pde_min, self.rankable)
+        )
+
+
 class FoldResult(_LGModel):
     job_id: str = Field(alias="jobId")
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
@@ -1463,6 +1665,67 @@ class FoldResult(_LGModel):
     ipae: float | None = None
     """Per-interface predicted aligned error (chain-pair). Populated when the
     fold writer ran with schema_version >= 2; nullable for older runs."""
+
+    # ── PDE (predicted distance error), migration 170 ────────────────────────
+    # Flat wire fields, mirroring how the server emits them. ⛔ Do not read one
+    # of these numbers without the three tags below it — prefer the bundled
+    # :attr:`pde` accessor, which cannot hand you a value without its
+    # provenance. See :class:`PdeScores` for why an untagged PDE is meaningless.
+    gpde: float | None = None
+    """Complex-level contact-probability-weighted mean PDE, Angstroms.
+    Interpretable only alongside :attr:`pde_engine` / :attr:`pde_kind` /
+    :attr:`pde_scale`."""
+    interface_gpde: float | None = Field(default=None, alias="interfaceGpde")
+    """gPDE restricted to binder<->receptor token pairs, Angstroms."""
+    interface_pde_min: float | None = Field(default=None, alias="interfacePdeMin")
+    """MIN interface PDE, Angstroms — LOWER IS BETTER, and the PDE scalar to
+    rank on (AUROC 0.806 on the 199-fold labelled holdout vs 0.755 for the
+    interface mean). ``None`` means "not computed" and is NEVER back-filled from
+    :attr:`gpde` or :attr:`interface_gpde` — those measure the whole complex, so
+    substituting one would report a different quantity under this name."""
+    pde_rankable: float | None = Field(default=None, alias="pdeRankable")
+    """Cross-engine-safe PDE: equals :attr:`interface_pde_min` only when
+    ``pde_kind == 'native'`` and ``pde_scale == 'angstrom'``, else ``None``.
+    Any ranking that mixes fold engines must key on THIS field."""
+    pde_engine: str | None = Field(default=None, alias="pdeEngine")
+    """FoldEngineId that produced the PDE value."""
+    pde_kind: str | None = Field(default=None, alias="pdeKind")
+    """``'native'`` (engine's own token_pair_pde head) or ``'proxy'``
+    (reconstructed from PAE or another surrogate)."""
+    pde_scale: str | None = Field(default=None, alias="pdeScale")
+    """``'angstrom'`` (verified) or ``'unverified'`` (Boltz-2's
+    complex_pde/complex_ipde — scale never established against Angstrom-scale
+    gPDE, so it must not be compared to another engine's PDE)."""
+    pde_interpretation: str | None = Field(default=None, alias="pdeInterpretation")
+    """``'lower_is_better'`` — stated on the wire so the direction never has to
+    be inferred from the field name."""
+    pde_units: str | None = Field(default=None, alias="pdeUnits")
+    """``'angstrom'`` | ``'unverified'`` | ``None``."""
+
+    @property
+    def pde(self) -> PdeScores | None:
+        """PDE bundled with its provenance tags, or ``None`` if no PDE was
+        reported.
+
+        This is the accessor to reach for: it is impossible to obtain a PDE
+        number from it without also holding the engine / kind / scale that say
+        whether the number may be compared to anything.
+
+        >>> fold.pde.cross_engine_rank_value   # safe across engines, may be None
+        >>> fold.pde.interface_pde_min         # raw; single-engine use only
+        """
+        block = PdeScores(
+            gpde=self.gpde,
+            interfaceGpde=self.interface_gpde,
+            interfacePdeMin=self.interface_pde_min,
+            pdeRankable=self.pde_rankable,
+            pdeEngine=self.pde_engine,
+            pdeKind=self.pde_kind,
+            pdeScale=self.pde_scale,
+            pdeInterpretation=self.pde_interpretation,
+            pdeUnits=self.pde_units,
+        )
+        return block if block else None
 
     chain_pair_iptm: dict[str, float] | None = Field(default=None, alias="chainPairIptm")
     per_chain: dict[str, dict[str, float]] | None = Field(default=None, alias="perChain")
