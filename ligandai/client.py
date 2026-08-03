@@ -51,6 +51,7 @@ from ligandai._constants import (
 from ligandai._http import AsyncHTTPTransport, HTTPTransport
 from ligandai.errors import (
     LigandAIAuthError,
+    LigandAILegalAcceptanceRequired,
     LigandAIPaidTierRequired,
     LigandAITierError,
 )
@@ -788,6 +789,12 @@ class LigandAI(_ClientCommon):
         try:
             data = self._transport.request("GET", "/api/cross-species/entitlement") or {}
             self._entitlement = SpeciesEntitlement(**data)
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ Fail-closed is right for an unavailable endpoint, wrong for the
+            # legal gate. This runs on the PRIMARY generate/fold path (species
+            # coercion), so swallowing it silently downgrades the user's
+            # organism instead of telling them to accept the terms.
+            raise
         except Exception:
             # Fail closed: an unavailable/erroring endpoint never grants mouse.
             self._entitlement = self._not_entitled_decision()
@@ -946,6 +953,8 @@ class AsyncLigandAI(_ClientCommon):
                 "GET", "/api/cross-species/entitlement"
             ) or {}
             self._entitlement = SpeciesEntitlement(**data)
+        except LigandAILegalAcceptanceRequired:
+            raise  # see the sync twin — never downgrade species on a legal 403
         except Exception:
             self._entitlement = self._not_entitled_decision()
         return self._entitlement

@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.11.0] — 2026-08-03
+
+> **Note for anyone upgrading from 0.8.3.** 0.9.0 and 0.10.0 were never
+> published to PyPI, so a 0.8.3 user receives all three releases at once. Read
+> the 0.9.0 and 0.10.0 sections below as part of this upgrade.
+
+### Fixed — the legal-acceptance redirect now reaches **every** authenticated call (`bd-dre-2d7za.4`)
+
+0.10.0 added `LigandAILegalAcceptanceRequired` and
+`client.legal.resolve_interactively()`. This release makes them actually
+reachable. The error mapper was correct, but a dozen call sites caught the
+typed exception and destroyed it — so a user who needed to accept the terms
+was told something else entirely, or nothing at all.
+
+- **Server-sent event streams surfaced the wrong exception class entirely.**
+  `stream_lines()` (sync + async) called the error mapper on an **unread**
+  streamed body, so `httpx.ResponseNotRead` was raised before the mapper could
+  parse the payload — discarding the server's JSON, the error code, and the
+  acceptance URL. Every SSE consumer was affected: `job.stream()`,
+  `batch.stream()`, goal-campaign streaming. Error bodies are now read before
+  mapping, so streams raise the same typed errors as any other call.
+- **Boolean helpers no longer swallow the gate.** `jobs.cancel()`,
+  `Job.cancel()`, `memory.delete()`, `programs.archive()`,
+  `proteins.delete_variant()` and `discovery.delete_dataset()` returned
+  `False` on a legal 403 — indistinguishable from a server refusal. They now
+  raise. **Their `-> bool` contract is unchanged for every other error**; only
+  the legal gate propagates.
+- **`KeyWallet.refresh()` no longer re-wraps the gate as `WalletEmpty`**,
+  which pointed users at `client.mint_wallet()` — a call that fails the same
+  way. Other failures still raise `WalletEmpty` as before.
+- **Batch folding no longer reports a bogus timeout.** `BatchFoldJob.wait()`
+  / `.stream()` / `.results` / `.cancel()` (sync + async) treated the gate as
+  a transient poll error, retried until the budget expired, and raised
+  `LigandAITimeoutError`. Likewise `folds.recover(wait=True)`.
+- **Species entitlement no longer silently downgrades your organism.**
+  `client.entitlement()` fails closed on error, which is right for an outage
+  and wrong for the legal gate — it runs on the primary generate/fold path.
+  It now raises on the gate and still fails closed on everything else.
+
+### Changed — the acceptance URL is folded into the message **idempotently**
+
+The server now includes the absolute acceptance URL in the human-readable
+`message` itself, permanently, because clients pinned to old SDK versions,
+`curl` and bare `requests` only ever surface the error string. The SDK
+therefore appends `Accept at: <url>` **only when the URL is not already
+present**, so the URL is never doubled. The server's own wording is never
+rewritten, reordered or stripped — the SDK adds at most a suffix. Legacy
+servers that omit the URL still get one appended, exactly as in 0.10.0.
+
+### Added
+
+- Tests asserting every request shape funnels through the single error mapper:
+  sync/async `request()`, sync/async `stream_lines()`, non-JSON downloads,
+  multipart upload, and the retry path.
+- A regression test that a normal **200** response never touches the legal
+  machinery — no prompt, no poll, no browser, no extra round-trip — so an
+  already-accepted user is unaffected.
+- Tests that the SDK never POSTs an acceptance the user did not click, and
+  never invents a document version.
+
 ## [0.10.0] — 2026-08-03
 
 ### Added — actionable legal-acceptance 403 + headless-safe browser redirect (`bd-dre-0audd.8`)

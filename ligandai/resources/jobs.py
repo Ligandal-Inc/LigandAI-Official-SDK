@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any, Literal
 
 from ligandai._http import parse_sse_data
-from ligandai.errors import LigandAINotFoundError
+from ligandai.errors import LigandAILegalAcceptanceRequired, LigandAINotFoundError
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import JobEvent, JobInfo, StopAllResult
 
@@ -59,6 +59,12 @@ class Jobs(Resource):
         try:
             self._transport.request("POST", f"/api/jobs/{job_id}/cancel")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ Never collapse the legal gate into `return False`. A user
+            # trying to stop a running GPU job would be told cancellation was
+            # refused and keep burning credits, with nothing pointing at the
+            # real cause. Raise so `.acceptance_url` reaches the caller.
+            raise
         except Exception:
             return False
 
@@ -108,6 +114,8 @@ class AsyncJobs(AsyncResource):
         try:
             await self._transport.request("POST", f"/api/jobs/{job_id}/cancel")
             return True
+        except LigandAILegalAcceptanceRequired:
+            raise  # see Jobs.cancel — the legal gate must not become `False`
         except Exception:
             return False
 

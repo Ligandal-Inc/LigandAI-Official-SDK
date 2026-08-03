@@ -698,6 +698,43 @@ class LigandAIConcurrencyLimit(LigandAIError):
         self.limit = limit
 
 
+def _message_already_surfaces_url(message: str, url: str) -> bool:
+    """Whether ``message`` already puts ``url`` in front of the user.
+
+    The server's human-readable ``message`` is now REQUIRED to carry the
+    absolute acceptance URL in plain text, because clients pinned to old SDK
+    versions (0.8.3 and earlier), ``curl`` and bare ``requests`` only ever
+    surface the error string — they know nothing about ``.acceptance_url``.
+    That requirement is permanent, not a stopgap: pinned installs persist
+    indefinitely.
+
+    Consequence for this module: the fold below must be **idempotent**. A
+    naive append would produce a doubled URL for every current-server 403.
+    This predicate is the guard. It is deliberately generous — a false
+    "already present" costs nothing (``.acceptance_url`` is still attached to
+    the exception either way), while a false "absent" produces the doubled
+    URL we are trying to avoid.
+
+    Recognised as already-present:
+
+    - the URL verbatim;
+    - the URL with ``&`` HTML-escaped as ``&amp;`` in the server prose (or the
+      message unescaped back to ``&``) — query strings carry ``&`` between
+      ``return_to`` and ``channel``, so this is the realistic escaping hazard;
+    - the URL modulo a trailing slash on either side.
+    """
+    if not url:
+        return True
+    if url in message:
+        return True
+    if url.replace("&", "&amp;") in message:
+        return True
+    if url in message.replace("&amp;", "&"):
+        return True
+    stripped = url.rstrip("/")
+    return bool(stripped) and stripped in message
+
+
 def error_from_response(
     status_code: int,
     payload: dict[str, Any] | None,
@@ -869,9 +906,19 @@ def error_from_response(
             # Mirror LigandAICreditError's rich pattern: put the actionable
             # URL directly in the message so it shows up in tracebacks/logs
             # even for callers who never inspect `.acceptance_url`.
-            full_message = message
-            if acceptance_url and acceptance_url not in full_message:
-                full_message = f"{message} Accept at: {acceptance_url}"
+            #
+            # ⛔ IDEMPOTENT FOLD. The server now emits the absolute acceptance
+            # URL inside `message` itself (permanent contract — old pinned
+            # clients and curl users only ever see the string). Appending
+            # unconditionally would double it. We append ONLY when the URL is
+            # absent, and we never rewrite, reorder or strip the server's own
+            # wording — the server's phrasing wins and we add at most a
+            # suffix. Legacy servers that omit the URL still get one.
+            full_message = str(message)
+            if acceptance_url and not _message_already_surfaces_url(
+                full_message, acceptance_url
+            ):
+                full_message = f"{full_message} Accept at: {acceptance_url}"
             return LigandAILegalAcceptanceRequired(
                 full_message,
                 acceptance_url=acceptance_url,

@@ -34,6 +34,7 @@ from typing import Any, Callable, Literal
 from ligandai.errors import (
     LigandAICreditError,
     LigandAIError,
+    LigandAILegalAcceptanceRequired,
     LigandAIValidationError,
     LigandAIWaitTimeout,
 )
@@ -1825,6 +1826,9 @@ class BatchFoldJob:
                     continue
                 try:
                     out.append(sub.results)
+                except LigandAILegalAcceptanceRequired:
+                    # ⛔ A legal 403 must not become a silent `None` result.
+                    raise
                 except Exception:
                     out.append(None)
             self._results = out
@@ -1896,6 +1900,13 @@ class BatchFoldJob:
                             done += 1
                             if not sub.succeeded:
                                 failed += 1
+                    except LigandAILegalAcceptanceRequired:
+                        # ⛔ NOT transient. Retrying a legal 403 every tick
+                        # burns the whole wait() budget and then reports a
+                        # LigandAITimeoutError, sending the user to debug a
+                        # job that was never the problem. Surface the
+                        # acceptance URL immediately.
+                        raise
                     except Exception:
                         # Transient — keep retrying on next tick
                         pass
@@ -2000,6 +2011,10 @@ class BatchFoldJob:
                     continue
                 try:
                     sub.refresh()
+                except LigandAILegalAcceptanceRequired:
+                    # ⛔ Not transient — `continue` would spin the stream
+                    # forever without ever telling the user why.
+                    raise
                 except Exception:
                     continue
                 if not sub.is_terminal:
@@ -2014,6 +2029,8 @@ class BatchFoldJob:
                 if sub.succeeded:
                     try:
                         fold = sub.results
+                    except LigandAILegalAcceptanceRequired:
+                        raise  # never emit an empty event for a legal 403
                     except Exception:
                         fold = None
                     yield _BatchFoldEvent.model_validate({
@@ -2065,6 +2082,8 @@ class BatchFoldJob:
             try:
                 if not sub.is_terminal and sub.cancel():
                     n += 1
+            except LigandAILegalAcceptanceRequired:
+                raise  # user is trying to stop paid GPU work; tell them why
             except Exception:
                 pass
         return n
@@ -2185,6 +2204,8 @@ class AsyncBatchFoldJob:
                             done += 1
                             if not sub.succeeded:
                                 failed += 1
+                    except LigandAILegalAcceptanceRequired:
+                        raise  # see BatchFoldJob.wait — not a transient error
                     except Exception:
                         pass
             if on_progress is not None:
@@ -2216,6 +2237,8 @@ class AsyncBatchFoldJob:
                 # if it requires an await on a loader, fall back to a fresh
                 # refresh + parse here.
                 out.append(sub.results)
+            except LigandAILegalAcceptanceRequired:
+                raise  # never a silent `None` result
             except Exception:
                 out.append(None)
         self._results = out
@@ -2239,6 +2262,8 @@ class AsyncBatchFoldJob:
             try:
                 if not sub.is_terminal and await sub.cancel():
                     n += 1
+            except LigandAILegalAcceptanceRequired:
+                raise  # see BatchFoldJob.cancel
             except Exception:
                 pass
         return n

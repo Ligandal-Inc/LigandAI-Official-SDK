@@ -29,6 +29,7 @@ from ligandai.errors import (
     LigandAIError,
     LigandAIIncompleteResult,
     LigandAIJobError,
+    LigandAILegalAcceptanceRequired,
     LigandAITimeoutError,
     LigandAIWaitTimeout,
 )
@@ -328,6 +329,12 @@ class Job(Generic[T]):
         try:
             self._transport.request("POST", path)
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ `LigandAILegalAcceptanceRequired` subclasses LigandAIForbidden
+            # and so is swept up by the `except LigandAIError` below. Let it
+            # through: "cancel returned False" is indistinguishable from a
+            # server refusal, and the user keeps paying for a running job.
+            raise
         except LigandAIError:
             return False
 
@@ -626,6 +633,8 @@ class AsyncJob(Generic[T]):
         try:
             await self._transport.request("POST", path)
             return True
+        except LigandAILegalAcceptanceRequired:
+            raise  # see Job.cancel — must not degrade to `False`
         except LigandAIError:
             return False
 

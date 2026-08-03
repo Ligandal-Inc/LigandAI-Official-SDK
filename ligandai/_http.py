@@ -317,6 +317,16 @@ class HTTPTransport:
             headers=merged_headers,
             timeout=timeout if timeout is not None else None,
         ) as resp:
+            if not resp.is_success:
+                # ⛔ A streamed response has an UNREAD body. `_raise_for_status`
+                # calls `_decode_response`, which touches `resp.content` and
+                # raises `httpx.ResponseNotRead` — so every error on an SSE
+                # endpoint used to surface as an opaque httpx exception with
+                # the server's JSON body discarded. The legal-acceptance 403
+                # (and its acceptance URL) was destroyed before the error
+                # mapper ever saw it. Pull the body in first so the mapper can
+                # do its job; error bodies are small and already terminal.
+                resp.read()
             _raise_for_status(resp)
             for line in resp.iter_lines():
                 if line:
@@ -470,6 +480,11 @@ class AsyncHTTPTransport:
             headers=merged_headers,
             timeout=timeout if timeout is not None else None,
         ) as resp:
+            if not resp.is_success:
+                # See the sync twin: an unread streamed body makes
+                # `_raise_for_status` raise `httpx.ResponseNotRead` instead of
+                # the mapped error, discarding the acceptance URL.
+                await resp.aread()
             _raise_for_status(resp)
             async for line in resp.aiter_lines():
                 if line:

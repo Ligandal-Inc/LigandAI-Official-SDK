@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+from ligandai.errors import LigandAILegalAcceptanceRequired
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     BBBReceptor,
@@ -406,6 +407,9 @@ class Discovery(Resource):
         try:
             self._transport.request("DELETE", f"/api/transcriptomics/datasets/{dataset_id}")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ A legal 403 must not read as "server refused".
+            raise
         except Exception:
             return False
 
@@ -758,6 +762,9 @@ class AsyncDiscovery(AsyncResource):
         try:
             await self._transport.request("DELETE", f"/api/transcriptomics/datasets/{dataset_id}")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ A legal 403 must not read as "server refused".
+            raise
         except Exception:
             return False
 

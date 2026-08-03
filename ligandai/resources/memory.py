@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import List, Literal
 
+from ligandai.errors import LigandAILegalAcceptanceRequired
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import MemoryItem, RecentActivity
 
@@ -59,6 +60,9 @@ class Memory(Resource):
         try:
             self._transport.request("DELETE", f"/api/episodic-memory/{memory_id}")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ A legal 403 must not read as "server refused".
+            raise
         except Exception:
             return False
 
@@ -109,6 +113,9 @@ class AsyncMemory(AsyncResource):
         try:
             await self._transport.request("DELETE", f"/api/episodic-memory/{memory_id}")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ A legal 403 must not read as "server refused".
+            raise
         except Exception:
             return False
 

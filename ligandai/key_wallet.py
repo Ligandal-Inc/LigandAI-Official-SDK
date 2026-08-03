@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from ligandai.errors import (
     KeyTargetMismatch,
+    LigandAILegalAcceptanceRequired,
     LigandAIScopeError,
     WalletEmpty,
 )
@@ -264,6 +265,17 @@ class KeyWallet:
 
         try:
             resp = transport.request("POST", "/api/auth/scoped-key/refresh", json=payload)
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ NEVER re-wrap the legal-acceptance 403. Collapsing it into
+            # WalletEmpty destroys the typed exception: `.acceptance_url`,
+            # `.needs_tos`/`.needs_eula` and the `except
+            # LigandAILegalAcceptanceRequired` handler all disappear, and
+            # `client.legal.resolve_interactively(err)` becomes uncallable —
+            # the user is told to mint a new wallet when what they actually
+            # need is to accept the terms. The acceptance gate is actionable
+            # and must reach the caller intact.
+            # (docs/clickwrap_legal_acceptance.md §3.6)
+            raise
         except Exception as exc:
             # Surface as WalletEmpty so callers get a consistent signal.
             raise WalletEmpty(

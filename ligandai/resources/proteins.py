@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ligandai.errors import LigandAILegalAcceptanceRequired
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     DisorderProfile,
@@ -174,6 +175,9 @@ class Proteins(Resource):
         try:
             self._transport.request("DELETE", f"/api/protein-variants/{variant_id}")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ A legal 403 must not read as "server refused".
+            raise
         except Exception:
             return False
 
@@ -337,6 +341,9 @@ class AsyncProteins(AsyncResource):
         try:
             await self._transport.request("DELETE", f"/api/protein-variants/{variant_id}")
             return True
+        except LigandAILegalAcceptanceRequired:
+            # ⛔ A legal 403 must not read as "server refused".
+            raise
         except Exception:
             return False
 

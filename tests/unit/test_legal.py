@@ -17,12 +17,15 @@ tests/unit/test_errors.py).
 
 from __future__ import annotations
 
+import sys
 import time
+from typing import Any
 
 import pytest
 from pytest_httpx import HTTPXMock
 
 from ligandai import AsyncLigandAI, LigandAI
+from ligandai._headless import is_noninteractive_environment
 from ligandai.errors import (
     LigandAIForbidden,
     LigandAILegalAcceptanceRequired,
@@ -31,6 +34,55 @@ from ligandai.errors import (
 
 BASE = "http://api.ligandai.test"
 STATUS_URL = f"{BASE}/api/legal/status"
+
+
+# ─── stream-state test hygiene ────────────────────────────────────────────
+
+
+class _FakeStream:
+    """Stream stand-in with a pinned ``isatty()``.
+
+    Everything except ``isatty`` forwards to the real stream, so replacing
+    ``sys.stdout`` with one of these cannot break pytest's capture machinery
+    or any incidental ``write()``.
+    """
+
+    def __init__(self, tty: bool, wrapped: Any) -> None:
+        self._tty = tty
+        self._wrapped = wrapped
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+
+def _pin_interactivity_inputs(
+    monkeypatch: pytest.MonkeyPatch, *, stdin_tty: bool, stdout_tty: bool
+) -> None:
+    """Pin EVERY input to :func:`is_noninteractive_environment` explicitly.
+
+    ⛔ Test-hygiene rule from ``docs/clickwrap_legal_acceptance.md`` §3.6: any
+    test touching stream state must stub **both** streams, even though only
+    stdin is consulted. Otherwise the verdict depends on how the *runner* was
+    invoked — pytest swaps ``sys.stdout`` for a non-TTY object under default
+    capture but not under ``pytest -s`` — rather than on the code under test.
+
+    ``DISPLAY``/``WAYLAND_DISPLAY`` are pinned for the same reason, and this
+    half matters more than it looks: on Linux the probe returns non-interactive
+    whenever neither is set, which **dominates the TTY check entirely**. A test
+    that leaves them unset passes vacuously on any headless box (CI, container,
+    this repo's own dev host) and proves nothing about the stdin rule. Verified
+    empirically: with ``DISPLAY`` unset, deleting the stdin stub from
+    ``test_resolve_interactively_no_tty_raises_immediately`` left it green.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.setattr(sys, "stdin", _FakeStream(stdin_tty, sys.stdin))
+    monkeypatch.setattr(sys, "stdout", _FakeStream(stdout_tty, sys.stdout))
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
 
 
 # ─── error_from_response: both server shapes ──────────────────────────────
@@ -99,6 +151,97 @@ def test_error_from_response_generic_403_is_not_legal() -> None:
     )
     assert type(err2) is LigandAIForbidden
     assert not isinstance(err2, LigandAILegalAcceptanceRequired)
+
+
+# ─── idempotent acceptance-URL fold into `.message` ───────────────────────
+#
+# The server's human-readable `message` now carries the absolute acceptance
+# URL itself, permanently — clients pinned to 0.8.3 and earlier, `curl` and
+# bare `requests` only ever surface the error string. The client-side fold
+# must therefore never double it.
+
+
+def test_message_fold_is_idempotent_when_server_message_has_url() -> None:
+    """Current server: URL already in `message` → appended exactly zero times."""
+    url = "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect"
+    err = error_from_response(
+        403,
+        {
+            "error": "Legal acceptance required",
+            "code": "LEGAL_ACCEPTANCE_REQUIRED",
+            "needsToS": True,
+            "needsEULA": True,
+            "acceptanceUrl": url,
+            "message": f"You must accept the Terms of Service. Accept at: {url}",
+        },
+    )
+    assert str(err).count(url) == 1
+    assert "Accept at: Accept at:" not in str(err)
+    assert err.acceptance_url == url
+
+
+def test_message_fold_appends_when_legacy_server_message_lacks_url() -> None:
+    """Legacy server: no URL in `message` → appended exactly once."""
+    url = "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect"
+    err = error_from_response(
+        403,
+        {
+            "error": "Legal acceptance required",
+            "code": "LEGAL_ACCEPTANCE_REQUIRED",
+            "acceptanceUrl": url,
+            "message": "You must accept the Terms of Service to continue.",
+        },
+    )
+    assert str(err).count(url) == 1
+    assert str(err).endswith(f"Accept at: {url}")
+
+
+@pytest.mark.parametrize(
+    "server_message_url",
+    [
+        # Verbatim.
+        "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect",
+        # HTML-escaped query separator — the realistic escaping hazard, since
+        # the query string joins return_to and channel with `&`.
+        "https://ligandai.com/legal/accept?return_to=x&amp;channel=sdk_redirect",
+        # Trailing slash drift between the field and the prose.
+        "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect/",
+    ],
+)
+def test_message_fold_idempotent_across_url_spelling_variants(
+    server_message_url: str,
+) -> None:
+    """Near-miss spellings in the prose still count as already-present.
+
+    A false "absent" doubles the URL; a false "present" costs nothing because
+    `.acceptance_url` is attached to the exception either way. The predicate is
+    deliberately generous in that direction.
+    """
+    url = "https://ligandai.com/legal/accept?return_to=x&channel=sdk_redirect"
+    err = error_from_response(
+        403,
+        {
+            "code": "LEGAL_ACCEPTANCE_REQUIRED",
+            "acceptanceUrl": url,
+            "message": f"Accept the terms at {server_message_url} to continue.",
+        },
+    )
+    assert "Accept at:" not in str(err)
+
+
+def test_message_fold_never_rewrites_server_wording() -> None:
+    """The server's own prose survives verbatim; we only ever add a suffix."""
+    url = "https://ligandai.com/legal/accept?return_to=x"
+    server_message = "Your organization must accept the updated EULA before folding."
+    err = error_from_response(
+        403,
+        {
+            "code": "LEGAL_ACCEPTANCE_REQUIRED",
+            "acceptanceUrl": url,
+            "message": server_message,
+        },
+    )
+    assert str(err).startswith(server_message)
 
 
 # ─── full HTTP round-trip through the transport ───────────────────────────
@@ -190,19 +333,87 @@ def test_resolve_interactively_headless_ci_raises_immediately(
 def test_resolve_interactively_no_tty_raises_immediately(
     monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock, client: LigandAI
 ) -> None:
-    """Non-TTY stdin (piped/redirected), independent of CI env vars."""
-    monkeypatch.delenv("CI", raising=False)
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    """Non-TTY stdin (piped/redirected), independent of CI env vars.
+
+    stdout is deliberately pinned to **TTY** here: this doubles as the
+    Node-parity regression test — non-TTY stdin + TTY stdout must still be
+    non-interactive. If anyone reintroduces a stdout check or an
+    "either stream is a TTY" rule, this test fails.
+    """
+    _pin_interactivity_inputs(monkeypatch, stdin_tty=False, stdout_tty=True)
     err = LigandAILegalAcceptanceRequired(
         "Legal acceptance required.",
         acceptance_url="https://ligandai.com/legal/accept?return_to=x",
         needs_tos=True,
         needs_eula=True,
     )
-    with pytest.raises(LigandAILegalAcceptanceRequired):
+    t0 = time.monotonic()
+    with pytest.raises(LigandAILegalAcceptanceRequired) as excinfo:
         client.legal.resolve_interactively(err, auto_open_browser=True, timeout=30.0)
+    elapsed = time.monotonic() - t0
+    assert excinfo.value is err  # same object, never reconstructed
+    assert elapsed < 2.0  # fails closed immediately, never hangs
     assert httpx_mock.get_requests() == []
+
+
+# ─── the interactivity probe itself: stdin only, never stdout ─────────────
+
+
+def test_headless_probe_reads_stdin_not_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stdin is the signal; stdout is never consulted.
+
+    The decided rule (``docs/clickwrap_legal_acceptance.md`` §3.6, "Interactivity
+    probe — decided, not inherited"): **stdin only**. Python is the reference
+    implementation and Node was changed to match, so this asserts the contract
+    both SDKs are held to.
+
+    Both directions are checked. The second case is the one that catches a
+    regression to an "either stream" rule — TTY stdin with non-TTY stdout must
+    read as interactive.
+    """
+    # Non-TTY stdin + TTY stdout → non-interactive (stdout must not rescue it).
+    _pin_interactivity_inputs(monkeypatch, stdin_tty=False, stdout_tty=True)
+    assert is_noninteractive_environment() is True
+
+    # TTY stdin + non-TTY stdout (the `mytool | tee` shape) → interactive.
+    _pin_interactivity_inputs(monkeypatch, stdin_tty=True, stdout_tty=False)
+    assert is_noninteractive_environment() is False
+
+
+def test_headless_probe_ci_beats_a_full_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CI``/``GITHUB_ACTIONS`` force non-interactive even on a real terminal.
+
+    A CI runner can present a TTY on both streams; the env var is the
+    authoritative signal that nobody is there to click.
+    """
+    _pin_interactivity_inputs(monkeypatch, stdin_tty=True, stdout_tty=True)
+    assert is_noninteractive_environment() is False  # control
+
+    monkeypatch.setenv("CI", "1")
+    assert is_noninteractive_environment() is True
+
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert is_noninteractive_environment() is True
+
+
+def test_headless_probe_linux_requires_a_display(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Linux, no ``DISPLAY``/``WAYLAND_DISPLAY`` → non-interactive even on a TTY.
+
+    There is no X11/Wayland session for ``webbrowser.open`` to target, so the
+    browser redirect cannot work regardless of terminal state.
+    """
+    if not sys.platform.startswith("linux"):
+        pytest.skip("DISPLAY gating is Linux-only by design")
+    _pin_interactivity_inputs(monkeypatch, stdin_tty=True, stdout_tty=True)
+    assert is_noninteractive_environment() is False  # control: DISPLAY pinned to :0
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert is_noninteractive_environment() is True
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert is_noninteractive_environment() is False
 
 
 def test_resolve_interactively_browser_open_returns_false_raises_immediately(
