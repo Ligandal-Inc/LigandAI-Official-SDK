@@ -436,10 +436,22 @@ Error codes: `E001`, `404 structure_not_found`.
 
 | Endpoint | Method | Tier | SDK |
 |----------|--------|------|-----|
-| `/api/v1/folding/predict` | POST | Paid + credits | `client.peptides.fold(...)` |
-| `/api/v1/folding/jobs/:jobId` | GET | Paid | `job.refresh()` / `job.wait()` |
-| `/api/v1/folding/batch` | POST | Paid | `client.peptides.fold_batch(...)` |
-| `/api/v1/folding/jobs/:jobId` | DELETE | Paid | `job.cancel()` |
+| `/api/folding/predict` | POST | Paid + credits | `client.peptides.fold(...)` |
+| `/api/v1/folding/predict-batch` | POST | Paid | `client.peptides.fold_batch(...)` |
+| `/api/folding/jobs/:jobId` | GET | Paid | `job.refresh()` / `job.wait()` |
+| `/api/folding/jobs/:jobId` | DELETE | Paid | `job.cancel()` |
+| `/api/folding/jobs/:jobId/logs/stream` | GET (SSE) | Paid | `job.stream()` |
+
+Note the version prefixes: `predict-batch` is the only folding route under
+`/api/v1`; submission, polling, cancellation and log streaming are all on the
+unversioned `/api/folding` path. Earlier revisions of this table listed
+`/api/v1/folding/predict` and `/api/v1/folding/batch` — neither is called by
+this SDK.
+
+Those two `/api/v1` routes do exist server-side as legacy enterprise endpoints,
+but they accept a bare sequence with no receptor and therefore reject
+`model="boltz2"` with `400 BOLTZ2_REQUIRES_RECEPTOR`. Boltz-2 predicts a
+peptide:receptor complex, so it is only reachable through `fold_batch(...)`.
 
 Error codes: `E001`, `E014`, `E429`, `402 upgrade_required`,
 `402 insufficient credits` (returned with `error: "insufficient_credits"`,
