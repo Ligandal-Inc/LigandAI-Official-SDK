@@ -229,6 +229,73 @@ def test_message_fold_idempotent_across_url_spelling_variants(
     assert "Accept at:" not in str(err)
 
 
+def test_message_fold_against_the_real_server_message() -> None:
+    """The exact default message `buildLegalRequiredBody()` emits.
+
+    Transcribed from W1's measurement of the shipped server function
+    (monorepo commit 81cb845, `server/services/legal-gate.ts`) — obtained by
+    executing it, not by reading the source. Server-side design: the URL is
+    LAST with no trailing punctuation, so select-to-end-of-line in a terminal
+    yields a working URL.
+
+    This is the case that would double the URL if the fold were unconditional.
+    """
+    url = (
+        "https://ligandai.com/legal/accept"
+        "?return_to=%2Fapi%2Fv1%2Ffold&channel=sdk_redirect"
+    )
+    server_message = (
+        "You must accept the Terms of Service and End User License Agreement "
+        "to continue. Open this URL to review and accept: " + url
+    )
+    err = error_from_response(
+        403,
+        {
+            "error": "Legal acceptance required",
+            "code": "LEGAL_ACCEPTANCE_REQUIRED",
+            "needsToS": True,
+            "needsEULA": True,
+            "acceptanceUrl": url,
+            "message": server_message,
+        },
+    )
+    # Not doubled, not rewritten, and still ends with the bare URL so
+    # select-to-end-of-line keeps working through the SDK layer too.
+    assert str(err) == server_message
+    assert str(err).count(url) == 1
+    assert str(err).endswith(url)
+    assert err.acceptance_url == url
+
+
+def test_message_fold_predicate_never_appends_where_substring_match_would_not() -> None:
+    """⛔ PARITY-CRITICAL INVARIANT (and the answer to W1's fragility caveat).
+
+    The predicate is a strict SUPERSET of exact-substring containment: checks 3-5
+    (HTML-escaped `&`, unescaped message, trailing-slash drift) can only ever add
+    "already present" verdicts. They can never cause an append that plain
+    `url in message` would have suppressed.
+
+    So the guard cannot be weakened into re-introducing the doubling — which is
+    the failure mode W1 warned about. Anyone "improving" this must preserve the
+    property asserted here: exact containment ALWAYS wins first.
+    """
+    from ligandai.errors import _message_already_surfaces_url
+
+    url = "https://ligandai.com/legal/accept?return_to=%2Ffold&channel=sdk_redirect"
+    for message in [
+        f"prefix {url} suffix",
+        url,
+        f"{url}.",
+        f"Open this URL to review and accept: {url}",
+        f"line one\nOpen this URL: {url}",
+    ]:
+        assert (url in message) is True
+        assert _message_already_surfaces_url(message, url) is True
+
+    # And the genuinely-absent case still appends.
+    assert _message_already_surfaces_url("no url here at all", url) is False
+
+
 def test_message_fold_never_rewrites_server_wording() -> None:
     """The server's own prose survives verbatim; we only ever add a suffix."""
     url = "https://ligandai.com/legal/accept?return_to=x"
