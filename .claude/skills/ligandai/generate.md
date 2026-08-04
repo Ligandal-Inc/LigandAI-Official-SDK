@@ -57,6 +57,10 @@ job = client.peptides.generate(
 
 ## D. Pocket-targeted (residue-level)
 
+`target_residues`, `avoid_residues` and `hotspot_residues` are **PDB residue
+numbers as numbered in the receptor structure** — not indices into any internal
+array, not sequence offsets. `chain` is honoured.
+
 ```python
 from ligandai import ResidueRange
 
@@ -72,6 +76,36 @@ job = client.peptides.generate(
     auto_fold=True,
 )
 ```
+
+## E. Excluding a surface (`avoid_residues`)
+
+```python
+from ligandai import ResidueRange
+
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=25,
+    hotspot_residues=["A:792", "A:855"],                     # where to bind
+    avoid_residues=[ResidueRange(chain="A", start=719, end=836)],  # keep clear
+    avoid_shell_angstrom=8.0,   # default; 0 = named residues only
+    auto_fold=True,
+)
+```
+
+- Enforced **unconditionally, in every targeting mode** — `target_residues` /
+  `hotspot_residues` / `pocket_config` are all optional for it to apply.
+- The server removes the named residues **and** the residues packing against
+  them within 8 Å (Cα-Cα). Tune with `avoid_shell_angstrom`: omit for the 8.0 Å
+  server default, `0` for named residues only. Range `[0, 50]`, validated
+  client-side before any HTTP call.
+- ⚠ Targeting steers pocket **featurization**. It is a strong prior, **not** a
+  hard geometric constraint — the fold step can still place a peptide on an
+  excluded face. Validate against the folded complex, not the submitted request.
+- Residue numbers absent from the receptor's featurized residue set come back as
+  `unresolved_resnums` on the generation stream's targeting events instead of
+  failing the job. Check that before assuming an exclusion applied.
+- `targeting_strategy` is a run label; it does not itself move the design
+  surface.
 
 ## Cost preview before submitting
 

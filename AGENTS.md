@@ -238,6 +238,28 @@ job = client.peptides.generate(
 )
 ```
 
+**Residue-targeting rules (bd-LIGANDAI_ALPHA_V2-x4vt8):**
+
+- `target_residues`, `avoid_residues` and `hotspot_residues` are **PDB residue
+  numbers as numbered in the receptor structure** being designed against — never
+  0-based indices into an internal array, never sequence positions. `chain` is
+  part of a residue's identity and is honoured; do not drop it.
+- `avoid_residues` is enforced **unconditionally, in every targeting mode**. It
+  does not require `target_residues`, `hotspot_residues` or a pocket config.
+- The server removes the named residues **and** the residues packing against
+  them within 8 Å (Cα-Cα). Tune with `avoid_shell_angstrom`: omit for the 8.0 Å
+  server default, `0` for named residues only. Range `[0, 50]`, validated
+  client-side before any HTTP call.
+- `targeting_strategy` is a run label. The generation backend does not read it;
+  it does not by itself move the design surface.
+- ⚠ Targeting steers pocket **featurization** — a strong prior, **not** a hard
+  geometric constraint. The fold step can still place a peptide on an excluded
+  face. Never report an exclusion as satisfied on the strength of the submitted
+  request; check the folded complex.
+- Residue numbers absent from the receptor's featurized residue set are returned
+  as `unresolved_resnums` on the generation stream's targeting events rather than
+  failing the job. Check that field before concluding an exclusion applied.
+
 ### Workflow 5 — Target discovery (transcriptomics)
 
 When the user doesn't yet know WHICH gene to design against — "find targets",
