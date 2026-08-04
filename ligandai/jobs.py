@@ -31,6 +31,18 @@ from ligandai._http import (
     parse_sse_data,
     parse_sse_event_name,
 )
+from ligandai.diagnostics import (
+    DIAGNOSTIC_CODES,
+    DIAGNOSTIC_EVENT,
+    Diagnostic,
+    diagnostic_from_payload,
+    diagnostics_from_container,
+    is_diagnostic_envelope,
+    make_diagnostic,
+    merge_diagnostics,
+    severity_rank,
+    worst_severity,
+)
 from ligandai.errors import (
     LigandAIError,
     LigandAIIncompleteResult,
@@ -149,7 +161,148 @@ ResultLoader = Callable[[JobInfo], dict[str, Any] | None]
 AsyncResultLoader = Callable[[JobInfo], Awaitable[dict[str, Any] | None] | dict[str, Any] | None]
 
 
-class Job(Generic[T]):
+class _DiagnosticsAccumulator:
+    """Per-job diagnostics accumulation, shared by :class:`Job` / :class:`AsyncJob`.
+    [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
+
+    WHY: a customer excluded surface residues, the exclusion was silently a
+    no-op, and 25/25 designs bound the excluded region. The SDK told them
+    nothing. Diagnostics now arrive on THREE paths and land in one place:
+
+    - the canonical ``diagnostic`` SSE event (``job.stream()``),
+    - a ``diagnostics: [...]`` array on any job/results REST payload
+      (``job.wait()`` / ``job.refresh()`` / ``job.results``), and
+    - the three PROTECTED legacy targeting SSE events, normalized here so an
+      older server that has not yet grown the canonical event still surfaces
+      the same problem.
+
+    All three feed :attr:`diagnostics`. Severity ``warning`` and above ALSO
+    fires a :class:`~ligandai.errors.LigandAITargetingWarning`, because a
+    caller who never reads ``job.diagnostics`` must still be told.
+
+    NOTHING IS EVER FILTERED BY CODE. An unrecognized code is surfaced in full
+    — that is the whole point of the contract.
+    """
+
+    _diagnostics: list[Diagnostic]
+    #: ``(code, subject_id)`` pairs already seen, so a legacy-derived duplicate
+    #: of a canonical diagnostic does not warn twice.
+    _diagnostic_warn_keys: set[tuple[str, str]]
+
+    def _init_diagnostics(self) -> None:
+        self._diagnostics = []
+        self._diagnostic_warn_keys = set()
+
+    @property
+    def diagnostics(self) -> list[Diagnostic]:
+        """Every diagnostic this job has produced so far, in arrival order.
+
+        A snapshot — mutating the returned list does not affect the job. Empty
+        (never ``None``) when the run was clean or the server predates the
+        diagnostics contract.
+
+        ::
+
+            job = client.peptides.generate(gene="BRD4", avoid_residues=[...])
+            job.wait()
+            for d in job.diagnostics:
+                if d.severity == "error":
+                    raise SystemExit(f"{d.title}: {d.message}\\n{d.remediation}")
+        """
+        return list(self._diagnostics)
+
+    @property
+    def worst_diagnostic_severity(self) -> str | None:
+        """Highest severity among :attr:`diagnostics`, or ``None`` when clean."""
+        return worst_severity(self._diagnostics)
+
+    def diagnostics_at_least(self, severity: str = "warning") -> list[Diagnostic]:
+        """Diagnostics at or above ``severity`` — the usual CI gate::
+
+            if job.diagnostics_at_least("error"):
+                raise SystemExit("targeting did not do what was asked")
+        """
+        threshold = severity_rank(severity)
+        return [d for d in self._diagnostics if severity_rank(d.severity) >= threshold]
+
+    def _record_diagnostics(
+        self,
+        incoming: list[Diagnostic],
+        *,
+        warn: bool,
+        legacy: bool = False,
+        stacklevel: int = 4,
+    ) -> list[Diagnostic]:
+        """Merge ``incoming`` into the job's list; return the newly-added ones.
+
+        ``legacy=True`` marks diagnostics reconstructed from the pre-contract
+        SSE events: they warn only when no canonical diagnostic with the same
+        ``(code, subject_id)`` has already been recorded, so a server that
+        emits BOTH the legacy event and the canonical ``diagnostic`` event does
+        not double-warn the user.
+        """
+        if not incoming:
+            return []
+        merged, added = merge_diagnostics(self._diagnostics, incoming)
+        self._diagnostics = merged
+        for diag in added:
+            key = (diag.code, diag.subject_id or "")
+            already = key in self._diagnostic_warn_keys
+            self._diagnostic_warn_keys.add(key)
+            if not warn:
+                continue
+            if legacy and already:
+                continue
+            if severity_rank(diag.severity) < severity_rank("warning"):
+                continue
+            warnings.warn(diag.format(), LigandAITargetingWarning, stacklevel=stacklevel)
+        return added
+
+    def _absorb_payload(self, payload: Any) -> None:
+        """Pick up a ``diagnostics: [...]`` array from a REST job/results body.
+
+        Called on every status refresh and on the initial submit response, so
+        ``wait()``-style callers (who never touch ``stream()``) see the same
+        diagnostics a streaming caller does.
+        """
+        try:
+            found = diagnostics_from_container(payload)
+        except Exception:  # pragma: no cover - defensive; never fail a poll
+            return
+        self._record_diagnostics(found, warn=True, stacklevel=4)
+
+    def _absorb_stream_event(self, data: dict[str, Any], event_name: str | None) -> None:
+        """Route one parsed SSE frame into the diagnostics channel."""
+        try:
+            self._absorb_stream_event_inner(data, event_name)
+        except Exception:  # pragma: no cover - defensive; never break a stream
+            return
+
+    def _absorb_stream_event_inner(self, data: dict[str, Any], event_name: str | None) -> None:
+        is_canonical = (
+            event_name == DIAGNOSTIC_EVENT
+            or data.get("event") == DIAGNOSTIC_EVENT
+            or data.get("type") == DIAGNOSTIC_EVENT
+            or is_diagnostic_envelope(data)
+        )
+        if is_canonical:
+            diag = diagnostic_from_payload(data, default_stage="generate")
+            if diag is not None:
+                self._record_diagnostics([diag], warn=True, stacklevel=5)
+                return
+
+        # A non-diagnostic event may still carry a diagnostics array (e.g. a
+        # terminal `complete` frame echoing the job's accumulated list).
+        embedded = diagnostics_from_container(data)
+        if embedded:
+            self._record_diagnostics(embedded, warn=True, stacklevel=5)
+
+        legacy = _legacy_targeting_diagnostics(data, event_name)
+        if legacy:
+            self._record_diagnostics(legacy, warn=True, legacy=True, stacklevel=5)
+
+
+class Job(_DiagnosticsAccumulator, Generic[T]):
     """A long-running server-side job.
 
     Created by resource methods like ``client.peptides.generate(...)`` and
@@ -200,6 +353,11 @@ class Job(Generic[T]):
             initial if initial is not None else {"id": job_id, "type": job_type, "status": "queued"}
         )
         self._result: T | None = None
+        # [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] The submit response itself can carry
+        # request-stage diagnostics (e.g. param_ignored) — absorb them before
+        # the caller ever polls.
+        self._init_diagnostics()
+        self._absorb_payload(initial)
 
     @property
     def id(self) -> str:
@@ -274,11 +432,13 @@ class Job(Generic[T]):
 
     def _result_payload(self) -> dict[str, Any]:
         payload = dict(self._info.result or {})
+        self._absorb_payload(payload)
         if self._result_loader is None:
             return payload
         loaded = self._result_loader(self._info)
         if not loaded:
             return payload
+        self._absorb_payload(loaded)
         return _merge_result_payload(payload, loaded)
 
     def _compute_eta_seconds(self) -> float | None:
@@ -321,6 +481,10 @@ class Job(Generic[T]):
         # Server schemas vary slightly by endpoint; normalize to JobInfo fields.
         normalized = _normalize_job_payload(payload, self._job_id, self._job_type)
         self._info = JobInfo.model_validate(normalized)
+        # [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] REST surface: any job/results body
+        # carrying `diagnostics` feeds job.diagnostics, so a wait()-only caller
+        # sees exactly what a stream() caller sees. Repeat polls de-duplicate.
+        self._absorb_payload(payload)
         return self
 
     def poll(self) -> JobInfo:
@@ -500,7 +664,10 @@ class Job(Generic[T]):
                     if data is None:
                         continue
                     data = _merge_sse_event_name(data, last_event_name)
-                    _maybe_warn_targeting_event(data, last_event_name)
+                    # [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] Canonical `diagnostic`
+                    # events, embedded diagnostics arrays, and the legacy
+                    # targeting events all land on job.diagnostics here.
+                    self._absorb_stream_event(data, last_event_name)
                     last_event_name = None
                     yield JobEvent.model_validate(_normalize_event_payload(data))
                 # The SSE endpoint closed cleanly. Refresh once and emit a
@@ -566,8 +733,12 @@ class Job(Generic[T]):
             time.sleep(DEFAULT_POLL_INTERVAL_SECS)
 
 
-class AsyncJob(Generic[T]):
-    """Async sibling of :class:`Job`. See :class:`Job` for full semantics."""
+class AsyncJob(_DiagnosticsAccumulator, Generic[T]):
+    """Async sibling of :class:`Job`. See :class:`Job` for full semantics.
+
+    Exposes the same :attr:`~_DiagnosticsAccumulator.diagnostics` surface,
+    populated from the same three paths. [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
+    """
 
     def __init__(
         self,
@@ -594,6 +765,8 @@ class AsyncJob(Generic[T]):
             initial if initial is not None else {"id": job_id, "type": job_type, "status": "queued"}
         )
         self._result: T | None = None
+        self._init_diagnostics()
+        self._absorb_payload(initial)
 
     @property
     def id(self) -> str:
@@ -642,6 +815,8 @@ class AsyncJob(Generic[T]):
         payload = await self._transport.request("GET", path) or {}
         normalized = _normalize_job_payload(payload, self._job_id, self._job_type)
         self._info = JobInfo.model_validate(normalized)
+        # See Job.refresh — REST diagnostics reach wait()-only callers.
+        self._absorb_payload(payload)
         return self
 
     async def poll(self) -> JobInfo:
@@ -744,6 +919,7 @@ class AsyncJob(Generic[T]):
 
     async def _result_payload(self) -> dict[str, Any]:
         payload = dict(self._info.result or {})
+        self._absorb_payload(payload)
         if self._result_loader is None:
             return payload
         loaded = self._result_loader(self._info)
@@ -751,6 +927,7 @@ class AsyncJob(Generic[T]):
             loaded = await loaded
         if not loaded:
             return payload
+        self._absorb_payload(loaded)
         return _merge_result_payload(payload, loaded)
 
     async def stream(self) -> AsyncIterator[JobEvent]:
@@ -772,7 +949,8 @@ class AsyncJob(Generic[T]):
                     if data is None:
                         continue
                     data = _merge_sse_event_name(data, last_event_name)
-                    _maybe_warn_targeting_event(data, last_event_name)
+                    # [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] See Job.stream().
+                    self._absorb_stream_event(data, last_event_name)
                     last_event_name = None
                     yield JobEvent.model_validate(_normalize_event_payload(data))
                 await self.refresh()
@@ -950,36 +1128,182 @@ def _merge_sse_event_name(data: dict[str, Any], event_name: str | None) -> dict[
     become indistinguishable from one another. Never overrides a
     ``type``/``event``/``stage`` key the payload already carries.
     """
+    # [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] The canonical `diagnostic` envelope
+    # ALWAYS carries its own `stage` (a pipeline stage: generate/fold/...), so
+    # the generic guard below would leave `event_type` reading "generate" and
+    # a caller filtering `e.event_type == "diagnostic"` would never match.
+    # The SSE event name is the authority on WHAT KIND of frame this is; the
+    # envelope's `stage` says WHERE it happened. Both are preserved.
+    if event_name == DIAGNOSTIC_EVENT and data.get("event") != DIAGNOSTIC_EVENT:
+        return {**data, "event": DIAGNOSTIC_EVENT}
     if event_name and not any(k in data for k in ("type", "event", "stage")):
         return {**data, "event": event_name}
     return data
 
 
-def _maybe_warn_targeting_event(data: dict[str, Any], event_name: str | None) -> None:
-    """Mirror a server-sent ``targeting_warning`` SSE event onto the SDK's
-    warning channel, in addition to the :class:`~ligandai.types.JobEvent`
-    already carrying it in the stream. [bd-LIGANDAI_ALPHA_V2-x4vt8]
-
-    A caller using ``job.wait()`` (never touching ``job.stream()``) would
-    otherwise silently miss a degenerate-pocket warning entirely — the
-    warning channel is the only place it's guaranteed to surface. Matches on
-    the event name/type/stage being ``"targeting_warning"``, OR on the
-    payload independently carrying ``degenerate: true`` /
-    ``code: "degenerate_pocket_after_avoid"`` — the event's ``code`` is an
-    open enum server-side (contract §3: "treat unknown codes as warnings, do
-    not throw"), so this does not require an exact code match.
-    """
-    kind = data.get("event") or data.get("type") or data.get("stage") or event_name
-    is_degenerate = data.get("degenerate") is True or data.get("code") == "degenerate_pocket_after_avoid"
-    if kind != "targeting_warning" and not is_degenerate:
-        return
+def _legacy_targeting_message(data: dict[str, Any]) -> str:
+    """The exact human message the SDK has always raised for a server
+    ``targeting_warning`` event. Kept byte-identical — callers match on it."""
     gene = data.get("gene")
     code = data.get("code") or "targeting_warning"
-    message = data.get("message") or (
-        f"Targeting warning for {gene!r} ({code}): the design pocket may be "
-        f"degenerate after avoid_residues was applied."
-        if gene
-        else f"Targeting warning ({code}): the design pocket may be degenerate "
+    message = data.get("message")
+    if isinstance(message, str) and message:
+        return message
+    if gene:
+        return (
+            f"Targeting warning for {gene!r} ({code}): the design pocket may be "
+            f"degenerate after avoid_residues was applied."
+        )
+    return (
+        f"Targeting warning ({code}): the design pocket may be degenerate "
         f"after avoid_residues was applied."
     )
-    warnings.warn(message, LigandAITargetingWarning, stacklevel=4)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _legacy_targeting_diagnostics(
+    data: dict[str, Any], event_name: str | None
+) -> list[Diagnostic]:
+    """Normalize the three PROTECTED legacy targeting SSE events into canonical
+    :class:`~ligandai.diagnostics.Diagnostic` envelopes.
+    [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
+
+    FastAPI keeps emitting ``target_residues_applied`` /
+    ``avoid_residues_applied`` / ``targeting_warning`` unchanged (contract §1,
+    those emit sites are protected), and the Express layer is what adds the
+    canonical ``diagnostic`` event. A caller pointed at a server where that
+    normalizer has not landed yet would otherwise get an EMPTY
+    ``job.diagnostics`` for the exact failure this bead exists to fix — an
+    exclusion that resolved to nothing. So the SDK reconstructs the same
+    envelopes locally from the legacy payloads.
+
+    Diagnostics produced here carry ``details["source"] = "legacy_sse_event"``.
+    When the canonical event is also present, the duplicate is recorded but
+    does NOT warn a second time (see
+    :meth:`_DiagnosticsAccumulator._record_diagnostics`).
+
+    Returns ``[]`` for every other event — this never invents a diagnostic for
+    a clean run.
+    """
+    kind = data.get("event") or data.get("type") or data.get("stage") or event_name
+    gene = data.get("gene") if isinstance(data.get("gene"), str) else None
+    out: list[Diagnostic] = []
+
+    def _details(**extra: Any) -> dict[str, Any]:
+        merged: dict[str, Any] = {"source": "legacy_sse_event", "event": kind}
+        merged.update(extra)
+        if gene:
+            merged["gene"] = gene
+        return merged
+
+    # (a) targeting_warning / an independent `degenerate: true` flag. Matches
+    #     the pre-existing warn rule exactly: the event's `code` is an open
+    #     enum server-side, so an unrecognized code still surfaces.
+    is_degenerate = (
+        data.get("degenerate") is True or data.get("code") == "degenerate_pocket_after_avoid"
+    )
+    if kind == "targeting_warning" or is_degenerate:
+        raw_code = data.get("code")
+        code = (
+            raw_code
+            if isinstance(raw_code, str) and raw_code.strip()
+            else "degenerate_pocket_after_avoid"
+        )
+        out.append(
+            make_diagnostic(
+                code,
+                _legacy_targeting_message(data),
+                _details(
+                    pocket_residue_count=data.get("pocket_residue_count"),
+                    degenerate=data.get("degenerate"),
+                ),
+                # An unknown code has no registry severity; a targeting warning
+                # is never merely informational, so floor it at "warning".
+                severity=None if code in DIAGNOSTIC_CODES else "warning",
+                stage="generate",
+                subject_id=gene,
+            )
+        )
+        return out
+
+    unresolved = data.get("unresolved_resnums")
+    unresolved_list = list(unresolved) if isinstance(unresolved, list) else []
+
+    # (b) avoid_residues_applied — the customer's exact failure. `named_excluded`
+    #     is how many of the residues they NAMED actually got excluded; zero of
+    #     them with a non-empty unresolved list means the exclusion was a no-op.
+    if kind == "avoid_residues_applied" and unresolved_list:
+        removed = data.get("removed_resnums")
+        resolved_count = _int_or_none(data.get("named_excluded"))
+        if resolved_count is None:
+            resolved_count = len(removed) if isinstance(removed, list) else 0
+        requested = resolved_count + len(unresolved_list)
+        if resolved_count <= 0:
+            out.append(
+                make_diagnostic(
+                    "avoid_residues_none_resolved",
+                    f"None of the {len(unresolved_list)} residue(s) you asked to avoid "
+                    f"({unresolved_list}) were found on the receptor"
+                    f"{f' for {gene}' if gene else ''} — the exclusion had NO EFFECT on "
+                    f"this run.",
+                    _details(requested=requested, unresolved_resnums=unresolved_list),
+                    subject_id=gene,
+                )
+            )
+        else:
+            out.append(
+                make_diagnostic(
+                    "avoid_residues_unresolved",
+                    f"{len(unresolved_list)} of {requested} residue(s) you asked to avoid "
+                    f"({unresolved_list}) were not found on the receptor"
+                    f"{f' for {gene}' if gene else ''}; {resolved_count} were excluded.",
+                    _details(
+                        requested=requested,
+                        unresolved_resnums=unresolved_list,
+                        resolved_count=resolved_count,
+                    ),
+                    subject_id=gene,
+                )
+            )
+        return out
+
+    # (c) target_residues_applied — same shape, opposite direction.
+    if kind == "target_residues_applied" and unresolved_list:
+        resolved = data.get("resolved_resnums")
+        resolved_list = list(resolved) if isinstance(resolved, list) else []
+        requested = len(resolved_list) + len(unresolved_list)
+        if not resolved_list:
+            out.append(
+                make_diagnostic(
+                    "target_residues_none_resolved",
+                    f"None of the {len(unresolved_list)} target residue(s) you named "
+                    f"({unresolved_list}) were found on the receptor"
+                    f"{f' for {gene}' if gene else ''} — generation fell back to the "
+                    f"unfiltered pocket.",
+                    _details(requested=requested, unresolved_resnums=unresolved_list),
+                    subject_id=gene,
+                )
+            )
+        else:
+            out.append(
+                make_diagnostic(
+                    "target_residues_unresolved",
+                    f"{len(unresolved_list)} of {requested} target residue(s) you named "
+                    f"({unresolved_list}) were not found on the receptor"
+                    f"{f' for {gene}' if gene else ''}; the run used the "
+                    f"{len(resolved_list)} that resolved.",
+                    _details(
+                        requested=requested,
+                        unresolved_resnums=unresolved_list,
+                        resolved_count=len(resolved_list),
+                    ),
+                    subject_id=gene,
+                )
+            )
+    return out
+
