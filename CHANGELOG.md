@@ -6,6 +6,96 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [Unreleased]
+
+### Fixed — `target_residues` / `avoid_residues` / `hotspot_residues` are PDB residue numbers, and now say so (`bd-LIGANDAI_ALPHA_V2-x4vt8`)
+
+A P0 customer bug: a customer excluded BRD4-ET loop residues 36-46 via
+`avoid_residues`, and 25/25 designed peptides bound that exact loop anyway.
+Root cause was server-side (`start`/`end` were briefly treated as 0-based
+indices into the pocket-feature array instead of PDB residue numbers, and
+`chain` was ignored) — the server fix already landed
+(`fastapi_backend/core/residue_targeting.py`). This release hardens the SDK
+surface so the same mistake is caught **client-side, before any HTTP call**,
+instead of silently no-op'ing on the server.
+
+- **New client-side validation** (`ligandai._targeting`) runs before every
+  `Peptides.generate()` / `AsyncPeptides.generate()` / `Goals.campaign_start()`
+  / `Goals.drive()` call that accepts `target_residues`, `avoid_residues`,
+  `hotspot_residues`, or `avoid_shell_angstrom`. Raises
+  `LigandAIValidationError` (never reaches the wire) for: a residue number
+  `< 1` (the array-index mistake — the message spells out what happened),
+  non-integer start/end, an unrecognized region shape, a malformed `chain`,
+  or a region spanning more than 5,000 residues. Warns (via the new
+  `LigandAITargetingWarning` category) for: `start > end` (auto-swapped to
+  match server behaviour), a region missing `chain` in a request that also
+  names multiple chains, `avoid_shell_angstrom=0`, and an `avoid_residues`
+  span that is likely to leave a degenerate pocket.
+- **`avoid_shell_angstrom`** — new parameter on `Peptides.generate()` /
+  `AsyncPeptides.generate()` / `Goals.campaign_start()` / `Goals.drive()`
+  (and their async twins). Controls the Cα-Cα packing-shell radius (default
+  server-side 8.0 Å, `0` disables) removed around `avoid_residues` in
+  addition to the named residues themselves.
+- **`hotspot_residues`** — new parameter on `Peptides.generate()` /
+  `AsyncPeptides.generate()`: a flat list of PDB residue numbers to bind at
+  (or `{"chain", "residue"}` dicts for convenience). Threaded to the wire as
+  both `hotspotResidues` and `hotspot_residues`.
+- **`avoidRegions` wire shape fixed.** The body sent for `avoid_residues` now
+  includes the canonical `start`/`end` keys alongside the legacy
+  `startResidue`/`endResidue` keys, and no longer silently defaults a missing
+  `start`/`end` to `0` — the exact array-index bug class this bead exists to
+  kill. (Client-side validation now guarantees `start`/`end` are always
+  present integers `>= 1` before this code runs.)
+- **SSE event names were being discarded.** The server formats every
+  generation-stream event as a standard two-line SSE block
+  (`event: <name>\ndata: {...}`) without repeating `<name>` inside the JSON
+  body. `Job.stream()` / `AsyncJob.stream()` only ever read `data:` lines, so
+  every event without its own `type`/`event`/`stage` JSON key — including
+  `target_residues_applied`, `avoid_residues_applied`, and
+  `targeting_warning` — collapsed into the generic `"message"` event type.
+  Both now track the standalone `event:` line and merge it in as a fallback,
+  so unknown/future event types are forwarded with their real name instead of
+  being silently flattened.
+- **`targeting_warning` is now dual-channel.** A server-sent
+  `targeting_warning` event (or any event independently carrying
+  `degenerate: true` / `code: "degenerate_pocket_after_avoid"`) is now ALSO
+  emitted via `warnings.warn(..., LigandAITargetingWarning)`, so a caller
+  using `job.wait()` — never touching `job.stream()` — still sees it.
+- **New typed shapes**: `ligandai.TargetRegion` / `ligandai.HotspotResidue`
+  (`TypedDict`), documenting the canonical `{chain, start, end}` /
+  `{chain, residue}` wire shapes. `ResidueRange`'s docstring now states the
+  PDB-numbering rule explicitly.
+- **New exceptions/warnings**: `ligandai.LigandAIConnectionError` (a
+  connection-level failure — DNS, refused/reset connection, TLS handshake,
+  connect/read/write timeout — now surfaces as a distinct typed error rather
+  than a raw `httpx.TransportError` once retries are exhausted) and
+  `ligandai.LigandAITargetingWarning` (see above).
+
+### Changed — transport hardening audit (`bd-LIGANDAI_ALPHA_V2-x4vt8` §5)
+
+- Retry backoff now adds jitter (`tenacity.wait_exponential_jitter`) instead
+  of a bare exponential curve, and **honours the server's `Retry-After` /
+  `X-RateLimit-Reset`** when present on a 429 — previously that value was
+  parsed onto `LigandAIRateLimitError.retry_after` but never fed back into
+  the retry loop's wait duration.
+- **POST/PATCH are no longer retried automatically.** Only
+  GET/HEAD/PUT/DELETE/OPTIONS (idempotent by definition) are retried on
+  429/5xx/connection errors. A POST whose response was merely lost — not its
+  effect — used to risk a duplicate submission (double credit charge, double
+  GPU job) when the retry wrapper resent it. Pass the new `idempotency_key=`
+  kwarg on `transport.request(...)` to opt a POST into the same retry policy
+  (sent as the `Idempotency-Key` header).
+- **Explicit connect-phase timeout**, distinct from (and shorter than by
+  default) the overall read/write/pool timeout — a dead TCP handshake now
+  fails fast independent of how long a caller configured `timeout=` to wait
+  for a slow-but-alive server. New `connect_timeout=` kwarg on `LigandAI` /
+  `AsyncLigandAI` / `HTTPTransport` / `AsyncHTTPTransport` (default
+  `min(10, timeout)`).
+- Audited (not rewritten) per the hardening contract: non-2xx responses were
+  already never swallowed (`_raise_for_status` always raises); connection
+  errors during SSE streaming (`stream_lines()`) now also wrap into
+  `LigandAIConnectionError`, matching `request()`.
+
 ## [0.11.0] — 2026-08-03
 
 > **Note for anyone upgrading from 0.8.3.** 0.9.0 and 0.10.0 were never

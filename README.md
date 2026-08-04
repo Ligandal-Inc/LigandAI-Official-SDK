@@ -342,6 +342,59 @@ job = client.peptides.generate(
 )
 ```
 
+#### `target_residues` / `avoid_residues` / `hotspot_residues` are PDB residue numbers
+
+**Not 0-based array indices, and not sequence positions.** `start`/`end` (or
+a single `residue`) are the residue numbers as numbered in the
+uploaded/resolved structure — the same numbers you'd read off the PDB file or
+a structure viewer. `chain` is part of a residue's identity: pass it whenever
+your request could span more than one chain.
+
+The SDK validates this **client-side, before any HTTP call** — passing `0`
+(the classic "I meant array index 0" mistake) raises
+`ligandai.LigandAIValidationError` immediately, rather than the server
+silently no-oping the request:
+
+```python
+>>> client.peptides.generate(gene="EGFR", avoid_residues=[{"chain": "A", "start": 0, "end": 10}])
+ligandai.errors.LigandAIValidationError: avoid_residues[0]: residue numbers are
+PDB numbering and start at 1; got start=0. If you meant an array index, that is
+not supported — pass the residue number shown in the structure.
+```
+
+`avoid_residues` excludes a receptor surface from the design pocket —
+enforced **unconditionally, in every targeting mode** (`target_residues` /
+`hotspot_residues` are not required for it to apply). By default the server
+also removes the residues packing directly against each named one (within
+`avoid_shell_angstrom`, default 8.0 Å Cα-Cα) — excluding only the literal
+named residues would leave their immediate neighbours in the pocket:
+
+```python
+from ligandai import LigandAI, ResidueRange
+
+client = LigandAI(api_key="lgai_basic_...")
+
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=25,
+    hotspot_residues=[792, 855],  # bind here (flat PDB resnums)
+    avoid_residues=[ResidueRange(chain="A", start=719, end=724)],  # keep this clear
+    avoid_shell_angstrom=8.0,     # default; pass 0 to exclude ONLY the named residues
+    auto_fold=True,
+)
+```
+
+Targeting steers pocket **featurization** — a strong prior, not a hard
+geometric constraint. The downstream folding step can still place a peptide
+on an excluded face, so validate an exclusion against the folded complex
+(`target_residues_applied` / `avoid_residues_applied` events on
+`job.stream()`, or `fastapi_backend/core/residue_targeting.py`'s
+`contacts_violating_avoid()` server-side), not just against the request you
+submitted. A `targeting_warning` event (e.g. a near-empty pocket after
+`avoid_residues` was applied) is surfaced both on `job.stream()` and via
+`warnings.warn(..., ligandai.LigandAITargetingWarning)`, so it's visible even
+if you only call `job.wait()`.
+
 ## Authentication
 
 ```python
@@ -828,7 +881,8 @@ from ligandai import (
     LigandAINotFoundError, # 404
     LigandAIRateLimitError, # 429 — rate limit
     LigandAIServerError, # 5xx (auto-retried)
-    LigandAIValidationError, # 400/422
+    LigandAIValidationError, # 400/422 — also raised CLIENT-SIDE for pre-flight checks
+    LigandAIConnectionError, # DNS/refused/reset/TLS/timeout — surfaced once retries are exhausted
 )
 
 try:
@@ -837,16 +891,45 @@ except LigandAIUpgradeRequired as e:
     print(f"Upgrade: {e.current_tier} → {e.required_tier} ({e.upgrade_url})")
 except LigandAICreditError as e:
     print(f"Need {e.required} credits, have {e.available}")
+except LigandAIConnectionError as e:
+    print(f"Couldn't reach the server: {e.original_error}")
 ```
+
+`LigandAITargetingWarning` (a `UserWarning` subclass, not an exception) is
+emitted via `warnings.warn(...)` for non-fatal issues with
+`target_residues`/`avoid_residues`/`hotspot_residues`/`avoid_shell_angstrom`
+— catch it explicitly with `warnings.catch_warnings()` /
+`warnings.simplefilter("error", LigandAITargetingWarning)` if you want CI to
+fail on a degenerate targeting config instead of just printing.
 
 See [docs/error_codes.md](docs/error_codes.md) for the full table of
 HTTP status codes, server `code` strings, and matching SDK exceptions.
 
 ## Retry & Rate Limiting
 
-The SDK automatically retries on `429`, `5xx`, and transient network errors
-with exponential backoff (configurable via `max_retries=`). It also respects
-`Retry-After` and `X-RateLimit-Reset` headers.
+The SDK automatically retries `GET`/`HEAD`/`PUT`/`DELETE`/`OPTIONS` on `429`,
+`5xx`, and transient connection errors, with exponential backoff **+ jitter**
+(configurable via `max_retries=`). It honours `Retry-After` and
+`X-RateLimit-Reset` headers as the actual wait duration, not just a value on
+the exception.
+
+**`POST`/`PATCH` are sent at most once** unless you pass
+`idempotency_key=` — retrying a POST whose *response* was merely lost (not
+its effect) risks a duplicate submission (double credit charge, double GPU
+job). Resource methods that wrap `transport.request(...)` internally accept
+this by threading it through to the underlying call; at the transport level:
+
+```python
+client.transport.request(
+    "POST", "/api/some/endpoint", json={"...": "..."},
+    idempotency_key="my-caller-generated-uuid",
+)
+```
+
+Connect-phase timeout is explicit and separate from the overall
+read/write/pool timeout (`connect_timeout=` on `LigandAI(...)`, default
+`min(10, timeout)`) — a dead TCP handshake fails fast independent of how long
+you're willing to wait for a slow-but-alive server.
 
 Per-tier rate limits:
 

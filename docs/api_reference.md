@@ -71,6 +71,7 @@ Error codes: `E001`, `404` (program not found).
 
 | Endpoint | Method | Tier | SDK |
 |----------|--------|------|-----|
+| `/api/ptf/parallel/generate` | POST | All (limits vary) | `client.peptides.generate(...)` |
 | `/api/v1/peptides/by-gene` | GET | Paid | `client.peptides.by_gene(...)` |
 | `/api/v1/peptides/list` | GET | All (free = masked) | `client.peptides.list(...)` |
 | `/api/v1/peptides/list_by_program` (alias of list) | GET | All (free = masked) | `client.peptides.list_by_program(...)` |
@@ -78,6 +79,37 @@ Error codes: `E001`, `404` (program not found).
 | `/api/v1/peptides/auto-generate-until` | POST | All (free = masked) | `client.peptides.fill_until(...)` |
 | `/api/v1/structures/:pdbId/pocket` | GET | All | `client.peptides.pocket_for_hotspots(...)` |
 | `/api/v1/peptides/:id` | GET | Paid | `client.peptides.get(id, ...)` |
+
+### `POST /api/ptf/parallel/generate` — residue targeting fields (`bd-LIGANDAI_ALPHA_V2-x4vt8`)
+
+`target_residues`, `avoid_residues`, and `hotspot_residues` are **PDB residue
+numbers as numbered in the uploaded/resolved structure** — never 0-based
+indices into the pocket-feature array, and never sequence positions.
+`chain` is part of a residue's identity. This is validated **client-side**
+(`ligandai._targeting`, called from `Peptides.generate()` /
+`AsyncPeptides.generate()` / `Goals.campaign_start()` / `Goals.drive()`)
+before any HTTP call — a `start`/`end`/`residue` `< 1` raises
+`LigandAIValidationError` immediately rather than reaching the server.
+
+| SDK kwarg | Wire key(s) | Shape |
+|---|---|---|
+| `target_residues` | `targets[0].targetResidues` | `[{chain, start, end}, ...]` — canonical |
+| `avoid_residues` | `avoidRegions` | `[{chain, start, end, startResidue, endResidue}, ...]` — both canonical and legacy Express-facing keys are sent |
+| `hotspot_residues` | `hotspotResidues` / `hotspot_residues` | flat `[int, ...]` (PDB resnums; `{chain, residue}` dicts also accepted client-side, normalized to ints) |
+| `avoid_shell_angstrom` | `avoidShellAngstrom` / `avoid_shell_angstrom` | `float`, range `[0, 50]`; server default `8.0` when omitted |
+
+`avoid_residues` is enforced **unconditionally, in every targeting mode** —
+`target_residues` / `hotspot_residues` are not required for it to apply. By
+default the server also removes the residues packing against each named one
+(within `avoid_shell_angstrom`, Cα-Cα); pass `avoid_shell_angstrom=0` to
+exclude only the literally-named residues.
+
+The generation SSE stream (`job.stream()`, `sse_path=/api/ptf/parallel/{id}/stream`)
+surfaces `target_residues_applied`, `avoid_residues_applied`, and
+`targeting_warning` events with their real event names (previously these
+collapsed into a generic `"message"` event — see CHANGELOG `[Unreleased]`). A
+`targeting_warning` is also mirrored to `warnings.warn(...,
+ligandai.LigandAITargetingWarning)` so it's visible even via `job.wait()`.
 
 ### `GET /api/v1/peptides/list`
 
