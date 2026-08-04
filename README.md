@@ -3,36 +3,42 @@
 Official Python SDK for the [LIGANDAI](https://ligandai.com) platform — peptide
 design, structure prediction, scoring, and discovery.
 
-> **v0.6.0** — `client.structures.get(gene)` now accepts `pdb_code=`,
-> `isoform=`, `species=`, and `declared_gene_set=` kwargs so SDK callers
-> can pin a specific PDB, an isoform (e.g. CLDN18.2), a non-human species
-> (mouse / rat / cyno / rhesus / pig / dog / rabbit / zebrafish / chimp), or
-> force a monomer-vs-multimer disambiguation. New: `list_isoforms(gene)`
-> and `list_species(gene)` to enumerate. Backwards-compatible — no kwargs
-> = unchanged human-default fast path. Also: tier resolution is now
-> `max(key_prefix_tier, account_tier)` so an upgraded enterprise account
-> with a pro-prefixed key gets enterprise privs (no more post-upgrade
-> 401s). Backend resolver parallelized: high-PDB-count genes (KRAS,
-> EGFR, TP53) resolve in ~2 s instead of the prior 90 s timeout, with
-> a 6 h in-process LRU cache for repeats. See [CHANGELOG.md](CHANGELOG.md)
-> for details.
+<!--
+  ANTI-DRIFT CONTRACT — read before editing the banner below.
 
-> **v0.5.6** — SDK hardening: `gpu="b200_plus"` is the only accepted GPU type
-> (2x/4x/8x B200 / H100 / A100 raise `LigandAIInvalidConfig` before any
-> network call); identical `fold` / `fold_batch` calls within 24h return the
-> cached `Job` handle from a local sqlite at `~/.ligandai/submitted.db`;
-> client-side credit pre-flight raises `LigandAIInsufficientCredits` if your
-> balance can't cover the batch. See
-> [Concurrency & Quota](#concurrency--quota) and
-> [Credit Tracking](#credit-tracking) below, or
-> [CHANGELOG.md](CHANGELOG.md).
+  This README is the PyPI long description. Whatever version it names is what
+  https://pypi.org/project/ligandai/#description advertises to the world, and
+  it only changes when a new release is published.
 
-> **v0.5.0** — `peptides.list(program_id)` now works (no more `TypeError`),
-> plus new `peptides.search(...)`, `structures.list(program_id)`, and
-> `structures.get_pdb(id)`. See
-> [`docs/api_reference.md`](docs/api_reference.md),
-> [`docs/workflows.md`](docs/workflows.md), and
-> [`docs/error_codes.md`](docs/error_codes.md), or [CHANGELOG.md](CHANGELOG.md).
+  RULES:
+    1. Exactly ONE version banner lives here. Do NOT append a new banner above
+       the existing one — replace it. (This file previously accumulated a stack
+       of v0.6.0 / v0.5.6 / v0.5.0 banners; the top one went stale for five
+       minor releases and shipped "v0.6.0" to PyPI while 0.11.0 was current.)
+    2. The version named below MUST equal [project].version in pyproject.toml.
+    3. Full release history belongs in CHANGELOG.md — the single source of
+       truth for per-release detail. Never duplicate it here.
+
+  ENFORCEMENT: node scripts/check-docs-drift.mjs (in the LIGANDAI_ALPHA_V2
+  repo) parses the banner version out of this file and fails when it disagrees
+  with pyproject.toml or with the version PyPI actually serves.
+-->
+
+> **v0.11.0** — the legal-acceptance gate now reaches **every** authenticated
+> call. SSE streams (`job.stream()`, `batch.stream()`, goal campaigns) raise the
+> same typed errors as any other request instead of `httpx.ResponseNotRead`, and
+> the boolean helpers (`jobs.cancel()`, `memory.delete()`, `programs.archive()`,
+> …) no longer swallow the gate by returning `False`.
+>
+> Upgrading from 0.8.3 also delivers **0.10.0** — actionable legal-acceptance
+> 403 via `LigandAILegalAcceptanceRequired`, headless-safe
+> `client.legal.resolve_interactively()`, and the `ligandai legal` CLI — and
+> **0.9.0** — PDE (predicted distance error) callable on every fold-score
+> surface through `fold.pde`, plus `pde_max` / `pde_engine` / `sort="pde"`
+> filters on `peptides.search()`. 0.9.0 and 0.10.0 were never published to
+> PyPI, so a 0.8.3 user receives all three releases at once.
+>
+> See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## Concurrency & Quota
 
