@@ -31,6 +31,7 @@ from pathlib import Path
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, Callable, Literal
 
+from ligandai._targeting import validate_and_normalize_targeting
 from ligandai.errors import (
     LigandAICreditError,
     LigandAIError,
@@ -437,6 +438,10 @@ def _generation_body(
     length_range: tuple[int, int],
     target_residues: list[ResidueRange] | None,
     avoid_residues: list[ResidueRange] | None,
+    # PDB-numbered hotspot residues (flat list), and the Ca-Ca packing-shell
+    # radius grown around avoid_residues. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+    hotspot_residues: list[int] | None,
+    avoid_shell_angstrom: float | None,
     target_chains: list[str] | None,
     fold_partners: _FoldPartnerMode | list[str] | None,
     targeting_strategy: _TargetingStrategy | None,
@@ -506,6 +511,23 @@ def _generation_body(
     cascade_gate_top_n: int | None,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    # Client-side targeting validation — BEFORE any HTTP call.
+    # [bd-LIGANDAI_ALPHA_V2-x4vt8] target_residues/avoid_residues/hotspot_residues
+    # are PDB residue numbers, never 0-based array indices; see
+    # ligandai._targeting for the full rule set. target_residues/avoid_residues
+    # are validated here but kept in their ORIGINAL shape below (ResidueRange or
+    # dict) so per-region `label` fields survive serialization unchanged — only
+    # hotspot_residues/avoid_shell_angstrom (which have no prior serialization
+    # path) take the validator's normalized return value.
+    _targeting_normalized = validate_and_normalize_targeting(
+        target_residues=target_residues,
+        avoid_residues=avoid_residues,
+        hotspot_residues=hotspot_residues,
+        avoid_shell_angstrom=avoid_shell_angstrom,
+    )
+    hotspot_residues = _targeting_normalized["hotspot_residues"]
+    avoid_shell_angstrom = _targeting_normalized["avoid_shell_angstrom"]
+
     # Auto-resolve targeting_strategy when not explicitly set:
     #   * target_residues present → "pocket_targeted" (treat residues as a real pocket)
     #   * otherwise → "full_surface"
@@ -648,23 +670,60 @@ def _generation_body(
     # Avoid residues — receptor regions the peptide must NOT bind. Serialized
     # as ``avoidRegions`` (top-level body key), which the Express layer reads
     # alongside ``targetRegions`` and forwards to FastAPI as ``avoid_residues``.
-    # The server uses these to subtract residues from the design pocket so the
-    # generation conditioning actively steers away from the orthosteric site or
-    # any other user-specified region.
+    #
+    # start/end are PDB RESIDUE NUMBERS as numbered in the receptor structure
+    # (not indices into any internal array); ``chain`` is honoured. The server
+    # removes those residues, plus a CA-CA packing shell around them
+    # (``avoid_shell_angstrom``, default 8.0 A), from the pocket the generator is
+    # conditioned on. Enforced in EVERY targeting mode — no target_residues
+    # required.
+    #
+    # This is a featurization prior, NOT a hard geometric constraint: the fold
+    # step can still place a peptide on an excluded face.
     # Uses the same ResidueRange shape as target_residues.
     if avoid_residues is not None:
         serialized_avoid = _serialize_residue_ranges(avoid_residues)
         if serialized_avoid is not None:
-            # Rewrite to the shape Express reads: {chain, startResidue, endResidue}
+            # Emit BOTH the Express-legacy {chain, startResidue, endResidue}
+            # shape AND the canonical {chain, start, end} shape (contract
+            # §"SDK rule": SDKs emit the canonical form; extra keys are
+            # harmless/ignored by any reader that only looks at one shape).
+            # [bd-LIGANDAI_ALPHA_V2-x4vt8] Values are validated (start/end
+            # are ints >= 1) by validate_and_normalize_targeting() above, so
+            # NO fallback default is used here — a missing start/end at this
+            # point is a bug in the validator, not something to paper over
+            # with a silent 0 (0 is exactly the array-index mistake this
+            # bead exists to kill).
             body["avoidRegions"] = [
                 {
                     "chain": r.get("chain", "A"),
-                    "startResidue": r.get("start", r.get("startResidue", 0)),
-                    "endResidue": r.get("end", r.get("endResidue", 0)),
+                    "start": r["start"] if "start" in r else r["startResidue"],
+                    "end": r["end"] if "end" in r else r["endResidue"],
+                    "startResidue": r["start"] if "start" in r else r["startResidue"],
+                    "endResidue": r["end"] if "end" in r else r["endResidue"],
                 }
                 for r in serialized_avoid
                 if isinstance(r, dict)
             ]
+
+    # Ca-Ca packing-shell radius (Angstrom) grown around avoid_residues.
+    # None = server default (8.0 A, residue_targeting.DEFAULT_SHELL_CA_ANGSTROM);
+    # 0 disables the shell (named residues only). Validated by
+    # validate_and_normalize_targeting() above (0-50 A range).
+    # [bd-LIGANDAI_ALPHA_V2-x4vt8] Dual-emitted camelCase + snake_case, matching
+    # this body builder's existing convention for program_db_id/conversation_id.
+    if avoid_shell_angstrom is not None:
+        body["avoidShellAngstrom"] = avoid_shell_angstrom
+        body["avoid_shell_angstrom"] = avoid_shell_angstrom
+
+    # Hotspot residues — flat list of PDB residue numbers (not indices; see
+    # target_residues/avoid_residues above for the same rule). Distinct from
+    # pocket_expansion_radius_a's hotspot-adjacent expansion: this is the
+    # literal residue list forwarded to FastAPI's `hotspot_residues` field.
+    # [bd-LIGANDAI_ALPHA_V2-x4vt8]
+    if hotspot_residues:
+        body["hotspotResidues"] = hotspot_residues
+        body["hotspot_residues"] = hotspot_residues
 
     # Receptor flexible residues — 1-based receptor residue indices the backend
     # is allowed to relax during generation/docking (side-chain / limited
@@ -2667,19 +2726,46 @@ class Peptides(Resource):
         gene: str,
         num_peptides: int | None = None,
         length_range: tuple[int, int] = (20, 70),
+        # PDB RESIDUE NUMBERS as numbered in the receptor structure being designed
+        # against — NOT indices into any internal array, and not sequence offsets.
+        # `chain` is honoured. If your construct is renumbered 1..N, use the
+        # construct's numbering.
         target_residues: list[ResidueRange] | None = None,
-        # Receptor regions the peptide must NOT bind. The server subtracts these
-        # from the design pocket so generation conditioning steers away from the
-        # listed residues (e.g. the canonical orthosteric site). Same shape as
-        # target_residues: list of ResidueRange (or dicts with chain/start/end).
-        # When combined with target_residues, the server uses the intersection
-        # (target minus avoid) as the actual design surface.
+        # Receptor regions the peptide must NOT bind, in the same PDB numbering as
+        # target_residues (list of ResidueRange, or dicts with chain/start/end).
+        # The server removes these residues — and, by default, the residues packing
+        # against them within 8 A (CA-CA) — from the pocket the generator is
+        # conditioned on.
+        #
+        # Enforced UNCONDITIONALLY, in every targeting mode: you do NOT need to
+        # supply target_residues/hotspot_residues/pocket_config for it to apply.
+        # (It previously only subtracted from an already-narrowed target
+        # selection, so naming an avoid region alone produced no exclusion.)
+        #
+        # This steers pocket FEATURIZATION. It is a strong prior, not a hard
+        # geometric constraint — the downstream folding step can still place a
+        # peptide on an excluded face. Validate exclusions against the folded
+        # complex, not against the request you submitted.
         avoid_residues: list[ResidueRange] | None = None,
+        # Flat list of PDB residue numbers (e.g. [792, 855]) to bind at — NOT
+        # indices, NOT sequence positions. `{"chain": "A", "residue": 792}`
+        # dicts are also accepted (chain is dropped before the request is
+        # sent; hotspot_residues has no chain on the wire). Validated
+        # client-side (>= 1) before any HTTP call.
+        # [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        hotspot_residues: list[int] | None = None,
+        # Ca-Ca radius (Angstrom) of the packing shell removed around
+        # avoid_residues, in addition to the named residues themselves.
+        # None = server default (8.0 A); 0 disables the shell (named
+        # residues only). Valid range [0, 50]. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        avoid_shell_angstrom: float | None = None,
         target_chains: list[str] | None = None,
         fold_partners: _FoldPartnerMode | list[str] | None = None,
-        # When target_residues are supplied, the SDK auto-switches the strategy
-        # to "pocket_targeted" unless you override here. Pass "full_surface"
-        # explicitly to keep the residues as soft hints only.
+        # Run LABEL only — recorded on the run for bookkeeping/display. The
+        # generation backend does not read it, and it does not by itself move the
+        # design surface; steering comes from target_residues / hotspot_residues /
+        # pocket_config / avoid_residues. When target_residues are supplied the
+        # SDK auto-switches this to "pocket_targeted" unless you override here.
         targeting_strategy: _TargetingStrategy | None = None,
         # Receptor topology FACE override (bd-LIGANDAI_ALPHA_V2-q3z1b). For a
         # membrane receptor target, restrict the design pocket to a specific
@@ -2804,15 +2890,61 @@ class Peptides(Resource):
                 basic=100, academia/pro=300, enterprise=1000.
             length_range: ``(min_aa, max_aa)`` length bounds (default ``(20, 70)``).
             target_residues: Optional pocket residue ranges for guided targeting.
-                Multiple ranges may target one or more receptor chains. Use
+                ``start``/``end`` are **PDB residue numbers as numbered in the
+                receptor structure** — not indices into an internal array, not
+                sequence offsets — and ``chain`` is honoured. Multiple ranges may
+                target one or more receptor chains. Use
                 ``ResidueRange.from_residues([32, 33, 34], chain="A")`` to
                 compress selected residues into continuous chain-local ranges.
+            avoid_residues: Receptor residue ranges the peptide must NOT bind,
+                in the same PDB numbering as ``target_residues``. The server
+                removes them — and, by default, the residues packing against them
+                within 8 Å (Ca-Ca) — from the pocket the generator is conditioned
+                on. Excluding only the named residues would leave their immediate
+                neighbours available, and a peptide steered onto those neighbours
+                still lies across the surface you asked to keep clear.
+
+                Enforced **unconditionally, in every targeting mode** — you do not
+                need to supply ``target_residues``, ``hotspot_residues`` or a
+                pocket config for it to apply.
+
+                This steers pocket **featurization**: it is a strong prior, not a
+                hard geometric constraint. The downstream folding step can still
+                place a peptide on an excluded face, so validate an exclusion
+                against the folded complex rather than against the request you
+                submitted. Residue numbers with no counterpart in the receptor's
+                featurized residue set are reported as ``unresolved_resnums`` on
+                the generation stream's targeting events instead of failing the
+                job — check that before assuming an exclusion applied.
+            hotspot_residues: Flat list of PDB residue numbers to bind at, e.g.
+                ``[792, 855]`` — **PDB numbering, never an array index or
+                sequence position** [bd-LIGANDAI_ALPHA_V2-x4vt8]. A
+                ``{"chain": "A", "residue": 792}`` dict is also accepted per
+                entry for bookkeeping convenience; only the residue number
+                reaches the server (this field has no chain on the wire).
+                Validated client-side (values must be integers >= 1) before
+                any HTTP call — raises
+                :class:`~ligandai.errors.LigandAIValidationError` immediately
+                rather than submitting a request that silently no-ops.
+            avoid_shell_angstrom: Ca-Ca radius (Angstrom) of the packing shell
+                removed around ``avoid_residues``, in addition to the named
+                residues themselves — the default (``None`` → server default
+                of 8.0 Å) also excludes residues packing directly against an
+                avoided one, since a peptide steered onto an avoided
+                residue's immediate neighbour still lies across the surface
+                you asked to keep clear. Pass ``0`` to exclude only the
+                literally-named residues. Valid range ``[0, 50]``; validated
+                client-side before any HTTP call.
             target_chains: Optional list of chain IDs (e.g. ``["C"]``) to
                 restrict design to. Use this when a multimer (e.g. PDB
                 ``9MIR``) has chains A/B/C/D and you only want peptides
                 designed against chain C. The server filters conformations
                 and the binding surface to only those chains.
             targeting_strategy: ``"full_surface"`` or ``"pocket_targeted"``.
+                Recorded on the run as a label; the generation backend does not
+                read it and it does not by itself move the design surface.
+                Steering comes from ``target_residues`` / ``hotspot_residues`` /
+                ``avoid_residues``.
             receptor_flexible_residues: 1-based receptor residue indices the
                 backend may relax (side-chain / limited backbone flexibility)
                 during generation/docking. ``None`` (default) keeps the receptor
@@ -2962,6 +3094,8 @@ class Peptides(Resource):
             length_range=length_range,
             target_residues=target_residues,
             avoid_residues=avoid_residues,
+            hotspot_residues=hotspot_residues,
+            avoid_shell_angstrom=avoid_shell_angstrom,
             target_chains=target_chains,
             fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
@@ -5230,14 +5364,25 @@ class AsyncPeptides(AsyncResource):
         gene: str,
         num_peptides: int | None = None,
         length_range: tuple[int, int] = (20, 70),
+        # PDB residue numbers as numbered in the receptor structure — not indices
+        # into any internal array. `chain` is honoured.
         target_residues: list[ResidueRange] | None = None,
-        # Receptor regions the peptide must NOT bind. See Peptides.generate docs.
+        # Receptor regions the peptide must NOT bind, same PDB numbering. Removed
+        # along with an 8 A CA-CA packing shell, in EVERY targeting mode (no
+        # target_residues required). Steers featurization — a strong prior, not a
+        # hard geometric constraint. See Peptides.generate docs.
         avoid_residues: list[ResidueRange] | None = None,
+        # Flat list of PDB residue numbers, or {"chain","residue"} dicts — see
+        # Peptides.generate docs. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        hotspot_residues: list[int] | None = None,
+        # Ca-Ca packing-shell radius (Angstrom) around avoid_residues. None =
+        # server default (8.0 A); 0 disables. See Peptides.generate docs.
+        avoid_shell_angstrom: float | None = None,
         target_chains: list[str] | None = None,
         fold_partners: _FoldPartnerMode | list[str] | None = None,
-        # When target_residues are supplied, the SDK auto-switches the strategy
-        # to "pocket_targeted" unless you override here. Pass "full_surface"
-        # explicitly to keep the residues as soft hints only.
+        # Run label only — not read by the generation backend. When
+        # target_residues are supplied the SDK auto-switches this to
+        # "pocket_targeted" unless you override here.
         targeting_strategy: _TargetingStrategy | None = None,
         # Receptor topology FACE override (bd-LIGANDAI_ALPHA_V2-q3z1b). For a
         # membrane receptor target, restrict the design pocket to a specific
@@ -5376,6 +5521,8 @@ class AsyncPeptides(AsyncResource):
             length_range=length_range,
             target_residues=target_residues,
             avoid_residues=avoid_residues,
+            hotspot_residues=hotspot_residues,
+            avoid_shell_angstrom=avoid_shell_angstrom,
             target_chains=target_chains,
             fold_partners=fold_partners,
             targeting_strategy=targeting_strategy,
