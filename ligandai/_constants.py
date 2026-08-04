@@ -129,6 +129,37 @@ DEFAULT_MAX_RETRIES: int = 5
 DEFAULT_RETRY_BASE_DELAY: float = 1.0
 DEFAULT_RETRY_MAX_DELAY: float = 30.0
 
+# Explicit connect timeout, distinct from (and shorter than) the overall
+# read/write/pool timeout above — a dead TCP handshake should fail fast even
+# when the caller configured a generous ``timeout`` for a long-running GPU
+# job's status polling. Caller-overridable via ``connect_timeout=`` on
+# ``HTTPTransport`` / ``AsyncHTTPTransport`` / ``LigandAI`` / ``AsyncLigandAI``.
+# [bd-LIGANDAI_ALPHA_V2-x4vt8]
+DEFAULT_CONNECT_TIMEOUT_SECS: float = 10.0
+
+# ─── Residue-targeting client-side validation (bd-LIGANDAI_ALPHA_V2-x4vt8) ──
+#
+# ``target_residues`` / ``avoid_residues`` / ``hotspot_residues`` are PDB
+# residue numbers as numbered in the uploaded structure — never 0-based array
+# indices. See ``ligandai._targeting`` for the validator that enforces this
+# client-side, matching fastapi_backend/core/residue_targeting.py and the
+# Node SDK byte-for-byte (docs/x4vt8_contract.md §4/§6).
+
+# Ca-Ca packing-shell radius grown around ``avoid_residues`` server-side.
+# Mirrors ``residue_targeting.DEFAULT_SHELL_CA_ANGSTROM``. 0.0 disables the
+# shell (named residues only, no neighbour exclusion).
+DEFAULT_AVOID_SHELL_ANGSTROM: float = 8.0
+MIN_AVOID_SHELL_ANGSTROM: float = 0.0
+# A shell this large would swallow most single-domain receptors — the
+# contract's explicit sanity ceiling.
+MAX_AVOID_SHELL_ANGSTROM: float = 50.0
+
+# A region spanning more residues than this is almost certainly a
+# transposed-argument / index-confusion mistake (e.g. passing an array
+# length as ``end``), not a legitimate pocket — reject it client-side rather
+# than sending a nonsensical multi-thousand-residue "pocket" to the server.
+MAX_REGION_SPAN_RESIDUES: int = 5000
+
 # Job polling defaults.
 DEFAULT_POLL_INTERVAL_SECS: float = 2.0
 DEFAULT_JOB_TIMEOUT_SECS: float = 1800.0  # 30 minutes — generation+fold can take this long

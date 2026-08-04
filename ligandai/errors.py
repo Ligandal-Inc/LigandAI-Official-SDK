@@ -324,6 +324,33 @@ class LigandAIServerError(LigandAIError):
     """
 
 
+class LigandAIConnectionError(LigandAIError):
+    """The request never reached the server — DNS failure, refused connection,
+    TLS handshake failure, or a connect/read/write timeout.
+
+    Distinct from :class:`LigandAIServerError` (which means the server *did*
+    respond, just with a 5xx). The SDK retries these transparently (same
+    policy as 5xx/429) up to ``max_retries``; this is what's raised once
+    retries are exhausted, wrapping the underlying ``httpx`` transport
+    exception so callers never have to catch a raw ``httpx.TransportError``.
+
+    Attributes
+    ----------
+    original_error : str | None
+        ``repr()`` of the underlying ``httpx`` exception, for debugging.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        original_error: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.original_error = original_error
+
+
 class LigandAIValidationError(LigandAIError):
     """400 — request payload failed server-side validation.
 
@@ -696,6 +723,29 @@ class LigandAIConcurrencyLimit(LigandAIError):
         super().__init__(message, **kwargs)
         self.in_flight = in_flight
         self.limit = limit
+
+
+# ─── Warning categories ─────────────────────────────────────────────────────
+
+
+class LigandAITargetingWarning(UserWarning):
+    """Non-fatal issue with ``target_residues`` / ``avoid_residues`` /
+    ``hotspot_residues`` / ``avoid_shell_angstrom`` (bd-LIGANDAI_ALPHA_V2-x4vt8).
+
+    Raised via ``warnings.warn(..., LigandAITargetingWarning)`` for conditions
+    that are legal but likely mistakes — e.g. a region given without ``chain``
+    in a multi-chain request, ``avoid_shell_angstrom=0`` (packing shell
+    disabled), an avoid span at least as large as the target span (likely
+    degenerate pocket), or the server reporting a
+    ``targeting_warning`` / ``degenerate_pocket_after_avoid`` SSE event mid-run.
+
+    Catch it explicitly to fail CI on a degenerate targeting config::
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", LigandAITargetingWarning)
+            client.peptides.generate(gene="EGFR", avoid_residues=[...])
+    """
 
 
 def _message_already_surfaces_url(message: str, url: str) -> bool:

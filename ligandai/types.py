@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -555,7 +555,58 @@ class StructureCandidate(_LGModel):
     notes: str | None = None
 
 
+class TargetRegion(TypedDict, total=False):
+    """Wire shape of one ``target_residues`` / ``avoid_residues`` entry:
+    ``{"chain": "A", "start": 36, "end": 46}``, canonical PDB numbering.
+
+    See :class:`ResidueRange` for the full semantics — this ``TypedDict`` is
+    for callers who'd rather build the plain-dict shape directly (e.g. from
+    JSON) than construct a :class:`ResidueRange`. Both are accepted
+    interchangeably by :meth:`~ligandai.resources.peptides.Peptides.generate`.
+    """
+
+    chain: str
+    start: int
+    end: int
+
+
+class HotspotResidue(TypedDict, total=False):
+    """Dict shape accepted for one ``hotspot_residues`` entry:
+    ``{"chain": "A", "residue": 792}``.
+
+    The wire format ``hotspot_residues`` sends to the server is a flat list
+    of PDB residue numbers (``[792, 855]``) — this dict form is an SDK-side
+    convenience when a chain needs to travel alongside the residue for your
+    own bookkeeping; only the residue number reaches the server. Same
+    PDB-numbering rule as :class:`TargetRegion`: 1-based, never an array
+    index [bd-LIGANDAI_ALPHA_V2-x4vt8].
+    """
+
+    chain: str
+    residue: int
+
+
 class ResidueRange(_LGModel):
+    """An inclusive receptor residue range, in PDB numbering.
+
+    ``start`` and ``end`` are **PDB residue numbers as numbered in the receptor
+    structure being designed against** — the uploaded PDB, or the structure the
+    platform resolved for the gene. They are NOT indices into any internal
+    array and NOT offsets from the start of the sequence. ``chain`` is honoured;
+    if your construct is renumbered 1..N, use the construct's own numbering.
+
+    Used by ``Peptides.generate(target_residues=..., avoid_residues=...)``.
+    Residue numbers with no counterpart in the receptor's featurized residue set
+    are reported as ``unresolved_resnums`` on the generation stream's targeting
+    events rather than failing the job.
+
+    Client-side validation (:mod:`ligandai._targeting`) rejects ``start`` /
+    ``end`` ``< 1`` with :class:`~ligandai.errors.LigandAIValidationError`
+    before any HTTP call — that is the array-index-instead-of-residue-number
+    mistake that silently no-op'd an exclusion in production
+    [bd-LIGANDAI_ALPHA_V2-x4vt8].
+    """
+
     chain: str = "A"
     start: int
     end: int
