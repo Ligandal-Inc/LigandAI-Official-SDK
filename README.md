@@ -874,6 +874,92 @@ async def design_for_genes(genes):
 results = asyncio.run(design_for_genes(["EGFR", "HER2", "KIT"]))
 ```
 
+## Diagnostics — did the run actually do what you asked?
+
+A high-confidence result is not the same thing as the result you asked for.
+A customer excluded a surface loop via `avoid_residues`, the exclusion was
+silently a no-op, and 25/25 designed peptides bound that exact loop. Nothing
+told them; they found out by eyeballing structures.
+
+Every job now carries structured diagnostics you can branch on:
+
+```python
+job = client.peptides.generate(
+    gene="BRD4",
+    avoid_residues=[{"chain": "A", "start": 36, "end": 46}],
+)
+job.wait()
+
+for d in job.diagnostics:
+    print(f"[{d.severity}] {d.code}: {d.message}")
+    if d.remediation:
+        print(f"  → {d.remediation}")
+    print(f"  details: {d.details}")
+
+# The check the customer never had — fail the pipeline instead of shipping
+# designs that ignored the constraint:
+if job.diagnostics_at_least("error"):
+    raise SystemExit("targeting did not do what was asked")
+```
+
+Each entry is a `Diagnostic` with a stable `code`, a `severity`
+(`info` / `warning` / `error`), the pipeline `stage` it came from, a human
+`message`, an actionable `remediation`, and a machine-readable `details`
+payload. `job.worst_diagnostic_severity` is the one-line summary.
+
+They arrive the same way whichever call style you use — the canonical
+`diagnostic` SSE event during `job.stream()`, a `diagnostics` array on the
+REST job/results payload for `job.wait()`, and the SDK's own pre-flight
+validation before any HTTP call. Severity `warning` and above **also** raises
+on the `warnings` channel, so a caller who never inspects `job.diagnostics`
+is still told:
+
+```python
+import warnings
+from ligandai import LigandAIDiagnosticWarning
+
+# Turn every platform diagnostic into an exception (good for CI):
+warnings.simplefilter("error", LigandAIDiagnosticWarning)
+```
+
+Client-side validation returns its diagnostics too, so you can inspect what
+the SDK objected to instead of catching warnings:
+
+```python
+from ligandai._targeting import validate_and_normalize_targeting
+
+result = validate_and_normalize_targeting(
+    target_residues=[{"chain": "A", "start": 1, "end": 10}],
+    avoid_residues=[{"chain": "A", "start": 1, "end": 10}],
+)
+[d.code for d in result.diagnostics]   # ['degenerate_pocket_risk']
+```
+
+**A code the SDK does not recognize is never filtered out.** Newer server
+codes reach you in full (`d.is_known_code is False`, unknown envelope keys
+preserved on `d.raw`) — dropping what it did not recognize is how the SDK
+went silent in the first place. `ligandai.known_codes()` lists the taxonomy
+this build ships; see [`docs/api_reference.md`](docs/api_reference.md) for
+the full table.
+
+### SDK version advisory
+
+The platform reports on every response whether your SDK build is still
+current (`X-LigandAI-SDK-Status` / `-Latest` / `-Min-Supported`). An outdated
+client is not cosmetic — it is the one that silently drops a request
+parameter a newer server expects. When the server flags it you get an
+`sdk_outdated` (or `sdk_unsupported`) diagnostic and a
+`LigandAIVersionWarning`, **once per process**, with the exact upgrade
+command. The SDK never upgrades itself.
+
+```python
+for d in client.check_compatibility():   # explicit, on demand; [] when current
+    print(d.message)
+```
+
+Opt out with `LIGANDAI_SKIP_VERSION_CHECK=1` (also silences the PyPI update
+nag) or `LIGANDAI_SKIP_SERVER_VERSION_CHECK=1`.
+
 ## Errors
 
 ```python

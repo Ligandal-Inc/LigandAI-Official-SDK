@@ -555,3 +555,147 @@ as previews and prompt the user to upgrade for full data.
 CSV/PDB exports also set the response headers:
 - `X-LigandAI-Tier`
 - `X-LigandAI-Tier-Visibility: full | redacted`
+
+## Diagnostics (`job.diagnostics`) — bd-LIGANDAI_ALPHA_V2-x4vt8.3.2
+
+A customer excluded surface residues on their target. The exclusion was
+silently a no-op and 25/25 designed peptides bound the excluded region.
+Nothing in the product told them. Diagnostics are the fix for the SILENCE,
+and they are machine-readable so you can gate on them in CI instead of
+eyeballing structures.
+
+### The envelope
+
+Every diagnostic — over SSE, over REST, or raised client-side — is the same
+snake_case object:
+
+```json
+{
+  "schema_version": 1,
+  "code": "avoid_residues_none_resolved",
+  "severity": "info | warning | error",
+  "stage": "request | generate | fold | results | client",
+  "title": "None of your excluded residues were found",
+  "message": "None of the 11 residues you asked to avoid were found on BRD4.",
+  "remediation": "Re-run with residue numbers taken from the structure itself.",
+  "details": { "requested": 11, "unresolved_resnums": [36, 37, 38] },
+  "doc_anchor": "sdk/python/allosteric-targeting#event-avoid",
+  "occurred_at": "2026-08-04T18:22:01Z",
+  "subject_id": "BRD4"
+}
+```
+
+`code` is the join key across FastAPI, Express, both SDKs, and the website.
+`doc_anchor` is relative — the full URL is
+`https://ligandai.com/docs/<doc_anchor>`. In Python the envelope is
+`ligandai.Diagnostic`; `d.to_dict()` returns exactly the JSON above.
+
+**Unknown codes are never filtered.** A code this SDK build has never seen
+reaches you in full, with `d.is_known_code == False` and any unrecognized
+envelope keys preserved on `d.raw`. An SDK that dropped what it did not
+recognize would reintroduce the exact defect this exists to close.
+
+### Where they show up
+
+| Transport | How the SDK surfaces it |
+| --- | --- |
+| SSE `event: diagnostic` | `job.stream()` yields a `JobEvent` with `event_type == "diagnostic"`, **and** the envelope lands on `job.diagnostics` |
+| REST `diagnostics: [...]` on any job/results body | picked up by `job.refresh()` / `job.wait()` / `job.results`, so a `wait()`-only caller sees the same thing |
+| Legacy `target_residues_applied` / `avoid_residues_applied` / `targeting_warning` | normalized locally into the same envelopes, so an older server still surfaces the problem |
+| Client-side pre-flight (before any HTTP call) | `TargetingValidationResult.diagnostics` (`stage == "client"`) |
+| `X-LigandAI-SDK-*` response headers | `sdk_outdated` / `sdk_unsupported` / `sdk_version_unknown` |
+
+Severity `warning` and above additionally raises a
+`LigandAITargetingWarning` on the `warnings` channel, so a caller who never
+reads `job.diagnostics` is still told. Repeats do not re-warn — a polling
+`wait()` loop warns once.
+
+### Reading them
+
+```python
+job = client.peptides.generate(
+    gene="BRD4",
+    avoid_residues=[{"chain": "A", "start": 36, "end": 46}],
+)
+job.wait()
+
+for d in job.diagnostics:
+    print(d.severity, d.code, d.message, d.remediation, d.details)
+
+# Gate a pipeline on it — this is the check the customer never had:
+if job.diagnostics_at_least("error"):
+    raise SystemExit("targeting did not do what was asked")
+
+job.worst_diagnostic_severity   # "error" | "warning" | "info" | None
+```
+
+Escalate the warning channel to an exception instead:
+
+```python
+import warnings
+from ligandai import LigandAIDiagnosticWarning
+
+warnings.simplefilter("error", LigandAIDiagnosticWarning)
+```
+
+### Code registry
+
+`ligandai.DIAGNOSTIC_CODES` is the taxonomy this build knows;
+`ligandai.known_codes()` lists them. It mirrors the platform registry
+(`shared/warnings.json`) — adding a code is additive, renaming one is a
+breaking wire change.
+
+| code | severity | stage |
+| --- | --- | --- |
+| `avoid_residues_unresolved` | warning | generate |
+| `avoid_residues_none_resolved` | **error** | generate |
+| `target_residues_unresolved` | warning | generate |
+| `target_residues_none_resolved` | **error** | generate |
+| `degenerate_pocket_after_avoid` | **error** | generate |
+| `avoid_conformance_violation` | warning | fold |
+| `avoid_conformance_clean` | info | fold |
+| `avoid_conformance_unavailable` | info | fold |
+| `param_ignored` | warning | request |
+| `param_dropped_in_transport` | warning | request |
+| `sdk_outdated` | warning | client |
+| `sdk_unsupported` | **error** | client |
+| `sdk_version_unknown` | info | client |
+| `targeting_region_swapped` | info | client |
+| `targeting_chain_ambiguous` | warning | client |
+| `avoid_shell_disabled` | info | client |
+| `degenerate_pocket_risk` | warning | client |
+| `targeting_contradiction` | warning | client |
+
+The last five are raised by the SDK itself before any HTTP call.
+
+## SDK version compatibility
+
+`GET /api/sdk/compatibility` — no tier required.
+
+The platform advertises SDK compatibility on **every** response, so the
+check costs no extra round-trip:
+
+| Header | Values |
+| --- | --- |
+| `X-LigandAI-SDK-Status` | `current` \| `outdated` \| `unsupported` \| `unknown` |
+| `X-LigandAI-SDK-Latest` | newest published SDK version |
+| `X-LigandAI-SDK-Min-Supported` | oldest version the server still vouches for |
+
+Anything other than `current` produces an `sdk_outdated` /
+`sdk_unsupported` / `sdk_version_unknown` diagnostic, with the exact upgrade
+command in `details["upgrade_command"]`, and (for `warning` and above) a
+`LigandAIVersionWarning` — **once per process**. This matters because an SDK
+build old enough to predate a wire change is exactly the client that
+silently drops a request parameter.
+
+The SDK **never upgrades itself**. Opt out with
+`LIGANDAI_SKIP_VERSION_CHECK=1` (shared with the PyPI update nag) or
+`LIGANDAI_SKIP_SERVER_VERSION_CHECK=1`. For an explicit on-demand check:
+
+```python
+for d in client.check_compatibility():
+    print(d.code, d.message, d.details["upgrade_command"])
+```
+
+Returns `[]` when the client is current, and also `[]` against a server
+that has no such endpoint.

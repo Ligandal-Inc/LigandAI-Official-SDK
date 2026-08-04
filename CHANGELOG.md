@@ -8,6 +8,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — structured diagnostics: the SDK now tells you when a run did not do what you asked (`bd-LIGANDAI_ALPHA_V2-x4vt8.3.2`)
+
+The `x4vt8` entry below fixed the *numbering bug* that made a customer's
+`avoid_residues` exclusion a silent no-op while 25/25 designs bound the
+excluded loop. This change fixes the **silence**: the SDK had no way to tell a
+caller that the thing they asked for did not happen, and `warnings.warn` is not
+an API you can branch on.
+
+- **`ligandai.diagnostics`** — new public module carrying the platform
+  diagnostics taxonomy and the `Diagnostic` envelope
+  (`code`, `severity`, `stage`, `title`, `message`, `remediation`, `details`,
+  `doc_anchor`, `occurred_at`, `subject_id`). `Diagnostic`,
+  `DIAGNOSTIC_CODES`, `DIAGNOSTIC_EVENT`, `DIAGNOSTIC_SCHEMA_VERSION` and
+  `known_codes()` are exported from the package root. The taxonomy is a copy of
+  the platform registry (`shared/warnings.json`) — the SDK has no build-time
+  dependency on the server repo, and a test asserts the two have not drifted.
+- **`job.diagnostics`** on `Job` and `AsyncJob` — everything the run reported,
+  in arrival order, plus `job.diagnostics_at_least("error")` and
+  `job.worst_diagnostic_severity` for gating a pipeline. Populated from three
+  paths: the canonical `diagnostic` SSE event, a `diagnostics: [...]` array on
+  any job/results REST payload (so `wait()`-only callers see what `stream()`
+  callers see), and the legacy `target_residues_applied` /
+  `avoid_residues_applied` / `targeting_warning` events, normalized locally so
+  an older server still surfaces the problem.
+- **Unknown codes are never filtered.** A code, severity, or envelope key this
+  build has never seen passes through in full (`Diagnostic.is_known_code`,
+  `Diagnostic.raw`). Filtering to a known-code allowlist is the exact failure
+  mode this closes.
+- **`TargetingValidationResult`** — `validate_and_normalize_targeting()` now
+  returns a `dict` subclass whose `.diagnostics` carries the structured form of
+  every client-side warning it raised (parity with the Node SDK's
+  `TargetingValidationResult.warnings`). The four dict keys, their values, and
+  the `warnings.warn` behaviour are unchanged — existing callers,
+  `pytest.warns` assertions and `simplefilter("error", ...)` gates keep working.
+- **Goal-campaign parity** — `Goals.campaign_start()` / `Goals.drive()` called
+  the per-field validators piecemeal and therefore skipped the *cross-field*
+  checks. They now run through the aggregate entry point and gain the
+  missing-`chain` ambiguity warning, plus a new `targeting_contradiction` check
+  for a residue listed in **both** `hotspots` (must contact) and
+  `avoid_residues` (must not contact) — a criterion no design can satisfy. The
+  pocket-span heuristic is deliberately *not* applied there: `hotspots` are
+  point contact criteria, not a contiguous pocket face, and firing it would put
+  a false positive on the diagnostics channel every run.
+- **Server SDK-version advisory** (`ligandai.server_compat`) — the platform
+  advertises `X-LigandAI-SDK-Status` / `-Latest` / `-Min-Supported` on every
+  response; the SDK consumes them in its single response funnel, so there is no
+  extra round-trip and no per-call-site plumbing. Anything other than `current`
+  produces an `sdk_outdated` / `sdk_unsupported` / `sdk_version_unknown`
+  diagnostic with the exact upgrade command in `details["upgrade_command"]`,
+  and a `LigandAIVersionWarning` for `warning` and above — **once per process**.
+  An old client is the one that silently drops a parameter a newer server
+  expects, which is why this is automatic. The SDK **never** upgrades itself.
+  Opt out with `LIGANDAI_SKIP_VERSION_CHECK=1` (shared with the PyPI update
+  nag) or `LIGANDAI_SKIP_SERVER_VERSION_CHECK=1`.
+  `client.check_compatibility()` / `await client.check_compatibility()` hit
+  `GET /api/sdk/compatibility` explicitly and return `[]` for a current client
+  or an older server without the endpoint.
+- **New warning categories** — `LigandAIDiagnosticWarning` (base for every
+  platform diagnostic on the warning channel) and `LigandAIVersionWarning`.
+  `LigandAITargetingWarning` now subclasses `LigandAIDiagnosticWarning`; it is
+  still a `UserWarning`, so existing filters are unaffected.
+- Repeated identical diagnostics are de-duplicated, and a `wait()` loop polling
+  every few seconds warns **once**. When a fully-upgraded server emits both the
+  canonical event and the legacy event for the same issue, the user is warned
+  once; both are still recorded, the legacy one tagged
+  `details["source"] == "legacy_sse_event"`.
+
+Nothing in this layer can fail a request or break a stream — every entry point
+is defensive by design. No version bump, no publish: this entry documents work
+landed on `main` only.
+
 ### Fixed — `target_residues` / `avoid_residues` / `hotspot_residues` are PDB residue numbers, and now say so (`bd-LIGANDAI_ALPHA_V2-x4vt8`)
 
 A P0 customer bug: a customer excluded BRD4-ET loop residues 36-46 via
