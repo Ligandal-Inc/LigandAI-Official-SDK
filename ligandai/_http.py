@@ -42,6 +42,7 @@ from ligandai.errors import (
     LigandAIServerError,
     error_from_response,
 )
+from ligandai.server_compat import note_response_headers
 
 logger = logging.getLogger("ligandai")
 
@@ -191,7 +192,17 @@ def _decode_response(resp: httpx.Response) -> dict[str, Any] | None:
 
 
 def _raise_for_status(resp: httpx.Response) -> None:
-    """Raise the appropriate :class:`LigandAIError` subclass for a bad status."""
+    """Raise the appropriate :class:`LigandAIError` subclass for a bad status.
+
+    Also the SDK's single response funnel. EVERY response — 2xx, 4xx, 5xx, and
+    SSE — passes through here before ``request()`` returns or raises, so the
+    server's SDK-compatibility advisory headers are consumed exactly once, in
+    one place, with no extra round-trip and no per-call-site plumbing.
+    [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] The call is deliberately BEFORE the
+    ``is_success`` early return: an outdated client is most worth telling about
+    when its request just failed.
+    """
+    note_response_headers(resp.headers)
     if resp.is_success:
         return
     payload = _decode_response(resp) or {}

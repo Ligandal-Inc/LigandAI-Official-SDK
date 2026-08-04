@@ -49,8 +49,10 @@ from ligandai._constants import (
     Tier,
 )
 from ligandai._http import AsyncHTTPTransport, HTTPTransport
+from ligandai.diagnostics import Diagnostic
 from ligandai.errors import (
     LigandAIAuthError,
+    LigandAIError,
     LigandAILegalAcceptanceRequired,
     LigandAIPaidTierRequired,
     LigandAITierError,
@@ -82,6 +84,7 @@ from ligandai.resources.receptors import AsyncReceptors, Receptors
 from ligandai.resources.reports import AsyncReports, Reports
 from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
+from ligandai.server_compat import COMPATIBILITY_PATH, compatibility_diagnostics
 from ligandai.species import DEFAULT_SPECIES, Species, normalize_species
 from ligandai.types import (
     ClientSessionUsage,
@@ -835,6 +838,26 @@ class LigandAI(_ClientCommon):
         """Hit ``GET /api/healthz`` — useful for connectivity checks."""
         return self._transport.request("GET", "/api/healthz") or {}
 
+    def check_compatibility(self) -> list[Diagnostic]:
+        """Ask the platform whether this SDK build is still current.
+        [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
+
+        Hits ``GET /api/sdk/compatibility`` and returns the resulting
+        :class:`~ligandai.diagnostics.Diagnostic` list — ``[]`` when this client
+        is current. Explicit and on demand; you normally do **not** need it,
+        because the same advisory rides the ``X-LigandAI-SDK-*`` headers on
+        every response the SDK already makes and surfaces itself as a
+        :class:`~ligandai.errors.LigandAIVersionWarning`.
+
+        Never upgrades anything and never raises on an older server that has no
+        such endpoint — a 404 yields ``[]``.
+        """
+        try:
+            payload = self._transport.request("GET", COMPATIBILITY_PATH) or {}
+        except LigandAIError:
+            return []
+        return compatibility_diagnostics(payload)
+
     @staticmethod
     def guide(print_it: bool = True) -> str:
         """Print/return a concise map of the canonical LigandAI workflows.
@@ -990,6 +1013,14 @@ class AsyncLigandAI(_ClientCommon):
 
     async def health(self) -> dict[str, Any]:
         return await self._transport.request("GET", "/api/healthz") or {}
+
+    async def check_compatibility(self) -> list[Diagnostic]:
+        """Async twin of :meth:`LigandAI.check_compatibility`."""
+        try:
+            payload = await self._transport.request("GET", COMPATIBILITY_PATH) or {}
+        except LigandAIError:
+            return []
+        return compatibility_diagnostics(payload)
 
     async def me(self) -> User:
         return await self.account.me()
