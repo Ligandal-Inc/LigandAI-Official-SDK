@@ -19,14 +19,16 @@ from typing import Any
 import httpx
 from tenacity import (
     AsyncRetrying,
+    RetryCallState,
     Retrying,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
+    wait_exponential_jitter,
 )
 
 from ligandai._constants import (
     DEFAULT_BASE_URL,
+    DEFAULT_CONNECT_TIMEOUT_SECS,
     DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_BASE_DELAY,
     DEFAULT_RETRY_MAX_DELAY,
@@ -34,6 +36,7 @@ from ligandai._constants import (
 )
 from ligandai._version import __version__
 from ligandai.errors import (
+    LigandAIConnectionError,
     LigandAIError,
     LigandAIRateLimitError,
     LigandAIServerError,
@@ -41,6 +44,46 @@ from ligandai.errors import (
 )
 
 logger = logging.getLogger("ligandai")
+
+# HTTP methods that are safe to retry unconditionally — a GET/HEAD/PUT/DELETE/
+# OPTIONS is defined to be idempotent, so re-sending it after a dropped
+# response (5xx, timeout, connection error) cannot double-apply an effect.
+# POST/PATCH are NOT retried unless the caller supplies an idempotency key —
+# [bd-LIGANDAI_ALPHA_V2-x4vt8 contract §5] "Never retry non-idempotent POSTs
+# unless an idempotency key is sent." A generation/fold submission that
+# *did* land server-side but whose response was lost must not be silently
+# re-submitted (double credit charge, double GPU job) by the retry wrapper.
+_IDEMPOTENT_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
+
+
+class _BackoffWait:
+    """Exponential backoff + jitter, honouring the server's ``Retry-After`` /
+    ``X-RateLimit-Reset`` when the raised exception carries one.
+    [bd-LIGANDAI_ALPHA_V2-x4vt8 contract §5]
+
+    :class:`LigandAIRateLimitError` carries ``retry_after`` parsed from the
+    response headers (see :func:`_parse_retry_after`) — previously that value
+    was captured on the exception but never fed back into the retry loop's
+    wait duration, so the SDK backed off on its OWN fixed exponential curve
+    regardless of what the server explicitly asked for. When present,
+    ``retry_after`` wins (bounded by ``max_delay`` so a server-supplied value
+    can't stall a caller indefinitely); otherwise falls back to jittered
+    exponential backoff.
+    """
+
+    def __init__(self, base: float, max_delay: float) -> None:
+        self._jittered = wait_exponential_jitter(initial=base, max=max_delay)
+        self._max_delay = max_delay
+
+    def __call__(self, retry_state: RetryCallState) -> float:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        retry_after = getattr(exc, "retry_after", None)
+        if retry_after is not None:
+            try:
+                return max(0.0, min(float(retry_after), self._max_delay))
+            except (TypeError, ValueError):
+                pass
+        return self._jittered(retry_state)
 
 
 def _debug_enabled() -> bool:
@@ -163,6 +206,43 @@ def _raise_for_status(resp: httpx.Response) -> None:
     raise err
 
 
+def _build_timeout(
+    timeout: float | httpx.Timeout,
+    connect_timeout: float | None,
+) -> httpx.Timeout:
+    """Build an explicit connect/read/write/pool timeout. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+
+    A bare float applied to ``httpx.Client(timeout=...)`` sets connect, read,
+    write, and pool to the SAME value — a dead TCP handshake then waits as
+    long as a caller's generous read timeout for a long GPU job's status
+    poll. This gives the connect phase its own (shorter, by default)
+    timeout so a network that's simply unreachable fails fast, independent
+    of how long the caller is willing to wait for a slow-but-alive server.
+    Caller-overridable via ``connect_timeout=`` on ``HTTPTransport`` /
+    ``AsyncHTTPTransport`` / ``LigandAI`` / ``AsyncLigandAI``; passing an
+    ``httpx.Timeout`` directly as ``timeout`` is honoured as-is.
+    """
+    if isinstance(timeout, httpx.Timeout):
+        return timeout
+    total = float(timeout)
+    ct = connect_timeout if connect_timeout is not None else min(DEFAULT_CONNECT_TIMEOUT_SECS, total)
+    return httpx.Timeout(total, connect=ct)
+
+
+def _wrap_transport_error(exc: httpx.TransportError, method: str, url: str) -> LigandAIConnectionError:
+    """Wrap a raw ``httpx`` transport-level failure in a typed SDK error.
+    [bd-LIGANDAI_ALPHA_V2-x4vt8 contract §5] "Connection errors surface as a
+    distinct typed error, not a generic one." Covers DNS failures, refused/
+    reset connections, TLS handshake failures, and connect/read/write/pool
+    timeouts — ``httpx.TimeoutException`` and every other transport-layer
+    exception subclass ``httpx.TransportError``.
+    """
+    return LigandAIConnectionError(
+        f"Connection error calling {method.upper()} {url}: {exc}",
+        original_error=repr(exc),
+    )
+
+
 # -- Sync transport ----------------------------------------------------------
 
 
@@ -174,7 +254,8 @@ class HTTPTransport:
         api_key: str | None,
         *,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = DEFAULT_TIMEOUT_SECS,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT_SECS,
+        connect_timeout: float | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         impersonate_user: str | None = None,
         client_session_id: str | None = None,
@@ -182,13 +263,14 @@ class HTTPTransport:
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
-        self._timeout = timeout
+        self._timeout = _build_timeout(timeout, connect_timeout)
         self._max_retries = max_retries
+        self._wait = _BackoffWait(DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY)
         self._impersonate_user = impersonate_user
         self._client_session_id = _normalize_client_session_id(client_session_id)
         self._owns_client = client is None
         self._client = client or httpx.Client(
-            timeout=timeout,
+            timeout=self._timeout,
             follow_redirects=True,
             headers=_build_headers(
                 api_key,
@@ -241,20 +323,35 @@ class HTTPTransport:
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         expect_json: bool = True,
+        idempotency_key: str | None = None,
     ) -> Any:
-        """Send a request and return the decoded JSON body (or raw bytes when not JSON)."""
+        """Send a request and return the decoded JSON body (or raw bytes when not JSON).
+
+        ``idempotency_key``, when supplied, is sent as the ``Idempotency-Key``
+        header AND opts a non-idempotent method (POST/PATCH) into the same
+        retry policy as GET/HEAD/PUT/DELETE/OPTIONS.
+        [bd-LIGANDAI_ALPHA_V2-x4vt8 contract §5] Without it, POST/PATCH are
+        sent AT MOST ONCE by this layer — retrying a POST whose response was
+        merely lost (not its effect) risks a duplicate submission (double
+        credit charge, double GPU job) that only an idempotency key can make
+        safe to re-send.
+        """
         url = path if path.startswith("http") else f"{self._base_url}{path}"
         merged_headers = dict(self._client.headers)
         if headers:
             merged_headers.update(headers)
+        if idempotency_key:
+            merged_headers["Idempotency-Key"] = idempotency_key
 
+        can_retry = method.upper() in _IDEMPOTENT_METHODS or idempotency_key is not None
         retrying = Retrying(
-            stop=stop_after_attempt(self._max_retries),
-            wait=wait_exponential(
-                multiplier=DEFAULT_RETRY_BASE_DELAY,
-                max=DEFAULT_RETRY_MAX_DELAY,
+            stop=stop_after_attempt(self._max_retries if can_retry else 1),
+            wait=self._wait,
+            retry=(
+                retry_if_exception_type((LigandAIRateLimitError, LigandAIServerError, LigandAIConnectionError))
+                if can_retry
+                else retry_if_exception_type(())
             ),
-            retry=retry_if_exception_type((LigandAIRateLimitError, LigandAIServerError, httpx.TransportError)),
             reraise=True,
         )
 
@@ -262,16 +359,19 @@ class HTTPTransport:
         for attempt in retrying:
             with attempt:
                 t0 = time.monotonic() if debug else 0.0
-                resp = self._client.request(
-                    method,
-                    url,
-                    params=_clean_params(params),
-                    json=json,
-                    data=data,
-                    files=files,
-                    headers=merged_headers,
-                    timeout=timeout if timeout is not None else self._timeout,
-                )
+                try:
+                    resp = self._client.request(
+                        method,
+                        url,
+                        params=_clean_params(params),
+                        json=json,
+                        data=data,
+                        files=files,
+                        headers=merged_headers,
+                        timeout=timeout if timeout is not None else self._timeout,
+                    )
+                except httpx.TransportError as exc:
+                    raise _wrap_transport_error(exc, method, url) from exc
                 if debug:
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     logger.debug(
@@ -309,28 +409,37 @@ class HTTPTransport:
         if headers:
             merged_headers.update(headers)
 
-        with self._client.stream(
-            method,
-            url,
-            params=_clean_params(params),
-            json=json,
-            headers=merged_headers,
-            timeout=timeout if timeout is not None else None,
-        ) as resp:
-            if not resp.is_success:
-                # ⛔ A streamed response has an UNREAD body. `_raise_for_status`
-                # calls `_decode_response`, which touches `resp.content` and
-                # raises `httpx.ResponseNotRead` — so every error on an SSE
-                # endpoint used to surface as an opaque httpx exception with
-                # the server's JSON body discarded. The legal-acceptance 403
-                # (and its acceptance URL) was destroyed before the error
-                # mapper ever saw it. Pull the body in first so the mapper can
-                # do its job; error bodies are small and already terminal.
-                resp.read()
-            _raise_for_status(resp)
-            for line in resp.iter_lines():
-                if line:
-                    yield line
+        # [bd-LIGANDAI_ALPHA_V2-x4vt8] A connection-level failure — whether
+        # opening the stream or mid-read (server closed the socket, network
+        # dropped) — surfaces as a typed LigandAIConnectionError, matching
+        # request(). No retry here: SSE streams are not restarted
+        # transparently (a caller mid-stream has already consumed partial
+        # state), consistent with existing behaviour.
+        try:
+            with self._client.stream(
+                method,
+                url,
+                params=_clean_params(params),
+                json=json,
+                headers=merged_headers,
+                timeout=timeout if timeout is not None else None,
+            ) as resp:
+                if not resp.is_success:
+                    # ⛔ A streamed response has an UNREAD body. `_raise_for_status`
+                    # calls `_decode_response`, which touches `resp.content` and
+                    # raises `httpx.ResponseNotRead` — so every error on an SSE
+                    # endpoint used to surface as an opaque httpx exception with
+                    # the server's JSON body discarded. The legal-acceptance 403
+                    # (and its acceptance URL) was destroyed before the error
+                    # mapper ever saw it. Pull the body in first so the mapper can
+                    # do its job; error bodies are small and already terminal.
+                    resp.read()
+                _raise_for_status(resp)
+                for line in resp.iter_lines():
+                    if line:
+                        yield line
+        except httpx.TransportError as exc:
+            raise _wrap_transport_error(exc, method, url) from exc
 
 
 # -- Async transport ----------------------------------------------------------
@@ -344,7 +453,8 @@ class AsyncHTTPTransport:
         api_key: str | None,
         *,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = DEFAULT_TIMEOUT_SECS,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT_SECS,
+        connect_timeout: float | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         impersonate_user: str | None = None,
         client_session_id: str | None = None,
@@ -352,13 +462,14 @@ class AsyncHTTPTransport:
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
-        self._timeout = timeout
+        self._timeout = _build_timeout(timeout, connect_timeout)
         self._max_retries = max_retries
+        self._wait = _BackoffWait(DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY)
         self._impersonate_user = impersonate_user
         self._client_session_id = _normalize_client_session_id(client_session_id)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
-            timeout=timeout,
+            timeout=self._timeout,
             follow_redirects=True,
             headers=_build_headers(
                 api_key,
@@ -411,19 +522,28 @@ class AsyncHTTPTransport:
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         expect_json: bool = True,
+        idempotency_key: str | None = None,
     ) -> Any:
+        """Async sibling of :meth:`HTTPTransport.request` — see its docstring
+        for the ``idempotency_key`` / non-idempotent-POST retry policy
+        [bd-LIGANDAI_ALPHA_V2-x4vt8 contract §5].
+        """
         url = path if path.startswith("http") else f"{self._base_url}{path}"
         merged_headers = dict(self._client.headers)
         if headers:
             merged_headers.update(headers)
+        if idempotency_key:
+            merged_headers["Idempotency-Key"] = idempotency_key
 
+        can_retry = method.upper() in _IDEMPOTENT_METHODS or idempotency_key is not None
         retrying = AsyncRetrying(
-            stop=stop_after_attempt(self._max_retries),
-            wait=wait_exponential(
-                multiplier=DEFAULT_RETRY_BASE_DELAY,
-                max=DEFAULT_RETRY_MAX_DELAY,
+            stop=stop_after_attempt(self._max_retries if can_retry else 1),
+            wait=self._wait,
+            retry=(
+                retry_if_exception_type((LigandAIRateLimitError, LigandAIServerError, LigandAIConnectionError))
+                if can_retry
+                else retry_if_exception_type(())
             ),
-            retry=retry_if_exception_type((LigandAIRateLimitError, LigandAIServerError, httpx.TransportError)),
             reraise=True,
         )
 
@@ -431,16 +551,19 @@ class AsyncHTTPTransport:
         async for attempt in retrying:
             with attempt:
                 t0 = time.monotonic() if debug else 0.0
-                resp = await self._client.request(
-                    method,
-                    url,
-                    params=_clean_params(params),
-                    json=json,
-                    data=data,
-                    files=files,
-                    headers=merged_headers,
-                    timeout=timeout if timeout is not None else self._timeout,
-                )
+                try:
+                    resp = await self._client.request(
+                        method,
+                        url,
+                        params=_clean_params(params),
+                        json=json,
+                        data=data,
+                        files=files,
+                        headers=merged_headers,
+                        timeout=timeout if timeout is not None else self._timeout,
+                    )
+                except httpx.TransportError as exc:
+                    raise _wrap_transport_error(exc, method, url) from exc
                 if debug:
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     logger.debug(
@@ -472,23 +595,28 @@ class AsyncHTTPTransport:
         if headers:
             merged_headers.update(headers)
 
-        async with self._client.stream(
-            method,
-            url,
-            params=_clean_params(params),
-            json=json,
-            headers=merged_headers,
-            timeout=timeout if timeout is not None else None,
-        ) as resp:
-            if not resp.is_success:
-                # See the sync twin: an unread streamed body makes
-                # `_raise_for_status` raise `httpx.ResponseNotRead` instead of
-                # the mapped error, discarding the acceptance URL.
-                await resp.aread()
-            _raise_for_status(resp)
-            async for line in resp.aiter_lines():
-                if line:
-                    yield line
+        # [bd-LIGANDAI_ALPHA_V2-x4vt8] See the sync twin — connection-level
+        # failures surface as a typed LigandAIConnectionError.
+        try:
+            async with self._client.stream(
+                method,
+                url,
+                params=_clean_params(params),
+                json=json,
+                headers=merged_headers,
+                timeout=timeout if timeout is not None else None,
+            ) as resp:
+                if not resp.is_success:
+                    # See the sync twin: an unread streamed body makes
+                    # `_raise_for_status` raise `httpx.ResponseNotRead` instead of
+                    # the mapped error, discarding the acceptance URL.
+                    await resp.aread()
+                _raise_for_status(resp)
+                async for line in resp.aiter_lines():
+                    if line:
+                        yield line
+        except httpx.TransportError as exc:
+            raise _wrap_transport_error(exc, method, url) from exc
 
 
 # -- Helpers -----------------------------------------------------------------
@@ -512,6 +640,29 @@ def parse_sse_data(line: str) -> dict[str, Any] | None:
         return _json.loads(payload)  # type: ignore[no-any-return]
     except _json.JSONDecodeError:
         return None
+
+
+def parse_sse_event_name(line: str) -> str | None:
+    """Parse an SSE ``event: <name>`` line. Returns None for non-event lines.
+
+    [bd-LIGANDAI_ALPHA_V2-x4vt8] The server formats every SSE message as
+    ``event: <name>\\ndata: <json>\\n\\n`` (see ``generate.py``'s
+    ``_sse_event()`` helper) WITHOUT repeating ``<name>`` inside the JSON
+    payload. :func:`parse_sse_data` only reads ``data:`` lines, so without
+    this helper the standalone ``event:`` line is silently dropped and
+    :func:`~ligandai.jobs._normalize_event_payload` falls back to the
+    generic ``"message"`` event type for every server-sent event that
+    doesn't independently carry a ``type``/``event``/``stage`` key in its
+    JSON body — which is exactly how ``target_residues_applied`` /
+    ``avoid_residues_applied`` / ``targeting_warning`` used to collapse into
+    indistinguishable ``"message"`` events. Callers pair this with
+    :func:`parse_sse_data`, tracking the most recent event name across
+    lines — see ``Job.stream()`` / ``AsyncJob.stream()``.
+    """
+    if not line.startswith("event:"):
+        return None
+    name = line[6:].strip()
+    return name or None
 
 
 async def asleep(secs: float) -> None:

@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import inspect
 import time
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, Generic, TypeVar
 
@@ -24,12 +25,18 @@ from ligandai._constants import (
     DEFAULT_POLL_INTERVAL_SECS,
 )
 from ligandai._fold_time_model import estimate_fold_time, format_eta
-from ligandai._http import AsyncHTTPTransport, HTTPTransport, parse_sse_data
+from ligandai._http import (
+    AsyncHTTPTransport,
+    HTTPTransport,
+    parse_sse_data,
+    parse_sse_event_name,
+)
 from ligandai.errors import (
     LigandAIError,
     LigandAIIncompleteResult,
     LigandAIJobError,
     LigandAILegalAcceptanceRequired,
+    LigandAITargetingWarning,
     LigandAITimeoutError,
     LigandAIWaitTimeout,
 )
@@ -476,10 +483,25 @@ class Job(Generic[T]):
         if self._sse_path:
             path = self._sse_path.format(job_id=self._job_id)
             try:
+                # [bd-LIGANDAI_ALPHA_V2-x4vt8] Track the standalone SSE
+                # `event: <name>` line across iterations — it is a SEPARATE
+                # line from `data: <json>` and would otherwise be silently
+                # discarded, collapsing every server event without its own
+                # `type`/`event`/`stage` JSON key (including
+                # target_residues_applied / avoid_residues_applied /
+                # targeting_warning) into the generic "message" event type.
+                last_event_name: str | None = None
                 for line in self._transport.stream_lines("GET", path):
+                    event_name = parse_sse_event_name(line)
+                    if event_name is not None:
+                        last_event_name = event_name
+                        continue
                     data = parse_sse_data(line)
                     if data is None:
                         continue
+                    data = _merge_sse_event_name(data, last_event_name)
+                    _maybe_warn_targeting_event(data, last_event_name)
+                    last_event_name = None
                     yield JobEvent.model_validate(_normalize_event_payload(data))
                 # The SSE endpoint closed cleanly. Refresh once and emit a
                 # terminal event so consumers see the durable payload.
@@ -736,10 +758,22 @@ class AsyncJob(Generic[T]):
         if self._sse_path:
             path = self._sse_path.format(job_id=self._job_id)
             try:
+                # [bd-LIGANDAI_ALPHA_V2-x4vt8] See Job.stream — the SSE
+                # `event: <name>` line is separate from `data: <json>` and
+                # must be tracked across iterations or every event without
+                # its own JSON type key collapses to "message".
+                last_event_name: str | None = None
                 async for line in self._transport.stream_lines("GET", path):
+                    event_name = parse_sse_event_name(line)
+                    if event_name is not None:
+                        last_event_name = event_name
+                        continue
                     data = parse_sse_data(line)
                     if data is None:
                         continue
+                    data = _merge_sse_event_name(data, last_event_name)
+                    _maybe_warn_targeting_event(data, last_event_name)
+                    last_event_name = None
                     yield JobEvent.model_validate(_normalize_event_payload(data))
                 await self.refresh()
                 yield JobEvent.model_validate(
@@ -899,3 +933,53 @@ def _normalize_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "payload": payload,
     }
     return out
+
+
+def _merge_sse_event_name(data: dict[str, Any], event_name: str | None) -> dict[str, Any]:
+    """Attach a standalone SSE ``event: <name>`` line's name to a parsed
+    ``data:`` payload as a fallback ``event`` key. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+
+    The server (``fastapi_backend/routers/generate.py``'s ``_sse_event()``)
+    formats every message as ``event: <name>\\ndata: <json>\\n\\n`` WITHOUT
+    repeating ``<name>`` inside the JSON body. Without this, ``event_name``
+    is discarded by :func:`~ligandai._http.parse_sse_data` (which only reads
+    ``data:`` lines) and every such event collapses to the generic
+    ``"message"`` type in :func:`_normalize_event_payload` — this is exactly
+    how ``target_residues_applied`` / ``avoid_residues_applied`` /
+    ``targeting_warning`` (and any FUTURE unrecognized event type) used to
+    become indistinguishable from one another. Never overrides a
+    ``type``/``event``/``stage`` key the payload already carries.
+    """
+    if event_name and not any(k in data for k in ("type", "event", "stage")):
+        return {**data, "event": event_name}
+    return data
+
+
+def _maybe_warn_targeting_event(data: dict[str, Any], event_name: str | None) -> None:
+    """Mirror a server-sent ``targeting_warning`` SSE event onto the SDK's
+    warning channel, in addition to the :class:`~ligandai.types.JobEvent`
+    already carrying it in the stream. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+
+    A caller using ``job.wait()`` (never touching ``job.stream()``) would
+    otherwise silently miss a degenerate-pocket warning entirely — the
+    warning channel is the only place it's guaranteed to surface. Matches on
+    the event name/type/stage being ``"targeting_warning"``, OR on the
+    payload independently carrying ``degenerate: true`` /
+    ``code: "degenerate_pocket_after_avoid"`` — the event's ``code`` is an
+    open enum server-side (contract §3: "treat unknown codes as warnings, do
+    not throw"), so this does not require an exact code match.
+    """
+    kind = data.get("event") or data.get("type") or data.get("stage") or event_name
+    is_degenerate = data.get("degenerate") is True or data.get("code") == "degenerate_pocket_after_avoid"
+    if kind != "targeting_warning" and not is_degenerate:
+        return
+    gene = data.get("gene")
+    code = data.get("code") or "targeting_warning"
+    message = data.get("message") or (
+        f"Targeting warning for {gene!r} ({code}): the design pocket may be "
+        f"degenerate after avoid_residues was applied."
+        if gene
+        else f"Targeting warning ({code}): the design pocket may be degenerate "
+        f"after avoid_residues was applied."
+    )
+    warnings.warn(message, LigandAITargetingWarning, stacklevel=4)

@@ -444,8 +444,18 @@ class LigandAI(_ClientCommon):
         integrations there.
     timeout
         Per-request timeout in seconds (default 60).
+    connect_timeout
+        Explicit connect-phase timeout in seconds, distinct from and by
+        default shorter than ``timeout`` — a dead TCP handshake fails fast
+        independent of how long you're willing to wait for a slow-but-alive
+        server. ``None`` (default) uses ``min(10, timeout)``.
+        [bd-LIGANDAI_ALPHA_V2-x4vt8]
     max_retries
-        Retries on 429/5xx/network errors (default 5).
+        Retries on 429/5xx/network errors (default 5). Only GET/HEAD/PUT/
+        DELETE/OPTIONS are retried automatically; POST/PATCH are sent at
+        most once unless the call passes an idempotency key, since retrying
+        a POST whose response was merely lost (not its effect) risks a
+        duplicate submission.
     client_session_id
         Optional caller-provided run ID sent as
         ``X-LigandAI-Client-Session-Id`` for usage and credit attribution.
@@ -460,6 +470,11 @@ class LigandAI(_ClientCommon):
         *,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT_SECS,
+        # Explicit connect-phase timeout, distinct from (and by default
+        # shorter than) `timeout` — a dead TCP handshake fails fast
+        # independent of how long you're willing to wait for a slow-but-
+        # alive server. None = min(10s, timeout). [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        connect_timeout: float | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         client_session_id: str | None = None,
         http_client: httpx.Client | None = None,
@@ -480,6 +495,7 @@ class LigandAI(_ClientCommon):
             api_key=resolved_key,
             base_url=base_url,
             timeout=timeout,
+            connect_timeout=connect_timeout,
             max_retries=max_retries,
             impersonate_user=_resolve_impersonation(),
             client_session_id=client_session_id,
@@ -850,6 +866,9 @@ class AsyncLigandAI(_ClientCommon):
         *,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT_SECS,
+        # See LigandAI.__init__ — explicit connect-phase timeout.
+        # [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        connect_timeout: float | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         client_session_id: str | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -870,6 +889,7 @@ class AsyncLigandAI(_ClientCommon):
             api_key=resolved_key,
             base_url=base_url,
             timeout=timeout,
+            connect_timeout=connect_timeout,
             max_retries=max_retries,
             impersonate_user=_resolve_impersonation(),
             client_session_id=client_session_id,
