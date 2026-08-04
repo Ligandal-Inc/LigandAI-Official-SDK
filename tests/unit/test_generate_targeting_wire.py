@@ -105,7 +105,7 @@ def test_hotspot_residues_dict_shape_normalized_to_flat_ints(
 def test_hotspot_residues_index_zero_raises_before_http_call(
     httpx_mock: HTTPXMock, client: LigandAI
 ) -> None:
-    with pytest.raises(LigandAIValidationError, match=r"start at 1; got start=0"):
+    with pytest.raises(LigandAIValidationError, match=r"start at 1; got 0"):
         client.peptides.generate(gene="EGFR", hotspot_residues=[45, 0])
     assert len(httpx_mock.get_requests()) == 0
 

@@ -143,7 +143,7 @@ def normalize_region(
         end_raw = start_raw
     if not _is_intlike(start_raw) or not _is_intlike(end_raw):
         raise LigandAIValidationError(
-            f"{field}[{index}]: start ({start_raw!r}) and end ({end_raw!r}) must be integers."
+            f"{field}[{index}]: start ({start_raw}) and end ({end_raw}) must be integers."
         )
     start = int(start_raw)
     end = int(end_raw)
@@ -243,7 +243,7 @@ def validate_hotspot_residues(hotspots: Any) -> list[int] | None:
         if v < 1:
             raise LigandAIValidationError(
                 f"{field}[{i}]: residue numbers are PDB numbering and start at 1; "
-                f"got start={v}. If you meant an array index, that is not "
+                f"got {v}. If you meant an array index, that is not "
                 f"supported — pass the residue number shown in the structure."
             )
         out.append(v)

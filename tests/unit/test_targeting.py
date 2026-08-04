@@ -69,7 +69,7 @@ def test_hotspot_residues_zero_rejected_with_exact_message() -> None:
         validate_hotspot_residues([45, 0, 47])
     assert str(exc.value) == (
         "hotspot_residues[1]: residue numbers are PDB numbering and start at "
-        "1; got start=0. If you meant an array index, that is not supported "
+        "1; got 0. If you meant an array index, that is not supported "
         "— pass the residue number shown in the structure."
     )
 
