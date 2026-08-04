@@ -45,11 +45,19 @@ from ligandai._fold_time_model import (
 from ligandai._guide import guide
 from ligandai._version import __version__
 from ligandai.client import AsyncLigandAI, LigandAI
+from ligandai.diagnostics import (
+    DIAGNOSTIC_CODES,
+    DIAGNOSTIC_EVENT,
+    DIAGNOSTIC_SCHEMA_VERSION,
+    Diagnostic,
+    known_codes,
+)
 from ligandai.errors import (
     LigandAIAuthError,
     LigandAIConcurrencyLimit,
     LigandAIConnectionError,
     LigandAICreditError,
+    LigandAIDiagnosticWarning,
     LigandAIDuplicateSubmission,
     LigandAIError,
     LigandAIForbidden,
@@ -67,6 +75,7 @@ from ligandai.errors import (
     LigandAITimeoutError,
     LigandAIUpgradeRequired,
     LigandAIValidationError,
+    LigandAIVersionWarning,
     LigandAIWaitTimeout,
     NotSupportedOnReceptorDB,
 )
@@ -205,6 +214,9 @@ from ligandai.version_check import (
 
 __all__ = [
     "DEFAULT_SPECIES",
+    "DIAGNOSTIC_CODES",
+    "DIAGNOSTIC_EVENT",
+    "DIAGNOSTIC_SCHEMA_VERSION",
     "ENGINES",
     "METRICS",
     "METRIC_META",
@@ -240,6 +252,7 @@ __all__ = [
     "DeltaForgePairScore",
     "DeltaForgeScore",
     "DevelopabilityResult",
+    "Diagnostic",
     "EcTrimmingConfig",
     "EngineAgreement",
     "EngineDistributions",
@@ -269,6 +282,7 @@ __all__ = [
     "LigandAIConcurrencyLimit",
     "LigandAIConnectionError",
     "LigandAICreditError",
+    "LigandAIDiagnosticWarning",
     "LigandAIDuplicateSubmission",
     "LigandAIError",
     "LigandAIForbidden",
@@ -286,6 +300,7 @@ __all__ = [
     "LigandAITimeoutError",
     "LigandAIUpgradeRequired",
     "LigandAIValidationError",
+    "LigandAIVersionWarning",
     "LigandAIWaitTimeout",
     "LigandScore",
     "LinkerConfig",
@@ -335,6 +350,7 @@ __all__ = [
     "guide",
     "is_mouse",
     "is_outdated",
+    "known_codes",
     "launch_proteinview",
     "legal",
     "linked_line_figure",

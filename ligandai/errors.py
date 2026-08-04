@@ -728,7 +728,26 @@ class LigandAIConcurrencyLimit(LigandAIError):
 # ─── Warning categories ─────────────────────────────────────────────────────
 
 
-class LigandAITargetingWarning(UserWarning):
+class LigandAIDiagnosticWarning(UserWarning):
+    """Base category for every diagnostic the SDK raises on the warning channel
+    (bd-LIGANDAI_ALPHA_V2-x4vt8.3.2).
+
+    Filter on this to catch *all* platform diagnostics — client-side targeting
+    warnings, server-sent ``diagnostic`` events, and SDK-version advisories —
+    without enumerating subclasses::
+
+        import warnings
+        warnings.simplefilter("error", LigandAIDiagnosticWarning)
+
+    The structured form of the same information is always available as data:
+    ``job.diagnostics`` (a list of :class:`~ligandai.diagnostics.Diagnostic`)
+    and ``TargetingValidationResult.diagnostics``. Prefer those when you want
+    to branch programmatically; the warning channel exists so a caller who
+    never looks still gets told.
+    """
+
+
+class LigandAITargetingWarning(LigandAIDiagnosticWarning):
     """Non-fatal issue with ``target_residues`` / ``avoid_residues`` /
     ``hotspot_residues`` / ``avoid_shell_angstrom`` (bd-LIGANDAI_ALPHA_V2-x4vt8).
 
@@ -745,6 +764,21 @@ class LigandAITargetingWarning(UserWarning):
         with warnings.catch_warnings():
             warnings.simplefilter("error", LigandAITargetingWarning)
             client.peptides.generate(gene="EGFR", avoid_residues=[...])
+    """
+
+
+class LigandAIVersionWarning(LigandAIDiagnosticWarning):
+    """The server says this SDK build is outdated or below the minimum supported
+    version (bd-LIGANDAI_ALPHA_V2-x4vt8.3.2).
+
+    Raised at most once per process, from the ``sdk_outdated`` /
+    ``sdk_unsupported`` diagnostics the platform advertises on every response
+    via the ``X-LigandAI-SDK-Status`` header family. Set
+    ``LIGANDAI_SKIP_VERSION_CHECK=1`` to opt out entirely.
+
+    An outdated client is not cosmetic: older SDK builds are the ones that
+    silently drop request parameters the current server expects, which changes
+    what your job actually ran without telling you.
     """
 
 
