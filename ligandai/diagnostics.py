@@ -78,6 +78,7 @@ __all__ = [
     "diagnostic_key",
     "diagnostics_from_container",
     "is_diagnostic_envelope",
+    "is_targeting_code",
     "known_codes",
     "make_diagnostic",
     "merge_diagnostics",
@@ -645,13 +646,43 @@ def diagnostics_from_container(payload: Any, *, _depth: int = 0) -> list[Diagnos
     return out
 
 
+#: Code families whose diagnostics belong to the residue-targeting story, and
+#: therefore keep raising :class:`~ligandai.errors.LigandAITargetingWarning` —
+#: the category callers have been catching since bd-LIGANDAI_ALPHA_V2-x4vt8.
+#: Everything else raises the broader
+#: :class:`~ligandai.errors.LigandAIDiagnosticWarning` base. Both are catchable
+#: as the base, so a filter on it sees every platform diagnostic.
+_TARGETING_CODE_PREFIXES = (
+    "avoid_",
+    "target_",
+    "targeting_",
+    "degenerate_",
+)
+
+
+def is_targeting_code(code: str) -> bool:
+    """Whether ``code`` belongs to the residue-targeting family.
+
+    Prefix-based on purpose: a targeting code invented next year is a targeting
+    code today, and must not silently fall out of the category a caller is
+    already filtering on.
+    """
+    return any(code.startswith(prefix) for prefix in _TARGETING_CODE_PREFIXES)
+
+
 def diagnostic_key(d: Diagnostic) -> str:
-    """Stable identity for de-duplication across a stream + REST poll."""
+    """Stable identity for de-duplication across a stream + REST poll.
+
+    ``code`` + ``subject_id`` + ``details`` — matching the Node SDK, so both
+    SDKs collapse the same repeats. ``message`` is deliberately NOT part of the
+    key: it is rendered from ``details``, so two envelopes agreeing on all three
+    components describe the same occurrence.
+    """
     try:
         payload = json.dumps(d.details, sort_keys=True, default=str)
     except Exception:  # pragma: no cover - defensive
         payload = str(d.details)
-    return f"{d.code}|{d.subject_id or ''}|{d.message}|{payload}"
+    return f"{d.code}|{d.subject_id or ''}|{payload}"
 
 
 def merge_diagnostics(

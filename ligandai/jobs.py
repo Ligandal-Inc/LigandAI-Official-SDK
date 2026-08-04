@@ -38,12 +38,14 @@ from ligandai.diagnostics import (
     diagnostic_from_payload,
     diagnostics_from_container,
     is_diagnostic_envelope,
+    is_targeting_code,
     make_diagnostic,
     merge_diagnostics,
     severity_rank,
     worst_severity,
 )
 from ligandai.errors import (
+    LigandAIDiagnosticWarning,
     LigandAIError,
     LigandAIIncompleteResult,
     LigandAIJobError,
@@ -240,6 +242,15 @@ class _DiagnosticsAccumulator:
         ``(code, subject_id)`` has already been recorded, so a server that
         emits BOTH the legacy event and the canonical ``diagnostic`` event does
         not double-warn the user.
+
+        Warning CATEGORY follows the code family, for cross-SDK parity with the
+        Node client: residue-targeting codes keep raising
+        :class:`~ligandai.errors.LigandAITargetingWarning` (the category callers
+        have caught since bd-LIGANDAI_ALPHA_V2-x4vt8), everything else raises the
+        broader :class:`~ligandai.errors.LigandAIDiagnosticWarning`. The former
+        subclasses the latter, so one filter on the base still sees everything.
+        ``info`` never reaches the warning channel — it is still recorded on
+        :attr:`diagnostics`.
         """
         if not incoming:
             return []
@@ -255,7 +266,18 @@ class _DiagnosticsAccumulator:
                 continue
             if severity_rank(diag.severity) < severity_rank("warning"):
                 continue
-            warnings.warn(diag.format(), LigandAITargetingWarning, stacklevel=stacklevel)
+            # `legacy` diagnostics are reconstructions of the three targeting
+            # SSE events, so they are targeting warnings BY CONSTRUCTION even
+            # when the server's open-enum `code` is one this build has never
+            # seen. Callers have caught LigandAITargetingWarning on those since
+            # bd-LIGANDAI_ALPHA_V2-x4vt8; narrowing them to the code family
+            # would silently drop them out of that filter.
+            category = (
+                LigandAITargetingWarning
+                if legacy or is_targeting_code(diag.code)
+                else LigandAIDiagnosticWarning
+            )
+            warnings.warn(diag.format(), category, stacklevel=stacklevel)
         return added
 
     def _absorb_payload(self, payload: Any) -> None:

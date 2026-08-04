@@ -230,6 +230,7 @@ def test_non_targeting_events_do_not_emit_warnings(httpx_mock: HTTPXMock, transp
 import json as _json  # noqa: E402
 
 from ligandai.diagnostics import DIAGNOSTIC_EVENT  # noqa: E402
+from ligandai.errors import LigandAIDiagnosticWarning  # noqa: E402
 
 
 def _sse(event: str, payload: dict) -> bytes:
@@ -295,7 +296,10 @@ def test_unknown_diagnostic_code_is_never_filtered(
     httpx_mock.add_response(url=SSE_URL, stream=IteratorStream([_sse("diagnostic", future)]))
     httpx_mock.add_response(url=STATUS_URL, json={"id": "sid_test", "status": "running"})
     job = _make_job(transport)
-    with pytest.warns(LigandAITargetingWarning, match=r"never heard of"):
+    # A non-targeting code raises the BASE diagnostic category, not the
+    # targeting one — but it is still on the warning channel, and still catchable
+    # with a single filter on the base.
+    with pytest.warns(LigandAIDiagnosticWarning, match=r"never heard of"):
         list(job.stream())
 
     assert len(job.diagnostics) == 1
@@ -344,20 +348,36 @@ def test_repeated_identical_diagnostics_are_deduplicated(
     assert len(job.diagnostics) == 1
 
 
+PARAM_IGNORED = {
+    "schema_version": 1,
+    "code": "param_ignored",
+    "severity": "warning",
+    "stage": "request",
+    "title": "A parameter you set was ignored",
+    "message": "`foo` was accepted but had no effect on this run",
+    "remediation": "Remove it from your request.",
+    "details": {"param": "foo"},
+}
+
+
 def test_multiple_distinct_diagnostics_all_accumulate(
     httpx_mock: HTTPXMock, transport: HTTPTransport
 ) -> None:
-    second = dict(NONE_RESOLVED, code="param_ignored", severity="warning", stage="request",
-                  message="`foo` was accepted but had no effect", details={"param": "foo"})
     httpx_mock.add_response(
         url=SSE_URL,
-        stream=IteratorStream([_sse("diagnostic", NONE_RESOLVED), _sse("diagnostic", second)]),
+        stream=IteratorStream(
+            [_sse("diagnostic", NONE_RESOLVED), _sse("diagnostic", PARAM_IGNORED)]
+        ),
     )
     httpx_mock.add_response(url=STATUS_URL, json={"id": "sid_test", "status": "running"})
     job = _make_job(transport)
-    with pytest.warns(LigandAITargetingWarning):
+    with pytest.warns(LigandAIDiagnosticWarning) as record:
         list(job.stream())
     assert [d.code for d in job.diagnostics] == ["avoid_residues_none_resolved", "param_ignored"]
+    # Category follows the code family, and both are catchable on the base.
+    categories = [w.category for w in record]
+    assert LigandAITargetingWarning in categories
+    assert LigandAIDiagnosticWarning in categories
 
 
 def test_diagnostics_property_returns_a_snapshot(
@@ -420,7 +440,7 @@ def test_repeat_polling_does_not_re_warn(httpx_mock: HTTPXMock, transport: HTTPT
 
 def test_initial_submit_payload_diagnostics_are_absorbed(transport: HTTPTransport) -> None:
     """Request-stage diagnostics ride the submit response, before any poll."""
-    with pytest.warns(LigandAITargetingWarning, match=r"had no effect"):
+    with pytest.warns(LigandAIDiagnosticWarning, match=r"had no effect"):
         job = Job(
             transport,
             "sid_test",
@@ -631,3 +651,55 @@ def test_unknown_event_carrying_degenerate_flag_still_warns(
         list(job.stream())
     assert [d.code for d in job.diagnostics] == ["brand_new_code_v2"]
     assert job.diagnostics[0].severity == "warning"
+
+
+# ---------------------------------------------------------------------------
+# REGRESSION: `stage` is a pipeline phase, NOT an event name.
+#
+# `_merge_sse_event_name` treats a body-level `stage` key as evidence the
+# payload already names its own event. The canonical Diagnostic envelope ALWAYS
+# carries `stage` (generate/fold/request/results/client), so without an explicit
+# carve-out every `event: diagnostic` frame normalizes to
+# `event_type == "generate"` and a caller filtering on "diagnostic" matches
+# NOTHING — a channel that looks wired and is structurally unreachable.
+#
+# Verified by deleting the carve-out from _merge_sse_event_name and watching
+# these assertions fail (event_type resolved to "generate"), then restoring it.
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_event_name_is_not_shadowed_by_the_envelope_stage(
+    httpx_mock: HTTPXMock, transport: HTTPTransport
+) -> None:
+    for stage in ("request", "generate", "fold", "results", "client"):
+        transport_job_payload = dict(NONE_RESOLVED, stage=stage)
+        httpx_mock.add_response(
+            url=SSE_URL, stream=IteratorStream([_sse("diagnostic", transport_job_payload)])
+        )
+        httpx_mock.add_response(url=STATUS_URL, json={"id": "sid_test", "status": "running"})
+        job = _make_job(transport)
+        with pytest.warns(LigandAITargetingWarning):
+            events = list(job.stream())
+
+        named = [e for e in events if e.event_type == DIAGNOSTIC_EVENT]
+        assert len(named) == 1, f"stage={stage!r} shadowed the `diagnostic` event name"
+        # The pipeline stage is still readable — it was never the event name.
+        assert named[0].stage == stage
+        assert named[0].payload["stage"] == stage
+        assert [d.stage for d in job.diagnostics] == [stage]
+
+
+def test_other_events_still_resolve_their_name_from_a_body_stage_key(
+    httpx_mock: HTTPXMock, transport: HTTPTransport
+) -> None:
+    """The carve-out is scoped to `diagnostic` only — pre-existing behaviour for
+    every other event is untouched."""
+    httpx_mock.add_response(
+        url=SSE_URL,
+        stream=IteratorStream([b'event: outer\ndata: {"stage": "folding", "pct": 10}\n\n']),
+    )
+    httpx_mock.add_response(url=STATUS_URL, json={"id": "sid_test", "status": "running"})
+    job = _make_job(transport)
+    events = list(job.stream())
+    assert any(e.event_type == "folding" for e in events)
+    assert not any(e.event_type == "outer" for e in events)

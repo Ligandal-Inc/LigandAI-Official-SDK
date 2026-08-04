@@ -24,8 +24,10 @@ from ligandai.diagnostics import (
     DIAGNOSTIC_SCHEMA_VERSION,
     Diagnostic,
     diagnostic_from_payload,
+    diagnostic_key,
     diagnostics_from_container,
     is_diagnostic_envelope,
+    is_targeting_code,
     known_codes,
     make_diagnostic,
     merge_diagnostics,
@@ -356,3 +358,43 @@ def test_diagnostic_is_constructible_directly() -> None:
     assert d.severity == "warning"
     assert d.details == {}
     assert d.to_dict()["code"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# Warning-category routing + de-duplication identity (cross-SDK parity)
+# ---------------------------------------------------------------------------
+
+
+def test_targeting_code_family_is_prefix_based() -> None:
+    """Prefix-based on purpose: a targeting code invented next year is a
+    targeting code today, and must not fall out of the category callers already
+    filter on."""
+    for code in (
+        "avoid_residues_none_resolved",
+        "avoid_conformance_violation",
+        "target_residues_unresolved",
+        "targeting_contradiction",
+        "degenerate_pocket_after_avoid",
+        "avoid_something_invented_later",
+    ):
+        assert is_targeting_code(code) is True, code
+    for code in ("param_ignored", "sdk_outdated", "solvent_shell_conflict_v4"):
+        assert is_targeting_code(code) is False, code
+
+
+def test_dedupe_identity_is_code_subject_details_not_message() -> None:
+    """Matches the Node SDK so both clients collapse the same repeats. `message`
+    is rendered FROM `details`, so agreeing on code+subject+details means the
+    same occurrence."""
+    a = make_diagnostic("param_ignored", "phrasing one", {"param": "x"})
+    b = make_diagnostic("param_ignored", "phrasing two", {"param": "x"})
+    assert diagnostic_key(a) == diagnostic_key(b)
+    merged, added = merge_diagnostics([a], [b])
+    assert len(merged) == 1
+    assert added == []
+
+    c = make_diagnostic("param_ignored", "phrasing one", {"param": "y"})
+    assert diagnostic_key(a) != diagnostic_key(c)
+
+    d = make_diagnostic("param_ignored", "phrasing one", {"param": "x"}, subject_id="job_2")
+    assert diagnostic_key(a) != diagnostic_key(d)

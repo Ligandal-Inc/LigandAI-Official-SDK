@@ -265,11 +265,22 @@ def compatibility_diagnostics(
     found = diagnostics_from_container(payload)
     if found:
         return found
+
+    def _first(*keys: str) -> str:
+        """First non-empty value among ``keys``. Both snake_case and camelCase
+        are accepted: the endpoint is being built in parallel and a compatibility
+        check that silently no-ops on a casing mismatch is worse than useless."""
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
     pseudo_headers = {
-        SDK_STATUS_HEADER: payload.get("status") or payload.get("sdk_status") or "",
-        SDK_LATEST_HEADER: payload.get("latest") or payload.get("latest_version") or "",
-        SDK_MIN_SUPPORTED_HEADER: (
-            payload.get("min_supported") or payload.get("minSupported") or ""
+        SDK_STATUS_HEADER: _first("status", "sdk_status", "sdkStatus"),
+        SDK_LATEST_HEADER: _first("latest", "latest_version", "latestVersion", "sdkLatest"),
+        SDK_MIN_SUPPORTED_HEADER: _first(
+            "min_supported", "minSupported", "min_supported_version", "minSupportedVersion"
         ),
     }
     diag = advisory_from_headers(

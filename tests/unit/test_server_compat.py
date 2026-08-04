@@ -296,3 +296,15 @@ def test_client_check_compatibility_returns_diagnostics(
         client.close()
     assert [d.code for d in diags] == ["sdk_outdated"]
     assert diags[0].details["upgrade_command"] == UPGRADE_COMMAND
+
+
+def test_compatibility_body_camelcase_is_tolerated() -> None:
+    """The endpoint is being built in parallel; a compatibility check that
+    silently no-ops on a casing mismatch is worse than useless."""
+    diags = compatibility_diagnostics(
+        {"sdkStatus": "unsupported", "latestVersion": "1.0.0", "minSupported": "0.9.0"},
+        installed="0.2.0",
+    )
+    assert [d.code for d in diags] == ["sdk_unsupported"]
+    assert diags[0].details["latest"] == "1.0.0"
+    assert diags[0].details["min_supported"] == "0.9.0"
