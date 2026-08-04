@@ -912,7 +912,8 @@ They arrive the same way whichever call style you use — the canonical
 REST job/results payload for `job.wait()`, and the SDK's own pre-flight
 validation before any HTTP call. Severity `warning` and above **also** raises
 on the `warnings` channel, so a caller who never inspects `job.diagnostics`
-is still told:
+is still told (targeting codes as `LigandAITargetingWarning`, everything else
+as its `LigandAIDiagnosticWarning` base — so one filter catches all of them):
 
 ```python
 import warnings

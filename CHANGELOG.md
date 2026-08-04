@@ -68,7 +68,13 @@ an API you can branch on.
 - **New warning categories** — `LigandAIDiagnosticWarning` (base for every
   platform diagnostic on the warning channel) and `LigandAIVersionWarning`.
   `LigandAITargetingWarning` now subclasses `LigandAIDiagnosticWarning`; it is
-  still a `UserWarning`, so existing filters are unaffected.
+  still a `UserWarning`, so existing filters are unaffected. Category follows
+  the code family — residue-targeting codes (`avoid_*`, `target_*`,
+  `targeting_*`, `degenerate_*`) and every diagnostic reconstructed from a
+  legacy targeting SSE event raise `LigandAITargetingWarning`; other server
+  diagnostics raise the base. One filter on the base catches all of them.
+  `info` severity never reaches the warning channel but is still recorded on
+  `job.diagnostics`.
 - Repeated identical diagnostics are de-duplicated, and a `wait()` loop polling
   every few seconds warns **once**. When a fully-upgraded server emits both the
   canonical event and the legacy event for the same issue, the user is warned

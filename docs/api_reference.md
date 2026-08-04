@@ -605,10 +605,17 @@ recognize would reintroduce the exact defect this exists to close.
 | Client-side pre-flight (before any HTTP call) | `TargetingValidationResult.diagnostics` (`stage == "client"`) |
 | `X-LigandAI-SDK-*` response headers | `sdk_outdated` / `sdk_unsupported` / `sdk_version_unknown` |
 
-Severity `warning` and above additionally raises a
-`LigandAITargetingWarning` on the `warnings` channel, so a caller who never
-reads `job.diagnostics` is still told. Repeats do not re-warn — a polling
-`wait()` loop warns once.
+Severity `warning` and above additionally raises on the `warnings` channel,
+so a caller who never reads `job.diagnostics` is still told. `info` never
+warns — it is still recorded on `job.diagnostics`. Repeats do not re-warn:
+a polling `wait()` loop warns once.
+
+The category follows the code family. Residue-targeting codes (`avoid_*`,
+`target_*`, `targeting_*`, `degenerate_*`) raise `LigandAITargetingWarning`;
+everything else raises `LigandAIDiagnosticWarning`. The first subclasses the
+second, so **one filter on `LigandAIDiagnosticWarning` catches every platform
+diagnostic**, and anything catching `LigandAITargetingWarning` today keeps
+working unchanged.
 
 ### Reading them
 
