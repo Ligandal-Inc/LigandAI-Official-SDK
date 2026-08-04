@@ -69,7 +69,7 @@ from typing import Any, Literal
 from urllib.parse import urlencode
 
 from ligandai._http import parse_sse_data
-from ligandai._targeting import validate_avoid_shell_angstrom, validate_region_list
+from ligandai._targeting import validate_and_normalize_goal_targeting
 from ligandai.errors import LigandAIError, LigandAIValidationError
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import GoalProjectState, GoalRun, GoalRunEvent, GoalRunStart
@@ -232,9 +232,19 @@ def _campaign_start_body(
     # residue number is a PDB resnum, never an array index. Validate ONLY —
     # keep the caller's original dicts on the wire (tests assert byte-exact
     # passthrough, e.g. label/extra keys the caller included).
-    _ = validate_region_list(hotspots, field="hotspots")
-    _ = validate_region_list(avoid_residues, field="avoid_residues")
-    avoid_shell_angstrom = validate_avoid_shell_angstrom(avoid_shell_angstrom)
+    #
+    # [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2] Goes through the AGGREGATE entry point
+    # now. Calling validate_region_list/validate_avoid_shell_angstrom piecemeal
+    # skipped the two CROSS-FIELD checks (missing-chain ambiguity,
+    # degenerate-pocket risk) that only run when all fields are seen together —
+    # the goal-campaign engine drives the same /api/generate/stream pocket
+    # machinery, so both apply here identically.
+    _goal_targeting = validate_and_normalize_goal_targeting(
+        hotspots=hotspots,
+        avoid_residues=avoid_residues,
+        avoid_shell_angstrom=avoid_shell_angstrom,
+    )
+    avoid_shell_angstrom = _goal_targeting["avoid_shell_angstrom"]
 
     receptor: dict[str, Any] = {"sequence": seq}
     if receptor_chain is not None:

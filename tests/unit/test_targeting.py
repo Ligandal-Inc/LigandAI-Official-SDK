@@ -449,3 +449,193 @@ def test_validate_and_normalize_targeting_full() -> None:
 def test_validate_and_normalize_targeting_raises_on_any_bad_field() -> None:
     with pytest.raises(LigandAIValidationError):
         validate_and_normalize_targeting(hotspot_residues=[45, -1])
+
+
+# ---------------------------------------------------------------------------
+# .diagnostics — the Node-parity accessor  [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
+#
+# `pytest.warns` is not an API. A caller must be able to INSPECT what the SDK
+# objected to and branch on it, which is what the Node SDK's
+# TargetingValidationResult.warnings has always allowed and Python did not.
+# ---------------------------------------------------------------------------
+
+from ligandai._targeting import (  # noqa: E402
+    TargetingValidationResult,
+    validate_and_normalize_goal_targeting,
+)
+
+
+def test_result_is_still_a_plain_dict_for_existing_callers() -> None:
+    """The diagnostics hang off an ATTRIBUTE, not a key — every pre-existing
+    equality assertion and `result["hotspot_residues"]` lookup keeps working."""
+    out = validate_and_normalize_targeting()
+    assert isinstance(out, dict)
+    assert isinstance(out, TargetingValidationResult)
+    assert out == {
+        "target_residues": None,
+        "avoid_residues": None,
+        "hotspot_residues": None,
+        "avoid_shell_angstrom": None,
+    }
+    assert "diagnostics" not in out
+    assert out.diagnostics == []
+
+
+def test_clean_targeting_produces_no_diagnostics() -> None:
+    out = validate_and_normalize_targeting(
+        target_residues=[{"chain": "A", "start": 1, "end": 100}],
+        avoid_residues=[{"chain": "A", "start": 40, "end": 46}],
+        hotspot_residues=[45],
+        avoid_shell_angstrom=8.0,
+    )
+    assert out.diagnostics == []
+
+
+def test_degenerate_pocket_risk_is_also_a_structured_diagnostic() -> None:
+    with pytest.warns(LigandAITargetingWarning):
+        out = validate_and_normalize_targeting(
+            target_residues=[{"chain": "A", "start": 1, "end": 10}],
+            avoid_residues=[{"chain": "A", "start": 1, "end": 10}],
+        )
+    assert [d.code for d in out.diagnostics] == ["degenerate_pocket_risk"]
+    diag = out.diagnostics[0]
+    assert diag.severity == "warning"
+    assert diag.stage == "client"
+    assert diag.details == {
+        "target_field": "target_residues",
+        "avoid_field": "avoid_residues",
+        "target_span": 10,
+        "avoid_span": 10,
+    }
+    # The structured form carries the SAME text the warning channel raised.
+    assert "degenerate" in diag.message
+    assert diag.remediation
+
+
+def test_missing_chain_is_also_a_structured_diagnostic() -> None:
+    with pytest.warns(LigandAITargetingWarning):
+        out = validate_and_normalize_targeting(
+            target_residues=[
+                {"chain": "A", "start": 10, "end": 20},
+                {"chain": "B", "start": 10, "end": 20},
+                {"start": 5, "end": 8},
+            ],
+        )
+    codes = [d.code for d in out.diagnostics]
+    assert "targeting_chain_ambiguous" in codes
+    diag = next(d for d in out.diagnostics if d.code == "targeting_chain_ambiguous")
+    assert diag.details["field"] == "target_residues"
+    assert diag.details["index"] == 2
+    assert diag.details["chains_named"] == ["A", "B"]
+
+
+def test_swapped_region_is_also_a_structured_diagnostic() -> None:
+    with pytest.warns(LigandAITargetingWarning, match=r"swapped"):
+        out = validate_and_normalize_targeting(
+            target_residues=[{"chain": "A", "start": 46, "end": 36}],
+        )
+    assert [d.code for d in out.diagnostics] == ["targeting_region_swapped"]
+    assert out.diagnostics[0].severity == "info"
+    assert out.diagnostics[0].details == {
+        "field": "target_residues", "index": 0, "start": 46, "end": 36
+    }
+    assert out["target_residues"] == [{"chain": "A", "start": 36, "end": 46}]
+
+
+def test_disabled_avoid_shell_is_also_a_structured_diagnostic() -> None:
+    with pytest.warns(LigandAITargetingWarning):
+        out = validate_and_normalize_targeting(avoid_shell_angstrom=0)
+    assert [d.code for d in out.diagnostics] == ["avoid_shell_disabled"]
+    assert out.diagnostics[0].severity == "info"
+
+
+def test_several_diagnostics_accumulate_in_emission_order() -> None:
+    with pytest.warns(LigandAITargetingWarning):
+        out = validate_and_normalize_targeting(
+            target_residues=[{"chain": "A", "start": 20, "end": 10}],
+            avoid_residues=[{"chain": "B", "start": 1, "end": 40}],
+            avoid_shell_angstrom=0,
+        )
+    assert [d.code for d in out.diagnostics] == [
+        "targeting_region_swapped",
+        "avoid_shell_disabled",
+        "degenerate_pocket_risk",
+    ]
+
+
+def test_standalone_validators_still_warn_without_a_sink() -> None:
+    """The public helpers are callable on their own; dropping the structured
+    copy must never cost the warning."""
+    with pytest.warns(LigandAITargetingWarning):
+        validate_avoid_shell_angstrom(0)
+    sink: list = []
+    with pytest.warns(LigandAITargetingWarning):
+        validate_avoid_shell_angstrom(0, diagnostics=sink)
+    assert [d.code for d in sink] == ["avoid_shell_disabled"]
+
+
+# ---------------------------------------------------------------------------
+# Goal-campaign parity — goals.py used to skip the CROSS-FIELD checks
+# ---------------------------------------------------------------------------
+
+
+def test_goal_path_gains_the_missing_chain_warning() -> None:
+    """`Goals.campaign_start` called validate_region_list piecemeal, so this
+    check never ran on the goal surface. It does now."""
+    with pytest.warns(LigandAITargetingWarning, match=r"hotspots\[2\]: no chain given"):
+        out = validate_and_normalize_goal_targeting(
+            hotspots=[
+                {"chain": "A", "residue": 745},
+                {"chain": "B", "residue": 790},
+                {"residue": 800},
+            ],
+        )
+    assert [d.code for d in out.diagnostics] == ["targeting_chain_ambiguous"]
+    assert out.diagnostics[0].details["field"] == "hotspots"
+
+
+def test_goal_path_warns_when_a_residue_is_both_required_and_excluded() -> None:
+    """Hotspots are must-contact; avoid_residues are must-not-contact. The same
+    residue in both is a criterion no design can satisfy."""
+    with pytest.warns(LigandAITargetingWarning, match=r"cannot both contact and avoid"):
+        out = validate_and_normalize_goal_targeting(
+            hotspots=[{"chain": "A", "residue": 745}],
+            avoid_residues=[{"chain": "A", "residue": 745}],
+        )
+    assert [d.code for d in out.diagnostics] == ["targeting_contradiction"]
+    assert out.diagnostics[0].details["contradicting_residues"] == ["A:745"]
+
+
+def test_goal_path_does_not_fire_the_pocket_span_heuristic() -> None:
+    """A campaign with 2 hotspots and 6 excluded orthosteric residues is
+    ORDINARY. The span heuristic only means something where the target side is
+    a contiguous pocket face, so firing it here would be pure false-positive
+    noise on the diagnostics channel."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", LigandAITargetingWarning)
+        out = validate_and_normalize_goal_targeting(
+            hotspots=[{"chain": "A", "residue": 745}, {"chain": "A", "residue": 790}],
+            avoid_residues=[{"chain": "A", "residue": r} for r in range(800, 806)],
+        )
+    assert out.diagnostics == []
+
+
+def test_goal_path_keeps_the_per_field_validation_it_already_had() -> None:
+    with pytest.raises(LigandAIValidationError, match=r"hotspots\[0\]"):
+        validate_and_normalize_goal_targeting(hotspots=[{"chain": "A", "residue": 0}])
+    with pytest.warns(LigandAITargetingWarning):
+        out = validate_and_normalize_goal_targeting(avoid_shell_angstrom=0)
+    assert out["avoid_shell_angstrom"] == 0.0
+    assert [d.code for d in out.diagnostics] == ["avoid_shell_disabled"]
+
+
+def test_generate_path_does_not_gain_the_contradiction_warning() -> None:
+    """On `Peptides.generate`, excluding a sub-region of the targeted face is
+    the INTENDED use of avoid_residues — not a contradiction."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", LigandAITargetingWarning)
+        out = validate_and_normalize_targeting(
+            target_residues=[{"chain": "A", "start": 1, "end": 100}],
+            avoid_residues=[{"chain": "A", "start": 40, "end": 46}],
+        )
+    assert out.diagnostics == []
