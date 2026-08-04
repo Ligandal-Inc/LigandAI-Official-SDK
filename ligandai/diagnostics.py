@@ -54,10 +54,13 @@ REGISTRY PROVENANCE
     (``shared/warnings.json`` in the server repo, also read by
     ``fastapi_backend/core/warnings.py`` and ``shared/warnings.ts``). It is
     copied rather than imported so the published SDK has no build-time or
-    runtime dependency on the server repo. Codes, severities, stages, titles
-    and remediations are byte-identical to that file. Entries below the
-    ``CLIENT-ONLY`` marker are emitted by this SDK before any HTTP call and are
-    not (yet) in the shared registry — they are proposed additions.
+    runtime dependency on the server repo. Every code, severity, stage, title,
+    remediation and doc anchor is byte-identical to that file, and
+    ``test_registry_is_byte_identical_to_shared_warnings_json`` fails the build
+    if the two ever drift. Entries below the ``CLIENT-ONLY`` marker are the ones
+    this SDK RAISES itself (before any HTTP call); they live in the shared
+    registry like every other code, because a code only one layer knows about is
+    a code the other layers will drop.
 """
 
 from __future__ import annotations
@@ -240,10 +243,11 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "doc_anchor": "",
     },
     # ─── CLIENT-ONLY ────────────────────────────────────────────────────────
-    # Emitted by this SDK's pre-flight validation, BEFORE any HTTP call. Not in
-    # shared/warnings.json yet — proposed additions (reported upstream on
-    # bd-LIGANDAI_ALPHA_V2-x4vt8.3.2). A server that later adopts these codes
-    # must keep these severities/stages.
+    # Raised by this SDK's own pre-flight validation, BEFORE any HTTP call, so
+    # in practice only the SDK emits them. They are nonetheless part of the
+    # SHARED registry (landed in shared/warnings.json by bd-x4vt8.3, commit
+    # bb4669aad) — the website renders them from the same taxonomy, and a code
+    # only one layer knows about is a code every other layer drops on sight.
     "targeting_region_swapped": {
         "severity": "info",
         "stage": "client",
@@ -252,7 +256,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
             "The pair was swapped automatically to match server behaviour. Pass start <= end "
             "to silence this."
         ),
-        "doc_anchor": "sdk/python/allosteric-targeting#residue-numbering",
+        "doc_anchor": "sdk/python/allosteric-targeting#numbering",
     },
     "targeting_chain_ambiguous": {
         "severity": "warning",
@@ -262,7 +266,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
             "This request names more than one chain, so a region without a chain matches any "
             "chain carrying that residue number. Pass chain= on every region to disambiguate."
         ),
-        "doc_anchor": "sdk/python/allosteric-targeting#residue-numbering",
+        "doc_anchor": "sdk/python/allosteric-targeting#numbering",
     },
     "avoid_shell_disabled": {
         "severity": "info",
@@ -272,7 +276,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
             "avoid_shell_angstrom=0 excludes only the named residues, not their packing "
             "neighbours. Leave it unset to use the server default."
         ),
-        "doc_anchor": "sdk/python/allosteric-targeting#event-avoid",
+        "doc_anchor": "sdk/python/allosteric-targeting#shell",
     },
     "degenerate_pocket_risk": {
         "severity": "warning",

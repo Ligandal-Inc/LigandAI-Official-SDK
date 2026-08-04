@@ -648,9 +648,11 @@ warnings.simplefilter("error", LigandAIDiagnosticWarning)
 ### Code registry
 
 `ligandai.DIAGNOSTIC_CODES` is the taxonomy this build knows;
-`ligandai.known_codes()` lists them. It mirrors the platform registry
-(`shared/warnings.json`) — adding a code is additive, renaming one is a
-breaking wire change.
+`ligandai.known_codes()` lists them. It is a byte-identical copy of the
+platform registry (`shared/warnings.json`, also read by the FastAPI and
+TypeScript layers) — copied, not imported, so the SDK carries no dependency on
+the server repo, with a test that fails the build if the two drift. Adding a
+code is additive; renaming or removing one is a breaking wire change.
 
 | code | severity | stage |
 | --- | --- | --- |
@@ -673,7 +675,9 @@ breaking wire change.
 | `degenerate_pocket_risk` | warning | client |
 | `targeting_contradiction` | warning | client |
 
-The last five are raised by the SDK itself before any HTTP call.
+The last five (`stage: client`) are raised by the SDK itself before any HTTP
+call — but they are registered centrally like every other code, so the website
+renders them from the same taxonomy.
 
 ## SDK version compatibility
 

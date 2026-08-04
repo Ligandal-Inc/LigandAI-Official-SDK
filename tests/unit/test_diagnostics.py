@@ -40,10 +40,17 @@ from ligandai.diagnostics import (
 # Registry parity — the SDK copy must not drift from shared/warnings.json
 # ---------------------------------------------------------------------------
 
-#: Codes this SDK emits BEFORE any HTTP call. They are not in the shared
-#: registry (proposed additions) so parity ignores them; every other code must
-#: match the platform file byte-for-byte.
-CLIENT_ONLY_CODES = frozenset(
+#: Codes this SDK RAISES itself, before any HTTP call. In practice no other
+#: layer emits them — but they still live in the shared registry, because the
+#: website renders diagnostics from that same taxonomy and a code only one layer
+#: knows about is a code every other layer drops on sight.
+#:
+#: There is deliberately NO exclusion set in the parity test below. An earlier
+#: revision carried one while these five were pending upstream; leaving it in
+#: place would have handed a future worker an easy way to silence a failing
+#: parity check (add the code to the set, move on) instead of registering the
+#: code centrally, which is the entire point.
+SDK_RAISED_CODES = frozenset(
     {
         "targeting_region_swapped",
         "targeting_chain_ambiguous",
@@ -71,28 +78,41 @@ def _shared_registry() -> dict[str, dict[str, str]] | None:
 
 
 def test_registry_is_byte_identical_to_shared_warnings_json() -> None:
-    """The SDK copies the taxonomy rather than importing it, so a drift guard
-    is the only thing keeping the two in sync. Skips where the server repo
-    isn't checked out (published sdist, CI runner)."""
+    """The SDK copies the taxonomy rather than importing it, so this drift guard
+    is the only thing keeping the two in sync.
+
+    Strict equality in BOTH directions, with no exclusions: a code in the SDK
+    that the platform has never registered is just as broken as a platform code
+    the SDK is missing — the first gets dropped by every other layer, the second
+    means the SDK cannot enrich what the server sends it.
+
+    Skips where the server repo isn't checked out (published sdist, CI runner).
+    """
     shared = _shared_registry()
     if shared is None:
         pytest.skip("shared/warnings.json not available on this machine")
 
-    sdk_shared_codes = {k: v for k, v in DIAGNOSTIC_CODES.items() if k not in CLIENT_ONLY_CODES}
-    assert set(sdk_shared_codes) == set(shared), "code set drifted from shared/warnings.json"
+    assert set(DIAGNOSTIC_CODES) == set(shared), "code set drifted from shared/warnings.json"
     for code, spec in shared.items():
         for field in ("severity", "stage", "title", "remediation", "doc_anchor"):
-            assert sdk_shared_codes[code][field] == spec[field], f"{code}.{field} drifted"
+            assert DIAGNOSTIC_CODES[code][field] == spec[field], f"{code}.{field} drifted"
 
 
-def test_client_only_codes_are_flagged_as_such() -> None:
+def test_sdk_raised_codes_are_client_stage_and_centrally_registered() -> None:
+    """The five codes the SDK itself raises are still real registry entries.
+
+    Not implied by the parity test above: that one pins SDK == platform, this
+    one pins that these specific codes exist at all and are staged ``client``.
+    It fails loudly on a rename, a stage change, or a well-meaning "this is
+    SDK-internal, drop it from the shared file" cleanup — each of which would
+    make the diagnostic invisible to the website.
+    """
     shared = _shared_registry()
-    if shared is None:
-        pytest.skip("shared/warnings.json not available on this machine")
-    for code in CLIENT_ONLY_CODES:
-        assert code in DIAGNOSTIC_CODES
-        assert code not in shared
-        assert DIAGNOSTIC_CODES[code]["stage"] == "client"
+    for code in SDK_RAISED_CODES:
+        assert code in DIAGNOSTIC_CODES, f"{code} vanished from the SDK registry"
+        assert DIAGNOSTIC_CODES[code]["stage"] == "client", code
+        if shared is not None:
+            assert code in shared, f"{code} is SDK-only — register it in shared/warnings.json"
 
 
 def test_every_registry_entry_is_well_formed() -> None:
