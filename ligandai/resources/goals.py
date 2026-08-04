@@ -69,6 +69,7 @@ from typing import Any, Literal
 from urllib.parse import urlencode
 
 from ligandai._http import parse_sse_data
+from ligandai._targeting import validate_avoid_shell_angstrom, validate_region_list
 from ligandai.errors import LigandAIError, LigandAIValidationError
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import GoalProjectState, GoalRun, GoalRunEvent, GoalRunStart
@@ -190,6 +191,11 @@ def _campaign_start_body(
     cross_validate_engine: str | None,
     hotspots: list[dict[str, Any]] | None,
     avoid_residues: list[dict[str, Any]] | None,
+    # Ca-Ca packing-shell radius (Angstrom) grown around avoid_residues, same
+    # semantics as Peptides.generate's avoid_shell_angstrom — the goal-campaign
+    # engine calls the same FastAPI /api/generate/stream endpoint under the
+    # hood (server/goal-campaign/campaign-engine.ts). [bd-LIGANDAI_ALPHA_V2-x4vt8]
+    avoid_shell_angstrom: float | None = None,
     target_ipsae: float | None,
     target_iptm: float | None,
     contact_threshold_a: float | None,
@@ -219,6 +225,17 @@ def _campaign_start_body(
             f"goal_type must be one of: {', '.join(sorted(_VALID_GOAL_TYPES))} — got '{goal_type}'"
         )
 
+    # Client-side targeting validation — BEFORE any HTTP call.
+    # [bd-LIGANDAI_ALPHA_V2-x4vt8] ``hotspots``/``avoid_residues`` here are
+    # single-residue {"chain","residue"} dicts (not {chain,start,end} ranges
+    # like Peptides.generate), but the same PDB-numbering rule applies: a
+    # residue number is a PDB resnum, never an array index. Validate ONLY —
+    # keep the caller's original dicts on the wire (tests assert byte-exact
+    # passthrough, e.g. label/extra keys the caller included).
+    _ = validate_region_list(hotspots, field="hotspots")
+    _ = validate_region_list(avoid_residues, field="avoid_residues")
+    avoid_shell_angstrom = validate_avoid_shell_angstrom(avoid_shell_angstrom)
+
     receptor: dict[str, Any] = {"sequence": seq}
     if receptor_chain is not None:
         receptor["chain"] = str(receptor_chain).strip().upper()
@@ -232,6 +249,8 @@ def _campaign_start_body(
         goal["hotspots"] = hotspots
     if avoid_residues:
         goal["avoid_residues"] = avoid_residues
+    if avoid_shell_angstrom is not None:
+        goal["avoid_shell_angstrom"] = avoid_shell_angstrom
     # Falsy-zero discipline: use is not None for all numerics.
     if target_ipsae is not None:
         goal["target_ipsae"] = float(target_ipsae)
@@ -761,6 +780,9 @@ class Goals(Resource):
         cross_validate_engine: str | None = None,
         hotspots: list[dict[str, Any]] | None = None,
         avoid_residues: list[dict[str, Any]] | None = None,
+        # Ca-Ca packing-shell radius (Angstrom) around avoid_residues. None =
+        # server default (8.0 A); 0 disables. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        avoid_shell_angstrom: float | None = None,
         target_ipsae: float | None = None,
         target_iptm: float | None = None,
         contact_threshold_a: float | None = None,
@@ -873,6 +895,7 @@ class Goals(Resource):
             cross_validate_engine=cross_validate_engine,
             hotspots=hotspots,
             avoid_residues=avoid_residues,
+            avoid_shell_angstrom=avoid_shell_angstrom,
             target_ipsae=target_ipsae,
             target_iptm=target_iptm,
             contact_threshold_a=contact_threshold_a,
@@ -1008,6 +1031,9 @@ class Goals(Resource):
         goal: str | None = None,
         hotspots: list[dict[str, Any]] | None = None,
         avoid_residues: list[dict[str, Any]] | None = None,
+        # Ca-Ca packing-shell radius (Angstrom) around avoid_residues. None =
+        # server default (8.0 A); 0 disables. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        avoid_shell_angstrom: float | None = None,
         seed_peptides: list[str] | None = None,
         engine: str = "boltz2",
         diffusion_samples: int = 4,
@@ -1193,6 +1219,7 @@ class Goals(Resource):
             cross_validate_engine=cross_validate_engine,
             hotspots=hotspots,
             avoid_residues=avoid_residues,
+            avoid_shell_angstrom=avoid_shell_angstrom,
             target_ipsae=target_ipsae,
             contact_threshold_a=contact_threshold_a,
             goal_description=effective_description,
@@ -1368,6 +1395,9 @@ class AsyncGoals(AsyncResource):
         cross_validate_engine: str | None = None,
         hotspots: list[dict[str, Any]] | None = None,
         avoid_residues: list[dict[str, Any]] | None = None,
+        # Ca-Ca packing-shell radius (Angstrom) around avoid_residues. None =
+        # server default (8.0 A); 0 disables. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        avoid_shell_angstrom: float | None = None,
         target_ipsae: float | None = None,
         target_iptm: float | None = None,
         contact_threshold_a: float | None = None,
@@ -1391,6 +1421,7 @@ class AsyncGoals(AsyncResource):
             cross_validate_engine=cross_validate_engine,
             hotspots=hotspots,
             avoid_residues=avoid_residues,
+            avoid_shell_angstrom=avoid_shell_angstrom,
             target_ipsae=target_ipsae,
             target_iptm=target_iptm,
             contact_threshold_a=contact_threshold_a,
@@ -1467,6 +1498,9 @@ class AsyncGoals(AsyncResource):
         goal: str | None = None,
         hotspots: list[dict[str, Any]] | None = None,
         avoid_residues: list[dict[str, Any]] | None = None,
+        # Ca-Ca packing-shell radius (Angstrom) around avoid_residues. None =
+        # server default (8.0 A); 0 disables. [bd-LIGANDAI_ALPHA_V2-x4vt8]
+        avoid_shell_angstrom: float | None = None,
         seed_peptides: list[str] | None = None,
         engine: str = "boltz2",
         diffusion_samples: int = 4,
@@ -1505,6 +1539,7 @@ class AsyncGoals(AsyncResource):
             cross_validate_engine=cross_validate_engine,
             hotspots=hotspots,
             avoid_residues=avoid_residues,
+            avoid_shell_angstrom=avoid_shell_angstrom,
             target_ipsae=target_ipsae,
             contact_threshold_a=contact_threshold_a,
             goal_description=effective_description,
