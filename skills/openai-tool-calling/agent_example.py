@@ -55,6 +55,10 @@ def design_peptide(args: dict[str, Any]) -> dict[str, Any]:
         fold_strategy=args.get("fold_strategy", "quality_ranked"),
         target_chains=args.get("target_chains"),
         variant_id=args.get("variant_id"),
+        # Generator model. args.get("model") is None when the caller did not
+        # name one, which sends NO model key and lets the server apply the
+        # platform default — do not substitute a literal default here.
+        model=args.get("model"),
         quality_guided=args.get("quality_guided", False),
         immunogenicity=args.get("immunogenicity", False),
         serum_stability=args.get("serum_stability", False),

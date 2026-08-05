@@ -9,6 +9,8 @@ Covers wire-format correctness for:
   - quality_guided / immunogenicity / serum_stability guidance flags
   - charge_mode / min_solubility filters
   - tier-gate error propagation (403 → LigandAITierError)
+  - model → generatorModelId (emitted when set, ABSENT when not) and the
+    v6.9.21 + guidance-head conflict (raises, never silently drops)
 
 All tests use pytest-httpx to intercept the POST to /api/ptf/parallel/generate
 and inspect the request body without touching a real server.
@@ -22,7 +24,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from ligandai import LigandAI
-from ligandai.errors import LigandAITierError
+from ligandai.errors import LigandAIInvalidConfig, LigandAITierError
 from ligandai.types import EcTrimmingConfig, PdcConfig, PeptideSegment, ResidueRange, SegmentConfig
 
 BASE = "http://api.ligandai.test"
@@ -379,3 +381,248 @@ def test_tier_gate_unknown_key_prefix_raises_ligandai_tier_error() -> None:
     c = LigandAI(api_key="unknown_prefix_key", base_url=BASE, max_retries=1)
     with pytest.raises(LigandAITierError):
         c.peptides.generate(gene="EGFR", cyclic_mode="disulfide")
+
+
+# ---------------------------------------------------------------------------
+# Generator model selection (model= → generatorModelId)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_id", ["v6.5.21", "v6.9.21", "v6.5"])
+def test_model_emits_generator_model_id(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+    model_id: str,
+) -> None:
+    """Every selectable model id reaches the wire verbatim as generatorModelId."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", model=model_id)
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == model_id
+
+
+def test_model_omitted_sends_no_generator_model_id(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """No model= → NO key on the wire, so the SERVER default applies.
+
+    The SDK must not write the current default into the body. If it did, an SDK
+    build would pin callers to whatever the platform default was on its release
+    day, and a later server-side default change would never reach them.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR")
+    body = _body(httpx_mock)
+    assert "generatorModelId" not in body
+
+
+def test_model_explicit_none_sends_no_generator_model_id(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """model=None is the same as omitting it — server default, no key."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", model=None)
+    body = _body(httpx_mock)
+    assert "generatorModelId" not in body
+
+
+def test_model_unknown_id_is_forwarded_not_gated(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """An id this SDK build does not know still goes out; the server registry decides.
+
+    A client-side allowlist would make every future model unusable until users
+    upgraded the SDK.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", model="v7.0.0-experimental")
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v7.0.0-experimental"
+
+
+def test_unknown_model_with_guidance_is_forwarded_for_the_server_to_judge(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """Absence from the local capability set is NOT a capability claim.
+
+    A published SDK cannot know whether a model released after it was built
+    supports the guidance heads. So an unrecognized id is forwarded WITH the
+    guidance flags, and the server's request validation — which reads
+    ``supports_guidance_heads`` off the model registry — decides. Blocking here
+    would reject a valid future model; assuming it is capable is equally wrong,
+    which is exactly why the SDK does neither and defers.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(
+        gene="EGFR",
+        model="v7.0.0-experimental",
+        serum_stability=True,
+    )
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v7.0.0-experimental"
+    assert body["stabilityEnabled"] is True
+
+
+def test_model_is_whitespace_trimmed(httpx_mock: HTTPXMock, client: LigandAI) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", model="  v6.5.21  ")
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v6.5.21"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 6.521, [], {}])
+def test_model_rejects_non_string_or_blank(client: LigandAI, bad: object) -> None:
+    with pytest.raises(LigandAIInvalidConfig) as exc_info:
+        client.peptides.generate(gene="EGFR", model=bad)  # type: ignore[arg-type]
+    assert exc_info.value.field == "model"
+
+
+def test_model_selection_survives_other_generation_settings(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """generatorModelId coexists with the rest of the body, and does not disturb it."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(
+        gene="EGFR",
+        model="v6.9.21",
+        num_peptides=50,
+        length_range=(20, 40),
+        quality_guided=True,
+        quality_guidance_scale=1.5,
+    )
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v6.9.21"
+    assert body["peptidesPerTarget"] == 50
+    assert body["lengthRange"] == [20, 40]
+    assert body["qualityGuidedEnabled"] is True
+    assert body["qualityGuidanceScale"] == pytest.approx(1.5)
+
+
+async def test_model_async_generate_emits_generator_model_id(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """The async surface threads model= through the SAME body builder."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    from ligandai import AsyncLigandAI
+
+    async with AsyncLigandAI(api_key="lgai_pro_test", base_url=BASE, max_retries=1) as ac:
+        await ac.peptides.generate(gene="EGFR", model="v6.9.21")
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v6.9.21"
+
+
+# --- v6.9.21 + guidance is an impossible combination, and must say so ---------
+#
+# The four guidance heads (proteolytic/serum stability, immunogenicity,
+# half-life, cell-free) are runtime penalty functions inside the v6.5-line
+# sampling loop. v6.9.21 samples by a different loop and does not implement
+# them. Dropping them silently would return designs generated WITHOUT the
+# guidance the caller asked for, which is indistinguishable from success.
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_name"),
+    [
+        ({"serum_stability": True}, "serum_stability"),
+        ({"immunogenicity": True}, "immunogenicity"),
+        ({"halflife": "extended"}, "halflife"),
+        ({"immuno_modules": {"mhc_i": True}}, "immuno_modules"),
+        ({"stability_modules": {"trypsin": True}}, "stability_modules"),
+    ],
+)
+def test_v6921_plus_guidance_raises(
+    client: LigandAI,
+    kwargs: dict,
+    expected_name: str,
+) -> None:
+    with pytest.raises(LigandAIInvalidConfig) as exc_info:
+        client.peptides.generate(gene="EGFR", model="v6.9.21", **kwargs)
+    message = str(exc_info.value)
+    assert "v6.9.21" in message
+    assert expected_name in message
+    assert exc_info.value.field == "model"
+
+
+def test_v6921_plus_cellfree_via_extra_raises(client: LigandAI) -> None:
+    """Cell-free has no typed kwarg — it arrives through **extra and must still conflict."""
+    with pytest.raises(LigandAIInvalidConfig) as exc_info:
+        client.peptides.generate(gene="EGFR", model="v6.9.21", cellfreeEnabled=True)
+    assert "cellfreeEnabled" in str(exc_info.value)
+
+
+def test_v6921_conflict_names_every_offending_argument(client: LigandAI) -> None:
+    with pytest.raises(LigandAIInvalidConfig) as exc_info:
+        client.peptides.generate(
+            gene="EGFR",
+            model="v6.9.21",
+            serum_stability=True,
+            immunogenicity=True,
+            halflife="extended",
+        )
+    message = str(exc_info.value)
+    for name in ("serum_stability", "immunogenicity", "halflife"):
+        assert name in message
+
+
+def test_v6921_without_guidance_is_accepted(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", model="v6.9.21", num_peptides=25)
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v6.9.21"
+    assert body["immunoEnabled"] is False
+    assert body["stabilityEnabled"] is False
+    assert body["halflifeEnabled"] is False
+
+
+def test_v6921_quality_guided_is_not_a_conflict(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """quality_guided is a different mechanism from the four penalty heads.
+
+    It also defaults to True, so treating it as a conflict would make v6.9.21
+    unusable without an explicit opt-out on every call.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", model="v6.9.21", quality_guided=True)
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v6.9.21"
+    assert body["qualityGuidedEnabled"] is True
+
+
+@pytest.mark.parametrize("model_id", ["v6.5.21", "v6.5", None])
+def test_guidance_allowed_on_guidance_capable_models(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+    model_id: str | None,
+) -> None:
+    """The conflict is specific to v6.9.21 — it must not leak onto other models."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(
+        gene="EGFR",
+        model=model_id,
+        serum_stability=True,
+        immunogenicity=True,
+        halflife="extended",
+    )
+    body = _body(httpx_mock)
+    assert body["stabilityEnabled"] is True
+    assert body["immunoEnabled"] is True
+    assert body["halflifeTarget"] == "extended"
+
+
+async def test_v6921_plus_guidance_raises_on_async_surface() -> None:
+    """Both resource surfaces enforce it — they share one body builder."""
+    from ligandai import AsyncLigandAI
+
+    async with AsyncLigandAI(api_key="lgai_pro_test", base_url=BASE, max_retries=1) as ac:
+        with pytest.raises(LigandAIInvalidConfig):
+            await ac.peptides.generate(gene="EGFR", model="v6.9.21", serum_stability=True)

@@ -107,6 +107,39 @@ job = client.peptides.generate(
 - `targeting_strategy` is a run label; it does not itself move the design
   surface.
 
+## F. Choosing the generator model (`model=`)
+
+**Omit `model` unless you have a reason.** Sending nothing lets the server apply
+the platform default, so a platform-side change to the default reaches you
+without an SDK upgrade. The SDK holds no copy of the default.
+
+```python
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=50,
+    model="v6.9.21",   # omit this line to use the platform default
+    auto_fold=True,
+)
+```
+
+- **`"v6.5.21"` (default)** — Receptor-conditioned. Designs respond to the
+  receptor you select. Replaces v6.5, which was trained with all-zero receptor
+  features and produced the same peptides regardless of target.
+- **`"v6.9.21"`** — Experimental. A different, larger receptor feature space
+  (107 per-residue channels vs 48), with classifier-free guidance applied at
+  inference. Validated for distinguishing sequence composition between
+  receptors. Not validated for where on the structure the peptide binds.
+  Guidance options are not available on this model.
+- **`"v6.5"`** — Legacy, deprecated. Trained with all-zero receptor features, so
+  its output does not depend on the receptor you select. Retained only to
+  reproduce runs made before August 2026.
+
+⚠ `model="v6.9.21"` combined with `serum_stability`, `immunogenicity`,
+`halflife`, `immuno_modules`, `stability_modules`, or the cell-free guidance keys
+raises `LigandAIInvalidConfig` before any HTTP call, naming the conflict. Those
+guidance heads are not available on that model and are never dropped silently.
+`quality_guided` is a different mechanism and works on every model.
+
 ## Cost preview before submitting
 
 ```python

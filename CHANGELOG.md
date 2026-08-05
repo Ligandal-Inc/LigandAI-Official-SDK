@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — pick the generator model: `peptides.generate(model=...)` (`bd-LIGANDAI_ALPHA_V2-dtsel.10.5`)
+
+`Peptides.generate()` and `AsyncPeptides.generate()` take a new `model=`
+argument, sent on the wire as `generatorModelId`.
+
+- **`"v6.5.21"` (default)** — Receptor-conditioned. Designs respond to the
+  receptor you select. Replaces v6.5, which was trained with all-zero receptor
+  features and produced the same peptides regardless of target.
+- **`"v6.9.21"`** — Experimental. A different, larger receptor feature space
+  (107 per-residue channels vs 48), with classifier-free guidance applied at
+  inference. Validated for distinguishing sequence composition between
+  receptors. Not validated for where on the structure the peptide binds.
+  Guidance options are not available on this model.
+- **`"v6.5"`** — Legacy, deprecated. Trained with all-zero receptor features, so
+  its output does not depend on the receptor you select. Retained only to
+  reproduce runs made before August 2026.
+
+**Omitting `model` sends no model key at all**, so the server applies the
+platform default. The SDK deliberately keeps no copy of that default: a
+client-side copy would pin every SDK build to whatever the default was on its
+release day, and a later platform-side change would never reach those callers.
+
+**`model="v6.9.21"` + any guidance head raises
+`LigandAIInvalidConfig` before the request is sent**, naming every conflicting
+argument (`serum_stability`, `immunogenicity`, `halflife`, `immuno_modules`,
+`stability_modules`, and the cell-free keys passed through `**extra`). The four
+guidance heads are runtime penalty functions inside the v6.5-line sampling loop;
+v6.9.21 samples by a different loop and does not implement them. They are not
+dropped silently — a design generated without the guidance you asked for is
+indistinguishable from success, which is the failure mode this closes.
+`quality_guided` is a different mechanism and is **not** part of that conflict.
+
+The id list is **not** gated client-side. An id this SDK build has not heard of
+is forwarded verbatim and the server's model registry answers; a client-side
+allowlist would make every future model unusable until callers upgraded.
+
+`client.generate(...)` forwards `model=` like every other kwarg, and the
+Claude-agent skill schema (`skills/claude-agent-sdk/ligandai-skill.ts`) exposes
+it as an enum with the same scope statements.
+
 ### Added — structured diagnostics: the SDK now tells you when a run did not do what you asked (`bd-LIGANDAI_ALPHA_V2-x4vt8.3.2`)
 
 The `x4vt8` entry below fixed the *numbering bug* that made a customer's

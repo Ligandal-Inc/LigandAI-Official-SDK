@@ -35,6 +35,7 @@ from ligandai._targeting import validate_and_normalize_targeting
 from ligandai.errors import (
     LigandAICreditError,
     LigandAIError,
+    LigandAIInvalidConfig,
     LigandAILegalAcceptanceRequired,
     LigandAIValidationError,
     LigandAIWaitTimeout,
@@ -158,6 +159,48 @@ _LOGITS_EXTRA_KEYS: frozenset[str] = frozenset({
     "logits",
 })
 
+# Runtime guidance-penalty keys that can reach the request body through
+# ``extra={...}`` / ``**extra`` rather than a typed kwarg. Cell-free
+# expressability has no typed argument on :meth:`Peptides.generate` (see
+# ``examples/26_gated_generation.py``), so a model-compatibility check that only
+# looked at the typed kwargs would miss it and the conflict would surface as an
+# opaque server error instead of a named client-side one.
+_GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
+    "cellfreeEnabled",
+    "cellfree_enabled",
+    "cellfreeStrength",
+    "cellfree_strength",
+    "immunoEnabled",
+    "immuno_enabled",
+    "stabilityEnabled",
+    "stability_enabled",
+    "proteolyticEnabled",
+    "proteolytic_enabled",
+    "halflifeEnabled",
+    "halflife_enabled",
+})
+
+# Generator models known to this SDK build that do NOT implement the guidance
+# heads — i.e. the ids for which the platform's model registry carries
+# ``supports_guidance_heads = False``. The gate is that CAPABILITY, not the
+# identity of any one model; add an id here only because its capability flag is
+# false, never because of its version number.
+#
+# The four heads are the v6.5-line runtime penalty functions
+# (stability/proteolytic, immuno, halflife, cellfree). They are written against
+# the v6.5 diffusion sampling loop; v6.9.21 samples by iterative
+# confidence-based unmasking instead, so requesting both is an impossible
+# combination rather than a preference to be resolved silently.
+#
+# ⛔ ABSENCE FROM THIS SET IS NOT A CAPABILITY CLAIM. A published SDK cannot know
+# the capabilities of a model that did not exist when it was built, so an id this
+# build has not heard of is forwarded and the SERVER's request validation — which
+# reads the capability flag straight off the registry — is the authority. This
+# set exists only to turn the combinations we DO know are impossible into a fast,
+# named, pre-flight error instead of an opaque server rejection. Keeping a full
+# copy of the registry here would go stale exactly as fast as a hardcoded id list.
+_MODELS_WITHOUT_GUIDANCE_HEADS: frozenset[str] = frozenset({"v6.9.21"})
+
 
 def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
     """Emit DeprecationWarning when cys-related keys arrive via ``extra=``.
@@ -206,6 +249,104 @@ def _requests_advanced_guidance(
     ):
         return True
     return bool(extra and any(bool(extra.get(key)) for key in _LOGITS_EXTRA_KEYS))
+
+
+def _guidance_arguments_in_use(
+    *,
+    immunogenicity: bool,
+    immuno_modules: dict[str, bool] | None,
+    serum_stability: bool,
+    stability_modules: dict[str, bool] | None,
+    halflife: _HalflifeTarget | None,
+    extra: dict[str, Any] | None,
+) -> list[str]:
+    """Names of the guidance-head arguments the caller actually turned on.
+
+    Scope is the four v6.5-line runtime penalty functions — proteolytic/serum
+    stability, immunogenicity, half-life, and cell-free expressability. Returned
+    sorted so the error message is deterministic. ``quality_guided`` is NOT in
+    this set: it is a different mechanism, defaults to ``True``, and is not one
+    of the four penalty heads.
+    """
+    in_use: list[str] = []
+    if immunogenicity:
+        in_use.append("immunogenicity")
+    if immuno_modules is not None:
+        in_use.append("immuno_modules")
+    if serum_stability:
+        in_use.append("serum_stability")
+    if stability_modules is not None:
+        in_use.append("stability_modules")
+    if halflife is not None:
+        in_use.append("halflife")
+    if extra:
+        in_use.extend(
+            f"extra[{key!r}]" for key in _GUIDANCE_EXTRA_KEYS if bool(extra.get(key))
+        )
+    return sorted(in_use)
+
+
+def _resolve_generator_model(
+    model: _GeneratorModel | str | None,
+    *,
+    immunogenicity: bool,
+    immuno_modules: dict[str, bool] | None,
+    serum_stability: bool,
+    stability_modules: dict[str, bool] | None,
+    halflife: _HalflifeTarget | None,
+    extra: dict[str, Any] | None,
+) -> str | None:
+    """Normalize ``model`` and reject request shapes the selected model cannot run.
+
+    Returns the selector id to put on the wire as ``generatorModelId``, or
+    ``None`` when the caller supplied nothing. ``None`` means **send no key** so
+    the server picks the default — the SDK deliberately does not carry a
+    client-side copy of the default, because a client-side copy stops tracking
+    the server the moment the platform default moves.
+
+    The SDK does not gate the id list. An id this build has not heard of is
+    forwarded verbatim; the server's model registry is the authority and answers
+    with an error naming the ids it knows. Hard-coding an allowlist here would
+    make every future model unusable until users upgraded the SDK.
+
+    Raises:
+        LigandAIInvalidConfig: ``model`` is not a non-empty string, or the model
+            does not implement the guidance heads the request asks for.
+    """
+    if model is None:
+        return None
+    if not isinstance(model, str) or not model.strip():
+        raise LigandAIInvalidConfig(
+            "model must be a non-empty generator model id string "
+            "(e.g. 'v6.5.21', 'v6.9.21', 'v6.5').",
+            field="model",
+            value=model,
+        )
+    model_id = model.strip()
+    if model_id in _MODELS_WITHOUT_GUIDANCE_HEADS:
+        conflicts = _guidance_arguments_in_use(
+            immunogenicity=immunogenicity,
+            immuno_modules=immuno_modules,
+            serum_stability=serum_stability,
+            stability_modules=stability_modules,
+            halflife=halflife,
+            extra=extra,
+        )
+        if conflicts:
+            raise LigandAIInvalidConfig(
+                f"model={model_id!r} does not support the guidance options "
+                f"{conflicts}. The stability, immunogenicity, half-life and "
+                "cell-free guidance heads run inside the v6.5-line sampling "
+                "loop, which this model does not use. Drop those arguments to "
+                f"use {model_id}, or use a model that supports them "
+                "(e.g. 'v6.5.21'). They are not dropped silently, because a "
+                "design generated without the guidance you asked for is not "
+                "the design you asked for.",
+                field="model",
+                value=model_id,
+                allowed=f"remove {conflicts} or select a guidance-capable model",
+            )
+    return model_id
 
 
 def _parse_deltaforge_score(data: dict[str, Any]) -> DeltaForgeScore:
@@ -351,6 +492,29 @@ _HalflifeTarget = Literal["extended", "rapid", "moderate"]
 # cleavable, used for prodrugs / pro-peptides).
 _StabilityMode = Literal["resist", "target"]
 
+# Generator model to run the design with, sent on the wire as
+# ``generatorModelId``. Omit it (``model=None``, the default) to let the server
+# apply the platform default — the SDK does not carry a copy of that default,
+# so a platform-side change reaches you without an SDK upgrade.
+#
+# - ``"v6.5.21"`` (default) — Receptor-conditioned. Designs respond to the
+#   receptor you select. Replaces v6.5, which was trained with all-zero receptor
+#   features and produced the same peptides regardless of target.
+# - ``"v6.9.21"`` — Experimental. A different, larger receptor feature space
+#   (107 per-residue channels vs 48), with classifier-free guidance applied at
+#   inference. Validated for distinguishing sequence composition between
+#   receptors. Not validated for where on the structure the peptide binds.
+#   Guidance options are not available on this model.
+# - ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor features, so
+#   its output does not depend on the receptor you select. Retained only to
+#   reproduce runs made before August 2026.
+#
+# This alias is a typing convenience for the ids this SDK build knows about, NOT
+# a runtime allowlist: ``model`` is typed ``_GeneratorModel | str | None`` and an
+# unrecognized id is forwarded to the server, whose model registry is the
+# authority on what exists.
+_GeneratorModel = Literal["v6.5.21", "v6.9.21", "v6.5"]
+
 # Fold partner expansion mode. Controls which receptor chains are included in
 # the peptide co-fold complex.
 #
@@ -461,6 +625,9 @@ def _generation_body(
     cysteine_mode: _CysteineMode,
     quality_guided: bool,
     quality_guidance_scale: float,
+    # Generator model selector. ``None`` = omit the key entirely and let the
+    # server apply its own default (see ``_GeneratorModel``).
+    model: _GeneratorModel | str | None = None,
     immunogenicity: bool,
     immuno_strength: float,
     immuno_modules: dict[str, bool] | None,
@@ -528,6 +695,19 @@ def _generation_body(
     hotspot_residues = _targeting_normalized["hotspot_residues"]
     avoid_shell_angstrom = _targeting_normalized["avoid_shell_angstrom"]
 
+    # Generator model selection — validated here, in the single body builder both
+    # the sync and async generate() paths go through, so neither surface can
+    # bypass the model/guidance compatibility check.
+    generator_model_id = _resolve_generator_model(
+        model,
+        immunogenicity=immunogenicity,
+        immuno_modules=immuno_modules,
+        serum_stability=serum_stability,
+        stability_modules=stability_modules,
+        halflife=halflife,
+        extra=extra,
+    )
+
     # Auto-resolve targeting_strategy when not explicitly set:
     #   * target_residues present → "pocket_targeted" (treat residues as a real pocket)
     #   * otherwise → "full_surface"
@@ -559,6 +739,12 @@ def _generation_body(
         "stabilityMode": stability_mode,
         "halflifeEnabled": halflife is not None,
     }
+    # Generator model. Emitted ONLY when the caller named one — an absent key
+    # means "server default", and the server default is the one place the
+    # default is allowed to live. Writing the current default in here would
+    # pin every SDK build to whatever the default was on its release day.
+    if generator_model_id is not None:
+        body["generatorModelId"] = generator_model_id
     if halflife is not None:
         body["halflifeTarget"] = halflife
         body["halflifeStrength"] = halflife_strength
@@ -2809,6 +2995,15 @@ class Peptides(Resource):
         cysteine_mode: _CysteineMode = "disulfide_only",
         quality_guided: bool = True,
         quality_guidance_scale: float = 1.0,
+        # Generator model to design with — see ``_GeneratorModel`` above for the
+        # per-model scope statements. Sent on the wire as ``generatorModelId``.
+        # None (default) sends NO key, so the server applies the platform
+        # default; the SDK deliberately keeps no copy of that default so a
+        # platform-side change reaches you without an SDK upgrade.
+        # ⛔ "v6.9.21" does not implement the guidance heads — combining it with
+        # serum_stability / immunogenicity / halflife / cell-free guidance raises
+        # LigandAIInvalidConfig client-side rather than dropping them silently.
+        model: _GeneratorModel | str | None = None,
         immunogenicity: bool = False,
         immuno_strength: float = 2.0,
         immuno_modules: dict[str, bool] | None = None,
@@ -2967,6 +3162,37 @@ class Peptides(Resource):
                 to all authenticated tiers, including free; server-side credits and
                 retention/licensing terms still apply.
             quality_guidance_scale: Scale for quality guidance (default 1.0).
+            model: Generator model to design with, sent as ``generatorModelId``.
+                Leave it unset (``None``, the default) to use the platform
+                default — the SDK sends no key at all in that case, so the
+                server decides and a platform-side change to the default reaches
+                you without an SDK upgrade.
+
+                * ``"v6.5.21"`` (default) — Receptor-conditioned. Designs
+                  respond to the receptor you select. Replaces v6.5, which was
+                  trained with all-zero receptor features and produced the same
+                  peptides regardless of target.
+                * ``"v6.9.21"`` — Experimental. A different, larger receptor
+                  feature space (107 per-residue channels vs 48), with
+                  classifier-free guidance applied at inference. Validated for
+                  distinguishing sequence composition between receptors. Not
+                  validated for where on the structure the peptide binds.
+                  Guidance options are not available on this model.
+                * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero
+                  receptor features, so its output does not depend on the
+                  receptor you select. Retained only to reproduce runs made
+                  before August 2026.
+
+                Combining ``model="v6.9.21"`` with ``serum_stability``,
+                ``immunogenicity``, ``halflife``, ``immuno_modules``,
+                ``stability_modules``, or the cell-free guidance keys raises
+                :class:`~ligandai.errors.LigandAIInvalidConfig` before any HTTP
+                call, naming the conflicting arguments. They are not dropped
+                silently — a design generated without the guidance you asked for
+                is not the design you asked for.
+
+                Ids this SDK build does not recognize are forwarded as-is; the
+                server's model registry is the authority on which ids exist.
             immunogenicity: Enable immune guidance (academia+ tier). Steers
                 generation away from MHC-binding motifs toward sequences with low
                 predicted immunogenicity. Uses MHC-I/II anchor avoidance + scoring
@@ -3115,6 +3341,7 @@ class Peptides(Resource):
             cysteine_mode=cysteine_mode,
             quality_guided=quality_guided,
             quality_guidance_scale=quality_guidance_scale,
+            model=model,
             immunogenicity=immunogenicity,
             immuno_strength=immuno_strength,
             immuno_modules=immuno_modules,
@@ -5426,6 +5653,11 @@ class AsyncPeptides(AsyncResource):
         cysteine_mode: _CysteineMode = "disulfide_only",
         quality_guided: bool = True,
         quality_guidance_scale: float = 1.0,
+        # Generator model — see :meth:`Peptides.generate` for the per-model scope
+        # statements. Sent as ``generatorModelId``; None (default) sends no key
+        # so the server applies the platform default. "v6.9.21" + any guidance
+        # argument raises LigandAIInvalidConfig client-side.
+        model: _GeneratorModel | str | None = None,
         immunogenicity: bool = False,
         immuno_strength: float = 2.0,
         immuno_modules: dict[str, bool] | None = None,
@@ -5542,6 +5774,7 @@ class AsyncPeptides(AsyncResource):
             cysteine_mode=cysteine_mode,
             quality_guided=quality_guided,
             quality_guidance_scale=quality_guidance_scale,
+            model=model,
             immunogenicity=immunogenicity,
             immuno_strength=immuno_strength,
             immuno_modules=immuno_modules,

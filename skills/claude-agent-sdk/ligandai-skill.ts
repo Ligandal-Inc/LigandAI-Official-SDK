@@ -194,6 +194,18 @@ Returns session_id for polling via ligandai_get_job.`,
         enum: [0, 0.5, 1.0, 1.5],
         description: "0=none, 0.5=low, 1.0=medium, 1.5=high",
       },
+      // Generator model selection. OMIT to use the platform default — do not
+      // send a value just to "be explicit", or the run stops tracking the
+      // server-side default.
+      model: {
+        type: "string",
+        enum: ["v6.5.21", "v6.9.21", "v6.5"],
+        description:
+          "Generator model. Omit for the platform default. " +
+          "v6.5.21 (default): Receptor-conditioned. Designs respond to the receptor you select. Replaces v6.5, which was trained with all-zero receptor features and produced the same peptides regardless of target. " +
+          "v6.9.21: Experimental. A different, larger receptor feature space (107 per-residue channels vs 48), with classifier-free guidance applied at inference. Validated for distinguishing sequence composition between receptors. Not validated for where on the structure the peptide binds. Guidance options are not available on this model — combining it with serum_stability / immunogenicity / halflife / cell-free guidance is rejected client-side. " +
+          "v6.5: Legacy, deprecated. Trained with all-zero receptor features, so its output does not depend on the receptor you select. Retained only to reproduce runs made before August 2026.",
+      },
       // Quality-guided generation (free+)
       quality_guided: {
         type: "boolean",
@@ -589,7 +601,7 @@ function buildGenerateScript(params: Record<string, unknown>): string {
   if (params.ec_trimming) {
     parts.push(`kwargs['ec_trimming_config'] = ${JSON.stringify(params.ec_trimming)}`);
   }
-  for (const k of ["quality_guided", "quality_guidance_scale",
+  for (const k of ["model", "quality_guided", "quality_guidance_scale",
                     "charge_mode", "charge_value", "charge_min", "charge_max", "min_solubility",
                     "immunogenicity", "immuno_strength",
                     "serum_stability", "stability_mode", "stability_strength",
