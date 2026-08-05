@@ -2578,6 +2578,149 @@ class SessionDetail(Session):
     parameters: dict[str, Any] | None = None
 
 
+# -- Program sharing -----------------------------------------------------------
+#
+# A collaborator (e.g. an external academic partner) can be granted access to
+# a program you own without becoming its owner. Two mechanisms feed the same
+# underlying grant: a direct/org **share** (you already know their account or
+# organization) and an email **invite** (you only have an address; accepting
+# it creates the share). :class:`ProgramAccess` is the single call that tells
+# ANY grantee — owner, org member, or share recipient — what they can do.
+
+
+#: Permission level grantable on a shared program, from least to most access.
+ProgramPermission = Literal["view", "comment", "edit"]
+
+#: The caller's own access rank on a program — :data:`ProgramPermission` plus
+#: ``"owner"`` (the program's creator, or a platform admin).
+EffectiveProgramAccess = Literal["view", "comment", "edit", "owner"]
+
+#: How an :data:`EffectiveProgramAccess` grant was derived. ``org_owner`` is
+#: membership in the program's own organization (pre-existing platform
+#: semantics, not something :meth:`~ligandai.resources.programs.Programs.share`
+#: creates); ``user_share`` / ``org_share`` come from an explicit grant.
+ProgramAccessProvenance = Literal["owner", "org_owner", "user_share", "org_share", "admin"]
+
+
+class ProgramShare(_LGModel):
+    """One grant row, as returned by
+    :meth:`~ligandai.resources.programs.Programs.shares` (list) and
+    :meth:`~ligandai.resources.programs.Programs.share` /
+    :meth:`~ligandai.resources.programs.Programs.update_share` (single row).
+
+    Exactly one of :attr:`shared_with_user_id` / :attr:`shared_with_org_id` is
+    set — the platform enforces this as a database constraint. Only the
+    program's owner can list, create, or modify these rows; every method that
+    returns a :class:`ProgramShare` raises
+    :class:`~ligandai.errors.LigandAIForbidden` (HTTP 403) for anyone else.
+    """
+
+    id: int
+    program_id: int | None = Field(default=None, alias="programId")
+    shared_with_user_id: str | None = Field(default=None, alias="sharedWithUserId")
+    shared_with_user_email: str | None = Field(default=None, alias="sharedWithUserEmail")
+    shared_with_org_id: int | None = Field(default=None, alias="sharedWithOrgId")
+    shared_with_org_name: str | None = Field(default=None, alias="sharedWithOrgName")
+    permission: ProgramPermission | str
+    shared_by: str | None = Field(default=None, alias="sharedBy")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+    updated_at: datetime | None = Field(default=None, alias="updatedAt")
+
+
+class SharedProgram(Program):
+    """A :class:`Program` returned by
+    :meth:`~ligandai.resources.programs.Programs.shared_with_me`, annotated
+    with the caller's own grant on it. Programs the caller owns outright are
+    not included here — see :meth:`~ligandai.resources.programs.Programs.list`
+    for those.
+    """
+
+    permission: ProgramPermission | str | None = None
+    provenance: ProgramAccessProvenance | str | None = None
+    shared_by: str | None = Field(default=None, alias="sharedBy")
+    shared_by_email: str | None = Field(default=None, alias="sharedByEmail")
+    shared_at: datetime | None = Field(default=None, alias="sharedAt")
+
+
+class ProgramAccessCapabilities(_LGModel):
+    """Convenience capability flags for a :class:`ProgramAccess` — the only
+    thing a caller should branch on. A share recipient never gets
+    :attr:`reshare`, :attr:`delete`, or :attr:`transfer` regardless of
+    permission level; only the owner (or a platform admin) administers a
+    program. ``edit`` means "edit content", not "administer the program".
+    """
+
+    read: bool = False
+    comment: bool = False
+    mutate: bool = False
+    reshare: bool = False
+    delete: bool = False
+    spend_credits: bool = Field(default=False, alias="spendCredits")
+    transfer: bool = False
+
+
+class ProgramAccess(_LGModel):
+    """The caller's own effective access on a program, from
+    :meth:`~ligandai.resources.programs.Programs.access`.
+
+    Works for ANY grantee — owner, org member, or share recipient — so it is
+    the one call a collaborator can make to find out what they're allowed to
+    do with a program before trying it. The server intentionally reports
+    "not found" (:class:`~ligandai.errors.LigandAINotFoundError`) rather than
+    "forbidden" when the caller has no grant at all, so a stranger can't use
+    this call to confirm a program id exists.
+    """
+
+    program_id: int | None = Field(default=None, alias="programId")
+    effective: EffectiveProgramAccess | str
+    provenance: ProgramAccessProvenance | str
+    share_id: int | None = Field(default=None, alias="shareId")
+    granted_by: str | None = Field(default=None, alias="grantedBy")
+    can: ProgramAccessCapabilities = Field(default_factory=ProgramAccessCapabilities)
+
+
+class ProgramInvite(_LGModel):
+    """A pending program-share invite row, from
+    :meth:`~ligandai.resources.programs.Programs.invites`.
+
+    Never carries the raw invite token or URL — only
+    :class:`ProgramInviteCreated` does, and only once, immediately after
+    :meth:`~ligandai.resources.programs.Programs.invite` creates it. The
+    token is stored server-side only as a one-way hash, so there is no "show
+    me the link again" call.
+    """
+
+    id: int
+    program_id: int | None = Field(default=None, alias="programId")
+    email: str
+    permission: ProgramPermission | str
+    invited_by: str | None = Field(default=None, alias="invitedBy")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+    expires_at: datetime | None = Field(default=None, alias="expiresAt")
+    accepted_at: datetime | None = Field(default=None, alias="acceptedAt")
+    revoked_at: datetime | None = Field(default=None, alias="revokedAt")
+
+
+class ProgramInviteCreated(ProgramInvite):
+    """Response of :meth:`~ligandai.resources.programs.Programs.invite` — the
+    one and only time the invite URL (and the raw token embedded in it) is
+    returned. Relay it to the invitee and discard it; it cannot be retrieved
+    again via :meth:`~ligandai.resources.programs.Programs.invites`.
+    """
+
+    invite_url: str | None = Field(default=None, alias="inviteUrl")
+
+
+class ProgramInviteAcceptResult(_LGModel):
+    """Response of :meth:`~ligandai.resources.programs.Programs.accept_invite`."""
+
+    success: bool = True
+    program_id: int | None = Field(default=None, alias="programId")
+    share_id: int | None = Field(default=None, alias="shareId")
+    permission: ProgramPermission | str | None = None
+    program: Program | None = None
+
+
 # -- Charts / reports --------------------------------------------------------
 
 
