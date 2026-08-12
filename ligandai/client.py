@@ -84,6 +84,7 @@ from ligandai.resources.receptors import AsyncReceptors, Receptors
 from ligandai.resources.reports import AsyncReports, Reports
 from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
+from ligandai.resources.validated_binder import AsyncValidatedBinder, ValidatedBinder
 from ligandai.server_compat import COMPATIBILITY_PATH, compatibility_diagnostics
 from ligandai.species import DEFAULT_SPECIES, Species, normalize_species
 from ligandai.types import (
@@ -541,6 +542,7 @@ class LigandAI(_ClientCommon):
         self.reports: Reports = Reports(self._transport)
         self.structures: Structures = Structures(self._transport)
         self.synthesis: Synthesis = Synthesis(self._transport)
+        self.validated_binder: ValidatedBinder = ValidatedBinder(self._transport)
 
         # Cached on-demand
         self._user: User | None = None
@@ -982,6 +984,7 @@ class AsyncLigandAI(_ClientCommon):
         self.reports: AsyncReports = AsyncReports(self._transport)
         self.structures: AsyncStructures = AsyncStructures(self._transport)
         self.synthesis: AsyncSynthesis = AsyncSynthesis(self._transport)
+        self.validated_binder: AsyncValidatedBinder = AsyncValidatedBinder(self._transport)
 
     @property
     def transport(self) -> AsyncHTTPTransport:
