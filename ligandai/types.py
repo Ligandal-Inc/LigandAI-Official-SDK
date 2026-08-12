@@ -1024,6 +1024,85 @@ class ImmunoScores(_LGModel):
     )
 
 
+class QualityTier(_LGModel):
+    """Acceptance-gate verdict for one fold result, from the ONE shared server-side
+    evaluator (``shared/acceptance-gate.json`` / ``fastapi_backend/core/acceptance_gate.py``
+    / ``shared/acceptance-gate.ts``). The SDK never re-derives this judgement --
+    re-implementing the gate client-side is exactly the failure this system was built to
+    end (six divergent copies existed before it, one numerically wrong: pLDDT 0.80 where
+    canonical is 88/100). This model only surfaces what the server already decided.
+
+    Populated on :class:`Peptide` (from :meth:`~ligandai.resources.peptides.Peptides.search`
+    and friends) as the STRONGEST criterion the design actually clears -- independent of
+    whatever ``is_elite`` / ``super_elite`` / ``acceptance_criterion`` filter was applied to
+    the request. If the design clears none of the four criteria, it reports the result
+    against the weakest one (``great_plus``), so :attr:`summary` explains why even the floor
+    bar was missed rather than surfacing a stronger criterion's less-informative failure.
+
+    ⛔ UNIT TRAPS carried by the underlying gate -- get any of these wrong and the verdict
+    is silently meaningless:
+      - ``plddt`` is on the 0-100 scale. A threshold of ``0.88`` is a silent no-op that lets
+        every fold through.
+      - ``predicted_kd`` (the affinity leg, only on ``super_elite_affinity``) is NANOMOLAR.
+        Compare to ``100``, never ``100e-9``.
+      - The structural leg gates ``peptide_ipsae`` -- the peptide<->receptor interface
+        score -- and NEVER whole-complex ``ipsae``. On the 2026-07-30 corpus, gating on the
+        whole-complex value admitted 248 genuine false positives.
+
+    ⛔ :attr:`verdict` is one of ``'pass' | 'fail' | 'indeterminate'``. ``'indeterminate'``
+    means a leg could not be evaluated at all -- the metric was never computed, the
+    construct frame was unverified, or (only relevant when ensemble co-validation was
+    requested) a required engine had no comparable result in the same frame. It is NEVER
+    the same claim as ``'fail'`` and must never be treated as one: "we did not measure
+    this" is not "this design is bad".
+
+    ⛔ ENSEMBLE CO-VALIDATION IS NOT PERSISTABLE ON THE PLATFORM TODAY
+    (bd-LIGANDAI_ALPHA_V2-xv5ih). This is a plumbing gap, not an absence of evidence that
+    dual-engine agreement matters -- OpenDDE never writes ``ptf_fold_results`` (the fold
+    router 422s that engine on the DB-persisting path); its results land only as untyped
+    JSONB in ``fold_trajectory_index`` with no design-level join key; and
+    ``ptf_fold_results`` has no engine column at all, so two engines folding one design
+    collide on the same unique key. Until that plumbing lands, requesting ensemble
+    co-validation (``require_ensemble=True`` on
+    :meth:`~ligandai.resources.peptides.Peptides.search`) yields ``verdict='indeterminate'``
+    and :attr:`co_validated` is ``False`` for essentially every design on the platform
+    today -- it is NOT a dual-gate pass, and :attr:`co_validated` must never be read as
+    evidence of cross-engine agreement until that bead closes. (Dual-engine-scored data does
+    exist -- 940 designs scored by both engines against wet-lab labels, on disk in the
+    research tree, not in the platform tables -- so agreement is measurable in principle;
+    the platform just cannot express a co-validated *result* yet. On that 940-design set
+    Boltz-2 out-ranks OpenDDE by +0.086 AUROC, so the dual gate buys precision from
+    agreement between two independent predictors, not because OpenDDE is the stronger
+    judge.)
+    """
+
+    criterion: str | None = Field(
+        default=None,
+        description="Which of the four canonical criteria this verdict is against: "
+                    "'great_plus' | 'elite' | 'super_elite' | 'super_elite_affinity'.",
+    )
+    verdict: str | None = Field(
+        default=None,
+        description="'pass' | 'fail' | 'indeterminate'. 'indeterminate' means a leg was "
+                    "never measured -- treat it as 'not measured', never as 'fail'.",
+    )
+    co_validated: bool | None = Field(
+        default=None, alias="coValidated",
+        description="True only when ensemble co-validation was REQUESTED and genuinely "
+                    "satisfied by every required engine in the same fold frame. NOT "
+                    "persistable on the platform today -- see the class docstring; never "
+                    "read this as evidence of cross-engine agreement until "
+                    "bd-LIGANDAI_ALPHA_V2-xv5ih closes.",
+    )
+    summary: str | None = Field(
+        default=None,
+        description="Human-readable one-liner, safe to show directly in a table cell or an "
+                    "AI answer -- e.g. \"Passes Super-elite (structural).\" or \"Cannot be "
+                    "judged against Elite (peptide_ipsae_missing) -- reported as "
+                    "indeterminate, not as a pass or a failure.\"",
+    )
+
+
 class Peptide(_LGModel):
     name: str | None = None
     sequence: str
@@ -1124,7 +1203,20 @@ class Peptide(_LGModel):
     )
     is_elite: bool | None = Field(
         default=None, alias="isElite",
-        description="Server-side elite classification (typically iPSAE >= 0.85).",
+        description="Legacy single-metric server flag -- historically peptide_ipsae >= 0.80, "
+                    "NOT the 0.85 threshold of the canonical 'elite' criterion in "
+                    "shared/acceptance-gate.json. Kept for back-compat only. Prefer "
+                    ":attr:`quality_tier`, which reports the strongest criterion this design "
+                    "actually clears against the one shared ladder (great_plus / elite / "
+                    "super_elite / super_elite_affinity).",
+    )
+    quality_tier: QualityTier | None = Field(
+        default=None, alias="qualityTier",
+        description="Server-computed acceptance-gate verdict -- the strongest criterion this "
+                    "design clears (or, if none, the result against the weakest, "
+                    "'great_plus'). None on responses from before this field existed. See "
+                    ":class:`QualityTier` for the unit traps and the ensemble "
+                    "co-validation caveat.",
     )
     masked: bool | None = Field(
         default=None, alias="_masked",
@@ -1715,6 +1807,13 @@ class FoldResult(_LGModel):
     fall back to :attr:`ipsae`, which measures a different thing."""
     peptide_ipsae_status: str | None = Field(default=None, alias="peptideIpsaeStatus")
     """'ok' when :attr:`peptide_ipsae` is present; 'not_computed' when it is NULL."""
+    quality_tier: QualityTier | None = Field(default=None, alias="qualityTier")
+    """Server-computed acceptance-gate verdict for this fold, when the endpoint that
+    produced this :class:`FoldResult` includes it. ``None`` on endpoints that don't
+    (this field is populated on the ``peptides.search()`` / ``peptides.list()`` path
+    today; treat it as forward-compatible elsewhere). See :class:`QualityTier` for the
+    unit traps -- and, in particular, that ``require_ensemble=True`` does NOT currently
+    yield a co-validated pass on this platform (bd-LIGANDAI_ALPHA_V2-xv5ih)."""
     plddt: float | None = None
     ptm: float | None = None
     ipae: float | None = None

@@ -586,7 +586,12 @@ class Synthesis(Resource):
             sampling_steps: Diffusion sampling steps per fold (15-200). Steps <=50
                 cost 1x base rate; each additional 50 steps adds another 1x.
                 E.g. 100 steps = 2x, 150 steps = 3x, 200 steps = 4x base rate.
-            fold_trajectories: Number of trajectory repeats per fold (default 1).
+            fold_trajectories: Number of trajectory repeats per fold (this
+                parameter's default is 1). Note the platform's own tier
+                default is 4 for academia/pro/pro_beta/pro_commercial/
+                enterprise/discovery_partner (free/basic stay at 1) — pass
+                ``fold_trajectories=4`` explicitly to match the platform
+                default on a paid tier.
         """
         params: dict[str, object] = {
             "gene": gene,
@@ -884,7 +889,12 @@ class AsyncSynthesis(AsyncResource):
             sampling_steps: Diffusion sampling steps per fold (15-200). Steps <=50
                 cost 1x base rate; each additional 50 steps adds another 1x.
                 E.g. 100 steps = 2x, 150 steps = 3x, 200 steps = 4x base rate.
-            fold_trajectories: Number of trajectory repeats per fold (default 1).
+            fold_trajectories: Number of trajectory repeats per fold (this
+                parameter's default is 1). Note the platform's own tier
+                default is 4 for academia/pro/pro_beta/pro_commercial/
+                enterprise/discovery_partner (free/basic stay at 1) — pass
+                ``fold_trajectories=4`` explicitly to match the platform
+                default on a paid tier.
         """
         params: dict[str, object] = {
             "gene": gene,

@@ -159,12 +159,14 @@ _LOGITS_EXTRA_KEYS: frozenset[str] = frozenset({
     "logits",
 })
 
-# Runtime guidance-penalty keys that can reach the request body through
-# ``extra={...}`` / ``**extra`` rather than a typed kwarg. Cell-free
-# expressability has no typed argument on :meth:`Peptides.generate` (see
-# ``examples/26_gated_generation.py``), so a model-compatibility check that only
-# looked at the typed kwargs would miss it and the conflict would surface as an
-# opaque server error instead of a named client-side one.
+# Raw wire-format guidance keys a caller could set directly through
+# ``extra={...}`` / ``**extra``, bypassing the typed kwargs (``immunogenicity``,
+# ``serum_stability``, ``halflife``, ``cellfree``, ...). All four guidance heads
+# have a typed kwarg as of bd-LIGANDAI_ALPHA_V2-sxc8j (``cellfree``/
+# ``cellfree_strength`` were the last ones added — see
+# ``examples/26_gated_generation.py``), but ``extra`` remains a supported
+# escape hatch and the model-compatibility check must not miss a guidance flag
+# set that way just because it skipped the typed field.
 _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
     "cellfreeEnabled",
     "cellfree_enabled",
@@ -186,11 +188,19 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
 # identity of any one model; add an id here only because its capability flag is
 # false, never because of its version number.
 #
-# The four heads are the v6.5-line runtime penalty functions
-# (stability/proteolytic, immuno, halflife, cellfree). They are written against
-# the v6.5 diffusion sampling loop; v6.9.21 samples by iterative
-# confidence-based unmasking instead, so requesting both is an impossible
-# combination rather than a preference to be resolved silently.
+# Empty today (bd-LIGANDAI_ALPHA_V2-sxc8j, 2026-08-11): v6.5, v6.5.21, AND
+# v6.9.21 all implement the four guidance heads
+# (immuno/proteolytic/halflife/cellfree) — the v6.5 line via the streaming
+# guided-pool transport, v6.9.21 via the batch-spawn "default_function"
+# transport (guidance kwargs ride the normal generate call; no streaming
+# surface). v6.9.21 used to be in this set; it was removed once the worker
+# was redeployed and verified to serve the four heads.
+#
+# This set — and the conflict check in ``_resolve_generator_model`` below —
+# stays in place for a FUTURE model that ships without guidance support: add
+# its id here the day its registry entry carries
+# ``supports_guidance_heads = False``, so that combination fails with a fast,
+# named, client-side error instead of an opaque server rejection.
 #
 # ⛔ ABSENCE FROM THIS SET IS NOT A CAPABILITY CLAIM. A published SDK cannot know
 # the capabilities of a model that did not exist when it was built, so an id this
@@ -199,7 +209,7 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
 # set exists only to turn the combinations we DO know are impossible into a fast,
 # named, pre-flight error instead of an opaque server rejection. Keeping a full
 # copy of the registry here would go stale exactly as fast as a hardcoded id list.
-_MODELS_WITHOUT_GUIDANCE_HEADS: frozenset[str] = frozenset({"v6.9.21"})
+_MODELS_WITHOUT_GUIDANCE_HEADS: frozenset[str] = frozenset()
 
 
 def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
@@ -235,6 +245,7 @@ def _requests_advanced_guidance(
     serum_stability: bool,
     stability_modules: dict[str, bool] | None,
     halflife: _HalflifeTarget | None,
+    cellfree: bool,
     cyclic_mode: _CyclicMode | None,
     extra: dict[str, Any] | None,
 ) -> bool:
@@ -245,6 +256,7 @@ def _requests_advanced_guidance(
         or serum_stability
         or stability_modules is not None
         or halflife is not None
+        or cellfree
         or (cyclic_mode is not None and cyclic_mode != "none")
     ):
         return True
@@ -258,15 +270,18 @@ def _guidance_arguments_in_use(
     serum_stability: bool,
     stability_modules: dict[str, bool] | None,
     halflife: _HalflifeTarget | None,
+    cellfree: bool,
     extra: dict[str, Any] | None,
 ) -> list[str]:
     """Names of the guidance-head arguments the caller actually turned on.
 
     Scope is the four v6.5-line runtime penalty functions — proteolytic/serum
     stability, immunogenicity, half-life, and cell-free expressability. Returned
-    sorted so the error message is deterministic. ``quality_guided`` is NOT in
-    this set: it is a different mechanism, defaults to ``True``, and is not one
-    of the four penalty heads.
+    sorted so the error message is deterministic. Consulted only when the
+    resolved model is in ``_MODELS_WITHOUT_GUIDANCE_HEADS`` — empty today, kept
+    for a future model that ships without guidance support. ``quality_guided``
+    is NOT in this set: it is a different mechanism, defaults to ``True``, and
+    is not one of the four penalty heads.
     """
     in_use: list[str] = []
     if immunogenicity:
@@ -279,6 +294,8 @@ def _guidance_arguments_in_use(
         in_use.append("stability_modules")
     if halflife is not None:
         in_use.append("halflife")
+    if cellfree:
+        in_use.append("cellfree")
     if extra:
         in_use.extend(
             f"extra[{key!r}]" for key in _GUIDANCE_EXTRA_KEYS if bool(extra.get(key))
@@ -294,6 +311,7 @@ def _resolve_generator_model(
     serum_stability: bool,
     stability_modules: dict[str, bool] | None,
     halflife: _HalflifeTarget | None,
+    cellfree: bool,
     extra: dict[str, Any] | None,
 ) -> str | None:
     """Normalize ``model`` and reject request shapes the selected model cannot run.
@@ -330,6 +348,7 @@ def _resolve_generator_model(
             serum_stability=serum_stability,
             stability_modules=stability_modules,
             halflife=halflife,
+            cellfree=cellfree,
             extra=extra,
         )
         if conflicts:
@@ -500,11 +519,34 @@ _StabilityMode = Literal["resist", "target"]
 # - ``"v6.5.21"`` (default) — Receptor-conditioned. Designs respond to the
 #   receptor you select. Replaces v6.5, which was trained with all-zero receptor
 #   features and produced the same peptides regardless of target.
-# - ``"v6.9.21"`` — Experimental. A different, larger receptor feature space
-#   (107 per-residue channels vs 48), with classifier-free guidance applied at
+# - ``"v6.9.21"`` — A different, larger receptor feature space (107
+#   per-residue channels vs 48), with classifier-free guidance applied at
 #   inference. Validated for distinguishing sequence composition between
-#   receptors. Not validated for where on the structure the peptide binds.
-#   Guidance options are not available on this model.
+#   receptors ONLY — the paired 500-design fold screen (w0 1/284 vs w2 3/216)
+#   was underpowered (resolves >=12x, observed 3.9x: not a null, not a
+#   positive). No option on this model moves WHERE the peptide contacts the
+#   structure — selection, not guidance, delivers placement. NOT strictly
+#   better than v6.5: measured contact_logits 0.6281 vs v6.5.21's 0.6719.
+#
+#   The four guidance heads (``immunogenicity``, ``serum_stability`` /
+#   proteolytic, ``halflife``, ``cellfree``) ARE supported on this model — the
+#   same v6.5 penalty kernels and the same strength calibration, routed
+#   through the normal batch-spawn path rather than the streaming guided pool
+#   that v6.5/v6.5.21 use. ``immuno_strength`` and ``stability_strength``
+#   SATURATE at their ceilings (1.5 and 2.0 respectively — passing higher has
+#   no further effect). ``halflife_strength`` has NO server-side ceiling — see
+#   its own parameter doc for the recommended 4.0 maximum. Of the measured
+#   -26.7% between-receptor JSD drop at strength 4 (vs an all-knobs-off
+#   control), -17.7 points is a FIXED cysteine-kernel cost that fires whenever
+#   ANY guidance head is enabled at ANY strength (including 0) — it is not
+#   this knob's dose effect. ``halflife_strength``'s own dose effect at
+#   strength 4 is -11.5%, 95% CI [-27.2%, +4.7%] (NOT statistically
+#   significant); it first reaches significance at strength 8 (-22.3%, CI
+#   [-38.3%, -6.4%]). ``serum_stability`` / proteolytic and ``halflife`` are
+#   ONE coupled axis, not independent dials — each measurably moves the
+#   other's metric. ``cellfree`` lowers LOCAL HYDROPHOBICITY (rolling
+#   7-residue GRAVY window), NOT K/R clusters — see its own parameter doc; it
+#   has no established ceiling.
 # - ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor features, so
 #   its output does not depend on the receptor you select. Retained only to
 #   reproduce runs made before August 2026.
@@ -637,6 +679,8 @@ def _generation_body(
     stability_modules: dict[str, bool] | None,
     halflife: _HalflifeTarget | None,
     halflife_strength: float,
+    cellfree: bool,
+    cellfree_strength: float,
     # Charge / solubility filtering (tier-gated; server activates filtered
     # design worker when any non-default constraint is present).
     charge_mode: _ChargeMode | None,
@@ -705,6 +749,7 @@ def _generation_body(
         serum_stability=serum_stability,
         stability_modules=stability_modules,
         halflife=halflife,
+        cellfree=cellfree,
         extra=extra,
     )
 
@@ -738,6 +783,8 @@ def _generation_body(
         "stabilityStrength": stability_strength,
         "stabilityMode": stability_mode,
         "halflifeEnabled": halflife is not None,
+        "cellfreeEnabled": cellfree,
+        "cellfreeStrength": cellfree_strength,
     }
     # Generator model. Emitted ONLY when the caller named one — an absent key
     # means "server default", and the server default is the one place the
@@ -1383,6 +1430,13 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     confidence = _first("confidence", "confidence_metrics", "confidenceMetrics")
     metrics = _first("metrics") or {}
     scores = _first("scores", "deltaforge", "deltaforge_score") or {}
+    # Acceptance-gate verdict [bd-LIGANDAI_ALPHA_V2-dl6pj]. Populated on the
+    # peptides.search()/.list() path today (server/enterprise-api-routes.ts
+    # emits camelCase `qualityTier`); probed defensively here too so this
+    # parser stays correct if/when a fold-status payload starts carrying it.
+    # Never re-derive the verdict client-side -- surface exactly what the
+    # server decided, per QualityTier's docstring.
+    quality_tier = _first("qualityTier", "quality_tier")
 
     def _to_float(v: Any) -> float | None:
         if v is None:
@@ -1506,6 +1560,7 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
             "confidence": confidence if isinstance(confidence, dict) else None,
             "metrics": metrics or None,
             "scores": scores if isinstance(scores, dict) and scores else None,
+            "qualityTier": quality_tier if isinstance(quality_tier, dict) else None,
         }
     )
 
@@ -3000,8 +3055,8 @@ class Peptides(Resource):
         # None (default) sends NO key, so the server applies the platform
         # default; the SDK deliberately keeps no copy of that default so a
         # platform-side change reaches you without an SDK upgrade.
-        # ⛔ "v6.9.21" does not implement the guidance heads — combining it with
-        # serum_stability / immunogenicity / halflife / cell-free guidance raises
+        # All models currently known to this SDK build support the four
+        # guidance heads. A future model without guidance support raises
         # LigandAIInvalidConfig client-side rather than dropping them silently.
         model: _GeneratorModel | str | None = None,
         immunogenicity: bool = False,
@@ -3011,8 +3066,27 @@ class Peptides(Resource):
         stability_strength: float = 2.0,
         stability_mode: _StabilityMode = "resist",
         stability_modules: dict[str, bool] | None = None,
+        # Half-life guidance. Coupled with serum_stability/proteolytic — not
+        # an independent dial. On the standard N-end (Varshavsky) half-life
+        # metric this knob is MONOTONE ADVERSE, not inert: deployed
+        # measurement shows +0.0/+0.3/+2.1/+4.1% at strength 1/2/4/8 and
+        # +13.6% at 16 (z=+5.32, significant) — wrong direction. It does NOT
+        # implement the N-end rule and has NO PEST term; its kernel is Trp
+        # removal, basic-fraction reduction, a Tyr boost, and terminal
+        # P/Q/D rewards. See the Args section below for full detail.
         halflife: _HalflifeTarget | None = None,
+        # halflife_strength has NO server-side ceiling (recommended max 4.0)
+        # — see the Args section below.
         halflife_strength: float = 2.0,
+        # Cell-free expressability guidance. Lowers LOCAL HYDROPHOBICITY
+        # (rolling 7-residue GRAVY window) inside the same v6.5-line penalty
+        # loop as the other three heads — it does NOT penalize K/R clusters
+        # (K/R content and local cluster density both RISE under this
+        # guidance). NOT a global net-charge objective; net charge moves
+        # ~-14.3% as a SIDE EFFECT of the hydrophobicity term, not the
+        # target. No established ceiling.
+        cellfree: bool = False,
+        cellfree_strength: float = 1.5,
         # Charge / solubility filtering (server-tier gated; server activates
         # filtered design worker when any non-default constraint is present).
         charge_mode: _ChargeMode | None = None,
@@ -3172,24 +3246,47 @@ class Peptides(Resource):
                   respond to the receptor you select. Replaces v6.5, which was
                   trained with all-zero receptor features and produced the same
                   peptides regardless of target.
-                * ``"v6.9.21"`` — Experimental. A different, larger receptor
-                  feature space (107 per-residue channels vs 48), with
-                  classifier-free guidance applied at inference. Validated for
-                  distinguishing sequence composition between receptors. Not
-                  validated for where on the structure the peptide binds.
-                  Guidance options are not available on this model.
+                * ``"v6.9.21"`` — A different, larger receptor feature space
+                  (107 per-residue channels vs 48), with classifier-free
+                  guidance applied at inference. Validated for distinguishing
+                  sequence composition between receptors ONLY — the paired
+                  500-design fold screen (w0 1/284 vs w2 3/216) was
+                  underpowered (resolves >=12x, observed 3.9x). No option on
+                  this model moves WHERE the peptide contacts the structure —
+                  selection, not guidance, delivers placement. NOT strictly
+                  better than v6.5 (measured contact_logits 0.6281 vs
+                  v6.5.21's 0.6719).
+
+                  The four guidance heads ARE supported here — same v6.5
+                  penalty kernels and strength calibration, routed through the
+                  normal batch-spawn path rather than the streaming guided
+                  pool v6.5/v6.5.21 use. ``immuno_strength`` /
+                  ``stability_strength`` saturate at their ceilings (1.5 /
+                  2.0). ``halflife_strength`` has NO server-side ceiling — see
+                  its own Args entry for the recommended 4.0 maximum. Of the
+                  measured -26.7% between-receptor JSD drop at strength 4 (vs
+                  an all-knobs-off control), -17.7 points is a FIXED
+                  cysteine-kernel cost that fires whenever ANY guidance head
+                  is enabled at ANY strength (including 0) — ``halflife``'s
+                  own dose effect at strength 4 is -11.5% (CI [-27.2%,
+                  +4.7%], NOT significant); it first reaches significance at
+                  strength 8 (-22.3%, CI [-38.3%, -6.4%]).
+                  ``serum_stability``/proteolytic and ``halflife`` are ONE
+                  coupled axis, not independent dials. ``cellfree`` lowers
+                  LOCAL HYDROPHOBICITY (rolling 7-residue GRAVY window), NOT
+                  K/R clusters.
                 * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero
                   receptor features, so its output does not depend on the
                   receptor you select. Retained only to reproduce runs made
                   before August 2026.
 
-                Combining ``model="v6.9.21"`` with ``serum_stability``,
-                ``immunogenicity``, ``halflife``, ``immuno_modules``,
-                ``stability_modules``, or the cell-free guidance keys raises
+                Combining ``model=`` with a guidance argument raises
                 :class:`~ligandai.errors.LigandAIInvalidConfig` before any HTTP
-                call, naming the conflicting arguments. They are not dropped
-                silently — a design generated without the guidance you asked for
-                is not the design you asked for.
+                call ONLY when the resolved model is known not to support
+                guidance, naming the conflicting arguments — they are never
+                dropped silently, because a design generated without the
+                guidance you asked for is not the design you asked for. No
+                model shipped with this SDK build currently triggers it.
 
                 Ids this SDK build does not recognize are forwarded as-is; the
                 server's model registry is the authority on which ids exist.
@@ -3198,19 +3295,65 @@ class Peptides(Resource):
                 predicted immunogenicity. Uses MHC-I/II anchor avoidance + scoring
                 during diffusion.
             immuno_strength: Immune guidance strength 0.5-4.0 (default 2.0).
-                Enterprise tier unlocks values above 3.0.
+                Enterprise tier unlocks values above 3.0. Saturates at 1.5 —
+                values above that have no further effect.
             immuno_modules: Optional per-module override, e.g.
                 ``{"mhc_i": True, "mhc_ii": True}``.
-            serum_stability: Enable stability guidance (academia+ tier). Suppresses
-                protease-recognition motifs to resist serum/lysosomal cleavage.
-                Use ``stability_mode="target"`` to flip this for prodrug designs.
-            stability_strength: Stability guidance strength 1.0-3.0.
+            serum_stability: Enable proteolytic-stability guidance (academia+
+                tier). Suppresses protease-recognition motifs to resist
+                serum/lysosomal cleavage. Use ``stability_mode="target"`` to
+                flip this for prodrug designs. Coupled with ``halflife`` — each
+                measurably moves the other's metric, they are not independent.
+            stability_strength: Stability guidance strength 1.0-3.0. Saturates
+                at 2.0 — values above that have no further effect.
             stability_mode: ``"resist"`` (avoid cleavage) or ``"target"`` (prodrug).
             stability_modules: Optional dict enabling specific protease modules,
                 e.g. ``{"trypsin": True, "dppiv": True}``.
             halflife: Half-life target (``"extended"`` / ``"rapid"`` / ``"moderate"``).
-                ``None`` disables half-life guidance (default).
-            halflife_strength: Half-life guidance strength 1.0-3.0.
+                ``None`` disables half-life guidance (default). Coupled with
+                ``serum_stability``/proteolytic — not an independent dial;
+                each measurably moves the other's metric.
+
+                On the standard N-end (Varshavsky) half-life metric this
+                knob is MONOTONE ADVERSE, not inert: deployed measurement
+                shows +0.0% / +0.3% / +2.1% / +4.1% at strength 1/2/4/8, and
+                +13.6% at strength 16 (z=+5.32, significant) — it moves the
+                metric in the WRONG direction as strength increases. It does
+                NOT implement the N-end rule and has NO PEST term; its actual
+                kernel is Trp removal, basic-fraction reduction, a Tyr boost,
+                and terminal P/Q/D rewards. The N-end rule IS implemented on
+                this platform, but inside the PROTEOLYTIC head
+                (``serum_stability``) — protease-site strength 0.5→2.0 moves
+                the half-life metric -52%, the opposite direction from this
+                knob. Use ``serum_stability`` (proteolytic), not
+                ``halflife``, when the goal is N-end-rule stability.
+            halflife_strength: Half-life guidance strength (default 2.0, UI
+                range 1.0-3.0). Has NO server-side ceiling — the worker's
+                ceiling map carries only ``immuno`` (1.5) and ``proteolytic``
+                (2.0); ``halflife_strength=16.0`` is accepted verbatim and
+                applied. The website caps the UI at 4.0, but that is a
+                client-side default only — the API will NOT clamp this value
+                for you.
+
+                Recommended maximum: **4.0**. At 8.0 the between-receptor
+                discrimination signal measurably degrades on v6.9.21 (-22.3%
+                JSD, statistically significant) and 61% of generated
+                peptides start with the same two residues; at 16.0 that
+                rises to 93%. The dose effect on between-receptor JSD is NOT
+                statistically significant at strength 4 (-11.5%, CI
+                [-27.2%, +4.7%]).
+            cellfree: Enable cell-free expressability guidance. Lowers LOCAL
+                HYDROPHOBICITY across the sequence (rolling 7-residue GRAVY
+                window, measured 0.001 → -0.576; windows above the kernel's
+                -0.3 trigger drop 32.5%) to improve cell-free expression
+                yield and handling. It does NOT penalize K/R clusters —
+                deployed measurement shows K/R content RISES +20.4% and
+                local K/R cluster density (window 5) RISES +32.2% under this
+                guidance. Net charge shifts -14.3% as a SIDE EFFECT of the
+                hydrophobicity term, not the objective — this is NOT a
+                net-charge target. Free — measured zero entropy/quality cost.
+            cellfree_strength: Strength for ``cellfree`` (default 1.5). No
+                established ceiling.
             charge_mode: Charge filter mode (academia+ tier). ``"lt"`` keeps peptides
                 with net charge < ``charge_value``; ``"gt"`` keeps those above;
                 ``"between"`` uses ``charge_min``/``charge_max`` bounds;
@@ -3306,6 +3449,7 @@ class Peptides(Resource):
                 serum_stability=serum_stability,
                 stability_modules=stability_modules,
                 halflife=halflife,
+                cellfree=cellfree,
                 cyclic_mode=cyclic_mode,
                 extra=extra,
             ):
@@ -3351,6 +3495,8 @@ class Peptides(Resource):
             stability_modules=stability_modules,
             halflife=halflife,
             halflife_strength=halflife_strength,
+            cellfree=cellfree,
+            cellfree_strength=cellfree_strength,
             charge_mode=charge_mode,
             charge_value=charge_value,
             charge_min=charge_min,
@@ -3765,10 +3911,11 @@ class Peptides(Resource):
 
         Billing
         -------
-        100 credits per fold per trajectory. Sampling steps >50 apply a
-        multiplier of ``max(1.0, sampling_steps / 50)``. Total cost is
-        charged upfront before any GPU work begins; HTTP 402 is raised when
-        balance is insufficient.
+        25 credits per fold per trajectory, floored at a 100-credit minimum
+        per fold. Sampling steps >50 apply a multiplier of
+        ``max(1.0, sampling_steps / 50)``. Total cost is charged upfront
+        before any GPU work begins; HTTP 402 is raised when balance is
+        insufficient.
 
         Graceful credit-exhaustion (``on_credit_exhausted``)
         ----------------------------------------------------
@@ -4257,8 +4404,9 @@ class Peptides(Resource):
         Mirrors the flat-form hardening pre-flight (GPU allowlist → concurrency
         → dedupe → credit pre-flight → record), but the unit of cost is the
         GROUP (one complex fold) rather than the single peptide. Billing:
-        100 cr/group/trajectory × max(1.0, sampling_steps/50), matching the
-        server-side computation for the grouped envelope.
+        25 cr/group/trajectory × max(1.0, sampling_steps/50), floored at a
+        100-credit minimum per group, matching the server-side computation
+        for the grouped envelope.
         """
         from ligandai._hardening import (
             attach_job_id,
@@ -4724,6 +4872,11 @@ class Peptides(Resource):
         super_elite: bool | None = None,
         super_elite_affinity: bool | None = None,
         super_elite_thermo: bool | None = None,
+        acceptance_criterion: Literal[
+            "great_plus", "elite", "super_elite", "super_elite_affinity"
+        ] | None = None,
+        require_linker_leg: bool | None = None,
+        require_ensemble: bool | None = None,
         hotspot_residues: list[str] | None = None,
         pocket_residues: list[str] | None = None,
         hotspot_hit: bool | None = None,
@@ -4783,6 +4936,48 @@ class Peptides(Resource):
                 synthesis-priority subset. Reported as a SEPARATE
                 bucket from the structural gate.
             super_elite_thermo: Deprecated alias for ``super_elite_affinity``.
+            acceptance_criterion: Filter by the ONE canonical acceptance ladder
+                (``shared/acceptance-gate.json`` — the same spec ``is_elite`` /
+                ``super_elite`` / ``super_elite_affinity`` above are shorthand
+                for). One of ``"great_plus"`` (``peptide_ipsae >= 0.66`` — the
+                primary hit-rate metric), ``"elite"`` (``peptide_ipsae >= 0.85``
+                single-metric — NOT the same 0.85 as the legacy ``is_elite``
+                flag, which historically used 0.80), ``"super_elite"``
+                (``peptide_ipsae >= 0.67`` AND ``iptm >= 0.80`` AND
+                ``plddt >= 88`` — the structural/publication gate), or
+                ``"super_elite_affinity"`` (the structural gate PLUS
+                ``predicted_kd < 100`` nanomolar). Every returned
+                :class:`Peptide` also carries :attr:`Peptide.quality_tier`
+                (the strongest criterion it clears) regardless of whether you
+                filter on one here.
+
+                ⛔ UNIT TRAPS: ``plddt`` is 0–100 (``0.88`` is a silent no-op
+                that passes everything); ``predicted_kd`` is nanomolar
+                (compare to ``100``, never ``100e-9``); the structural leg
+                gates ``peptide_ipsae``, never whole-complex ``ipsae``.
+            require_linker_leg: Also require the DESIGNED region (not a
+                purification cassette / linker) to carry the interface —
+                ``scaffold_mediated`` must be false AND
+                ``binder_contact_fraction_rankable > 0.5``. A fold whose
+                construct frame could not be verified is EXCLUDED
+                (``indeterminate``), never silently admitted as a pass.
+                Defaults to the spec default (``True``) when omitted.
+            require_ensemble: Also require agreement between Boltz-2 AND
+                OpenDDE on the SAME construct frame ("dual gate").
+
+                ⛔ NOT PERSISTABLE ON THE PLATFORM TODAY
+                (bd-LIGANDAI_ALPHA_V2-xv5ih): OpenDDE never writes
+                ``ptf_fold_results`` and its results are not joinable to a
+                design by any key today. Passing ``require_ensemble=True``
+                therefore yields ``verdict='indeterminate'`` /
+                ``co_validated=False`` on ``quality_tier`` for essentially
+                every design on the platform right now — it is a plumbing
+                gap, NOT evidence that dual-engine agreement is unavailable
+                in principle (940 designs scored by both engines exist in the
+                research tree, off-platform). Do not read a
+                ``require_ensemble=True`` result as "these are co-validated
+                hits" until that bead closes. Defaults to the spec default
+                (``False``) when omitted.
             hotspot_residues: List of ``"chain:resi"`` strings (PDB
                 numbering) for the residues you wanted the peptide to
                 contact, e.g. ``["A:60", "A:62"]``.
@@ -4843,6 +5038,14 @@ class Peptides(Resource):
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
         if super_elite_affinity is not None: params["super_elite_affinity"] = "true" if super_elite_affinity else "false"
+        # Acceptance-gate ladder [bd-LIGANDAI_ALPHA_V2-dl6pj]. The SDK does not
+        # validate `acceptance_criterion` against the four canonical names —
+        # that whitelist lives in shared/acceptance-gate.json and the server
+        # is the authority; an unrecognised value is the server's 4xx to raise,
+        # not the SDK's to pre-empt.
+        if acceptance_criterion is not None: params["acceptance_criterion"] = acceptance_criterion
+        if require_linker_leg is not None: params["require_linker_leg"] = "true" if require_linker_leg else "false"
+        if require_ensemble is not None: params["require_ensemble"] = "true" if require_ensemble else "false"
         if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
         if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
         if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)
@@ -5655,8 +5858,10 @@ class AsyncPeptides(AsyncResource):
         quality_guidance_scale: float = 1.0,
         # Generator model — see :meth:`Peptides.generate` for the per-model scope
         # statements. Sent as ``generatorModelId``; None (default) sends no key
-        # so the server applies the platform default. "v6.9.21" + any guidance
-        # argument raises LigandAIInvalidConfig client-side.
+        # so the server applies the platform default. All models currently
+        # known to this SDK build support the four guidance heads; a future
+        # model without guidance support raises LigandAIInvalidConfig
+        # client-side rather than dropping the guidance silently.
         model: _GeneratorModel | str | None = None,
         immunogenicity: bool = False,
         immuno_strength: float = 2.0,
@@ -5667,6 +5872,9 @@ class AsyncPeptides(AsyncResource):
         stability_modules: dict[str, bool] | None = None,
         halflife: _HalflifeTarget | None = None,
         halflife_strength: float = 2.0,
+        # See :meth:`Peptides.generate` for the cellfree guidance docs.
+        cellfree: bool = False,
+        cellfree_strength: float = 1.5,
         charge_mode: _ChargeMode | None = None,
         charge_value: float | None = None,
         charge_min: float | None = None,
@@ -5739,6 +5947,7 @@ class AsyncPeptides(AsyncResource):
                 serum_stability=serum_stability,
                 stability_modules=stability_modules,
                 halflife=halflife,
+                cellfree=cellfree,
                 cyclic_mode=cyclic_mode,
                 extra=extra,
             ):
@@ -5784,6 +5993,8 @@ class AsyncPeptides(AsyncResource):
             stability_modules=stability_modules,
             halflife=halflife,
             halflife_strength=halflife_strength,
+            cellfree=cellfree,
+            cellfree_strength=cellfree_strength,
             charge_mode=charge_mode,
             charge_value=charge_value,
             charge_min=charge_min,
@@ -6822,6 +7033,11 @@ class AsyncPeptides(AsyncResource):
         super_elite: bool | None = None,
         super_elite_affinity: bool | None = None,
         super_elite_thermo: bool | None = None,
+        acceptance_criterion: Literal[
+            "great_plus", "elite", "super_elite", "super_elite_affinity"
+        ] | None = None,
+        require_linker_leg: bool | None = None,
+        require_ensemble: bool | None = None,
         hotspot_residues: list[str] | None = None,
         pocket_residues: list[str] | None = None,
         hotspot_hit: bool | None = None,
@@ -6842,8 +7058,13 @@ class AsyncPeptides(AsyncResource):
         """Async variant of :meth:`Peptides.search`.
 
         Mirrors the full sync signature — every score/coverage/scope filter
-        the workspace UI exposes. See :meth:`Peptides.search` for argument
-        documentation. All criteria AND-combine.
+        the workspace UI exposes, including ``acceptance_criterion`` /
+        ``require_linker_leg`` / ``require_ensemble``. See :meth:`Peptides.search`
+        for full argument documentation — in particular the unit traps
+        (pLDDT 0-100, predicted_kd nanomolar, ``peptide_ipsae`` never
+        whole-complex ``ipsae``) and the ``require_ensemble`` honesty note
+        (co-validation is not persistable on the platform today;
+        bd-LIGANDAI_ALPHA_V2-xv5ih). All criteria AND-combine.
         """
         if min_ipsae is not None and ipsae_min is None:
             ipsae_min = min_ipsae
@@ -6876,6 +7097,11 @@ class AsyncPeptides(AsyncResource):
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
         if super_elite_affinity is not None: params["super_elite_affinity"] = "true" if super_elite_affinity else "false"
+        # Acceptance-gate ladder [bd-LIGANDAI_ALPHA_V2-dl6pj]. See the sync
+        # search() docstring for the full unit-trap and ensemble notes.
+        if acceptance_criterion is not None: params["acceptance_criterion"] = acceptance_criterion
+        if require_linker_leg is not None: params["require_linker_leg"] = "true" if require_linker_leg else "false"
+        if require_ensemble is not None: params["require_ensemble"] = "true" if require_ensemble else "false"
         if hotspot_hit is not None: params["hotspot_hit"] = "true" if hotspot_hit else "false"
         if pocket_hit is not None: params["pocket_hit"] = "true" if pocket_hit else "false"
         if hotspot_residues: params["hotspot_residues"] = ",".join(hotspot_residues)

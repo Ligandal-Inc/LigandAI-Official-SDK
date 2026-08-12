@@ -280,8 +280,32 @@ class Evaluator(Resource):
         fold_job_ids
             List of fold job ids.  Maximum 500.
         criteria
-            Optional structural criteria.  If omitted, a default elite gate of
-            ``min_peptide_ipsae >= 0.6`` is applied.
+            Optional structural criteria.  If omitted, the server applies a
+            legacy default of ``min_peptide_ipsae >= 0.6``.
+
+            ⛔ Despite older comments in this codebase, ``0.6`` is NOT the
+            canonical ``"elite"`` criterion — do not call it that.  It predates,
+            and is numerically distinct from, the ONE shared acceptance-gate
+            ladder in ``shared/acceptance-gate.json``: ``"great_plus"``
+            (``peptide_ipsae >= 0.66``, the primary hit-rate metric),
+            ``"elite"`` (``peptide_ipsae >= 0.85`` single-metric),
+            ``"super_elite"`` (``peptide_ipsae >= 0.67`` AND ``iptm >= 0.80``
+            AND ``plddt >= 88`` — the structural/publication gate), and
+            ``"super_elite_affinity"`` (structural gate PLUS
+            ``predicted_kd < 100`` nanomolar).  This ``criteria`` dict is a
+            separate, older filtering mechanism scoped to this evaluator
+            endpoint; for the canonical, precisely-defined ladder — including
+            the linker leg and ensemble co-validation — use
+            ``client.peptides.search(acceptance_criterion=..., require_linker_leg=...,
+            require_ensemble=...)`` instead, and read
+            :class:`~ligandai.types.QualityTier` for the unit traps (pLDDT is
+            0–100; predicted_kd is nanomolar; the gate is on ``peptide_ipsae``,
+            never whole-complex ``ipsae``) and the ensemble co-validation
+            caveat (not persistable on the platform today,
+            bd-LIGANDAI_ALPHA_V2-xv5ih).  If you want this endpoint's default to
+            approximate the canonical floor, pass
+            ``criteria={"min_peptide_ipsae": 0.66}`` explicitly rather than
+            relying on the server's legacy default.
         deltaforge_scores
             Pre-computed DeltaForge scores to merge in for delta_g / kd_nm
             distributions and criteria evaluation.

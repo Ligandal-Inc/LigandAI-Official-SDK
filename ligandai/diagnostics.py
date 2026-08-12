@@ -108,68 +108,42 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "severity": "warning",
         "stage": "generate",
         "title": "Some excluded residues were not found",
-        "remediation": (
-            "Residue numbers must match the receptor structure's PDB author numbering, "
-            "including the chain ID. Check the numbering of the structure you targeted "
-            "and re-run with corrected residue numbers."
-        ),
+        "remediation": "Residue numbers must match the receptor structure's PDB author numbering, including the chain ID. Check the numbering of the structure you targeted and re-run with corrected residue numbers.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-avoid",
     },
     "avoid_residues_none_resolved": {
         "severity": "error",
         "stage": "generate",
         "title": "None of your excluded residues were found",
-        "remediation": (
-            "Your exclusion had NO EFFECT on this run. Every residue number you asked to "
-            "avoid is absent from the receptor's featurized residue set - almost always a "
-            "numbering mismatch (PDB author numbering vs. sequence index, or the wrong "
-            "chain). Re-run with residue numbers taken from the structure itself."
-        ),
+        "remediation": "Your exclusion had NO EFFECT on this run. Every residue number you asked to avoid is absent from the receptor's featurized residue set - almost always a numbering mismatch (PDB author numbering vs. sequence index, or the wrong chain). Re-run with residue numbers taken from the structure itself.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-avoid",
     },
     "target_residues_unresolved": {
         "severity": "warning",
         "stage": "generate",
         "title": "Some target residues were not found",
-        "remediation": (
-            "Residue numbers must match the receptor structure's PDB author numbering, "
-            "including the chain ID. The run proceeded using only the residues that resolved."
-        ),
+        "remediation": "Residue numbers must match the receptor structure's PDB author numbering, including the chain ID. The run proceeded using only the residues that resolved.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-target",
     },
     "target_residues_none_resolved": {
         "severity": "error",
         "stage": "generate",
         "title": "None of your target residues were found",
-        "remediation": (
-            "Targeting had NO EFFECT: generation fell back to the unfiltered pocket, so "
-            "designs were not steered to the site you asked for. Re-run with residue "
-            "numbers taken from the structure's own author numbering."
-        ),
+        "remediation": "Targeting had NO EFFECT: generation fell back to the unfiltered pocket instead of conditioning on the site you asked for. Re-run with residue numbers taken from the structure's own author numbering.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-target",
     },
     "degenerate_pocket_after_avoid": {
         "severity": "error",
         "stage": "generate",
         "title": "Exclusion left almost no pocket to steer with",
-        "remediation": (
-            "After removing the excluded residues and their packing shell, too few pocket "
-            "residues remain to steer generation reliably. Designs may drift back onto the "
-            "excluded surface. Widen the target face, narrow the avoid set, or reduce "
-            "avoid_shell_angstrom."
-        ),
+        "remediation": "After removing the excluded residues and their packing shell, too few pocket residues remain to condition generation reliably. This does not by itself keep designs off the excluded surface \u2014 verify on the folded structure. Widen the target face, narrow the avoid set, or reduce avoid_shell_angstrom.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-warning",
     },
     "avoid_conformance_violation": {
         "severity": "warning",
         "stage": "fold",
         "title": "Designs contacted residues you excluded",
-        "remediation": (
-            "Pocket targeting steers which sequences are generated; it does not physically "
-            "constrain where the folder places the finished peptide. To bind the fold to the "
-            "requested site, re-fold with fold_pocket_residues set. Rank or reject the "
-            "violating designs before synthesis."
-        ),
+        "remediation": "Pocket targeting steers which sequences are generated; it does not physically constrain where the folder places the finished peptide. To bind the fold to the requested site, re-fold with fold_pocket_residues set. Rank or reject the violating designs before synthesis.",
         "doc_anchor": "sdk/python/allosteric-targeting#prior-not-constraint",
     },
     "avoid_conformance_clean": {
@@ -183,121 +157,176 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "severity": "info",
         "stage": "fold",
         "title": "Exclusion could not be verified on the structure",
-        "remediation": (
-            "The folded complex was not available for a contact check, so the exclusion was "
-            "not verified. Inspect the structure, or re-run the conformance check on the "
-            "finished complex."
-        ),
+        "remediation": "The folded complex was not available for a contact check, so the exclusion was not verified. Inspect the structure, or re-run the conformance check on the finished complex.",
         "doc_anchor": "sdk/python/allosteric-targeting#prior-not-constraint",
     },
     "param_ignored": {
         "severity": "warning",
         "stage": "request",
         "title": "A parameter you set was ignored",
-        "remediation": (
-            "The named parameter is accepted by the request schema but does not change "
-            "pipeline behavior. Remove it from your request, or use the documented parameter "
-            "that does apply."
-        ),
+        "remediation": "The named parameter is accepted by the request schema but does not change pipeline behavior. Remove it from your request, or use the documented parameter that does apply.",
         "doc_anchor": "sdk/python/api-reference",
     },
     "param_dropped_in_transport": {
         "severity": "warning",
         "stage": "request",
         "title": "A parameter you set did not reach the pipeline",
-        "remediation": (
-            "The named parameter was lost between API layers, so the server default was used "
-            "instead. This is a platform bug - the value you sent was not applied."
-        ),
+        "remediation": "The named parameter was lost between API layers, so the server default was used instead. This is a platform bug - the value you sent was not applied.",
         "doc_anchor": "sdk/python/api-reference",
     },
     "sdk_outdated": {
         "severity": "warning",
         "stage": "client",
         "title": "Your LigandAI SDK is out of date",
-        "remediation": (
-            "Upgrade to pick up current parameter handling, diagnostics, and bug fixes. Older "
-            "clients can silently drop parameters that newer server versions expect."
-        ),
+        "remediation": "Upgrade to pick up current parameter handling, diagnostics, and bug fixes. Older clients can silently drop parameters that newer server versions expect.",
         "doc_anchor": "",
     },
     "sdk_unsupported": {
         "severity": "error",
         "stage": "client",
         "title": "Your LigandAI SDK is below the minimum supported version",
-        "remediation": (
-            "Upgrade now. Versions this old are known to mis-send or drop request parameters, "
-            "which can silently change what your job actually ran."
-        ),
+        "remediation": "Upgrade now. Versions this old are known to mis-send or drop request parameters, which can silently change what your job actually ran.",
         "doc_anchor": "",
     },
     "sdk_version_unknown": {
         "severity": "info",
         "stage": "client",
         "title": "SDK version could not be determined",
-        "remediation": (
-            "Requests from an unrecognized client cannot be checked for version "
-            "compatibility. Use an official LigandAI SDK, or set a User-Agent of the form "
-            "ligandai-python/<version> or ligandai-node/<version>."
-        ),
+        "remediation": "Requests from an unrecognized client cannot be checked for version compatibility. Use an official LigandAI SDK, or set a User-Agent of the form ligandai-python/<version> or ligandai-node/<version>.",
         "doc_anchor": "",
     },
-    # ─── CLIENT-ONLY ────────────────────────────────────────────────────────
-    # Raised by this SDK's own pre-flight validation, BEFORE any HTTP call, so
-    # in practice only the SDK emits them. They are nonetheless part of the
-    # SHARED registry (landed in shared/warnings.json by bd-x4vt8.3, commit
-    # bb4669aad) — the website renders them from the same taxonomy, and a code
-    # only one layer knows about is a code every other layer drops on sight.
     "targeting_region_swapped": {
         "severity": "info",
         "stage": "client",
         "title": "A targeting region had start > end",
-        "remediation": (
-            "The pair was swapped automatically to match server behaviour. Pass start <= end "
-            "to silence this."
-        ),
+        "remediation": "The pair was swapped automatically to match server behaviour. Pass start <= end to silence this.",
         "doc_anchor": "sdk/python/allosteric-targeting#numbering",
     },
     "targeting_chain_ambiguous": {
         "severity": "warning",
         "stage": "client",
         "title": "A targeting region did not name a chain",
-        "remediation": (
-            "This request names more than one chain, so a region without a chain matches any "
-            "chain carrying that residue number. Pass chain= on every region to disambiguate."
-        ),
+        "remediation": "This request names more than one chain, so a region without a chain matches any chain carrying that residue number. Pass chain= on every region to disambiguate.",
         "doc_anchor": "sdk/python/allosteric-targeting#numbering",
     },
     "avoid_shell_disabled": {
         "severity": "info",
         "stage": "client",
         "title": "The avoid packing shell is disabled",
-        "remediation": (
-            "avoid_shell_angstrom=0 excludes only the named residues, not their packing "
-            "neighbours. Leave it unset to use the server default."
-        ),
+        "remediation": "avoid_shell_angstrom=0 excludes only the named residues, not their packing neighbours. Leave it unset to use the server default.",
         "doc_anchor": "sdk/python/allosteric-targeting#shell",
     },
     "degenerate_pocket_risk": {
         "severity": "warning",
         "stage": "client",
         "title": "Exclusion may leave almost no pocket to steer with",
-        "remediation": (
-            "The avoid span is at least as large as the target span, which usually leaves a "
-            "degenerate (near-empty) design pocket. Check for overlapping or transposed "
-            "ranges, widen the target face, or narrow the avoid set."
-        ),
+        "remediation": "The avoid span is at least as large as the target span, which usually leaves a degenerate (near-empty) design pocket. Check for overlapping or transposed ranges, widen the target face, or narrow the avoid set.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-warning",
     },
     "targeting_contradiction": {
         "severity": "warning",
         "stage": "client",
         "title": "A residue is both required and excluded",
-        "remediation": (
-            "The same residue appears in the must-contact set and the must-avoid set, so no "
-            "design can satisfy both criteria. Remove it from one of the two lists."
-        ),
+        "remediation": "The same residue appears in the must-contact set and the must-avoid set, so no design can satisfy both criteria. Remove it from one of the two lists.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-warning",
+    },
+    "guidance_composition_collapse": {
+        "severity": "error",
+        "stage": "request",
+        "title": "This guidance combination produces designs that cannot bind",
+        "remediation": "De-immunization above strength 0.5, stacked with any expression or stability head, collapses the generator's amino-acid alphabet. Measured output of that stack is 12.7% hydrophobic / 0.2% aromatic / 0.1% K+R against 38.5% / 9.8% / 8.9% for designs that fold into binders. Lower the de-immunization strength to 0.5 or disable the other heads. To run it anyway, set acknowledgeCompositionRisk=true.",
+        "doc_anchor": "guides/guidance-knobs#composition-collapse",
+    },
+    "guidance_composition_risk": {
+        "severity": "warning",
+        "stage": "request",
+        "title": "This guidance strength pushes designs to the edge of the binder band",
+        "remediation": "Measured output at de-immunization strength 2.0 is 25.2% hydrophobic / 2.0% aromatic / 0.95% K+R; the K+R fraction is already below the composition gate's floor, so part of this run will be withheld from folding. Strength 0.5 stays inside the reference band and still lowers predicted MHC-II epitope burden.",
+        "doc_anchor": "guides/guidance-knobs#composition-collapse",
+    },
+    "composition_gate_rejected": {
+        "severity": "warning",
+        "stage": "generate",
+        "title": "A design was withheld from folding on composition",
+        "remediation": "This design's amino-acid composition falls below the floor measured on designs that fold into binders (25% hydrophobic, 2% aromatic, 2% K+R). No fold-time confidence score detects this defect - pDockQ actively rewards it - so the check has to run before GPU time is spent. Relax the guidance stack that produced it, or lower the gate thresholds deliberately.",
+        "doc_anchor": "guides/guidance-knobs#composition-gate",
+    },
+    "composition_gate_cohort_collapsed": {
+        "severity": "error",
+        "stage": "generate",
+        "title": "Most of this run falls outside the binder composition band",
+        "remediation": "A majority of designs, or the pooled output alphabet itself, has collapsed. This is what an over-constrained guidance stack looks like, and fold confidence scores will not reveal it. Re-run with a weaker guidance stack before spending fold budget on this cohort.",
+        "doc_anchor": "guides/guidance-knobs#composition-gate",
+    },
+    "pocket_auto_selected": {
+        "severity": "warning",
+        "stage": "generate",
+        "title": "No target residues supplied - a pocket was chosen for you",
+        "remediation": "With no target_residues, hotspot_residues or pocket_residues, generation falls back to the largest geometric surface cluster, which is ranked by residue count alone and carries no functional evidence. Supply target residues in the structure's PDB author numbering to steer the run deliberately.",
+        "doc_anchor": "sdk/python/pocket-hotspot#auto-selection",
+    },
+    "pocket_outside_functional_domain": {
+        "severity": "error",
+        "stage": "generate",
+        "title": "The auto-selected pocket is outside the target's known functional domain",
+        "remediation": "The geometric fallback chose residues that fall outside the annotated functional or ligand-binding region of this receptor. Designs steered here will bind a site with no known function. Supply target_residues inside the functional domain, or confirm deliberately that you want this site.",
+        "doc_anchor": "sdk/python/pocket-hotspot#auto-selection",
+    },
+    "binder_frame_mixed_ranking": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "These results span two structural frames and are not directly comparable",
+        "remediation": "ipSAE's d0 normalisation scales with chain length, so a full-construct fold (binder plus expression cassette) and a binder-only fold of the same design do not produce comparable ipSAE values. Compare and rank within one binder_frame at a time; the frame is on every row.",
+        "doc_anchor": "guides/guidance-knobs#binder-frame",
+    },
+    "selector_not_a_ranking": {
+        "severity": "info",
+        "stage": "results",
+        "title": "Binding energy orders these designs but does not rank them",
+        "remediation": "The generator's binding_energy does not predict downstream fold success - measured Spearman rho -0.003 (p 0.98) against binder ipSAE over 100 folds. Use it to browse, not to choose which designs to fold. The composition gate is the pre-fold filter that carries measured signal.",
+        "doc_anchor": "guides/guidance-knobs#selection",
+    },
+    "acceptance_metric_missing": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "A required acceptance metric was never computed",
+        "remediation": "This fold is reported as indeterminate and excluded from the gate, not failed. peptide_ipsae is NULL on folds where the binder-specific interface was never scored. Re-score the fold to bring it into the ranked set.",
+        "doc_anchor": "guides/acceptance-criteria#indeterminate",
+    },
+    "acceptance_frame_unverified": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Construct frame could not be verified",
+        "remediation": "The designed region could not be located inside the folded chain, so contact attribution is not trustworthy and the designed-region check cannot be applied. The fold is reported as indeterminate, never as scaffold-mediated.",
+        "doc_anchor": "guides/acceptance-criteria#linker-leg",
+    },
+    "acceptance_scaffold_mediated": {
+        "severity": "error",
+        "stage": "results",
+        "title": "Interface is carried by the purification cassette, not the design",
+        "remediation": "Every receptor contact falls on the tag/linker rather than the designed region. This fold measures the cassette, not your binder, and must not be presented as a hit.",
+        "doc_anchor": "guides/acceptance-criteria#linker-leg",
+    },
+    "acceptance_engine_result_absent": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Co-validation engine has no result for this design",
+        "remediation": "Ensemble co-validation was requested but a required engine produced no comparable row in the same fold frame. The design is reported as NOT co-validated; it is never counted as a dual-gate pass.",
+        "doc_anchor": "guides/acceptance-criteria#ensemble",
+    },
+    "acceptance_engine_frame_mismatch": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Co-validation engines folded different construct frames",
+        "remediation": "One engine folded the full construct and the other the bare binder. iPSAE is normalised by d0, a function of chain length, so those scores are not comparable. Re-fold both engines in the same frame before co-validating.",
+        "doc_anchor": "guides/acceptance-criteria#ensemble",
+    },
+    "acceptance_ensemble_provenance_unverified": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Co-validation engine provenance is unverified",
+        "remediation": "The OpenDDE leg ran under conditions that are not provenance-checked (bd-dre-kicnx: artifacts not persisted; bd-dre-ppemh: silent self-only A3M substitution). Treat agreement as provisional until realized MSA depth is recorded and artifacts persist.",
+        "doc_anchor": "guides/acceptance-criteria#ensemble",
     },
 }
 

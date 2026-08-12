@@ -686,19 +686,25 @@ class LigandAI(_ClientCommon):
         * ``"v6.5.21"`` (default) — Receptor-conditioned. Designs respond to the
           receptor you select. Replaces v6.5, which was trained with all-zero
           receptor features and produced the same peptides regardless of target.
-        * ``"v6.9.21"`` — Experimental. A different, larger receptor feature
-          space (107 per-residue channels vs 48), with classifier-free guidance
-          applied at inference. Validated for distinguishing sequence
-          composition between receptors. Not validated for where on the
-          structure the peptide binds. Guidance options are not available on
-          this model.
+        * ``"v6.9.21"`` — A different, larger receptor feature space (107
+          per-residue channels vs 48), with classifier-free guidance applied at
+          inference. Validated for distinguishing sequence composition between
+          receptors ONLY — not validated for WHERE on the structure the
+          peptide binds (selection, not guidance, delivers placement), and NOT
+          strictly better than v6.5 (measured contact_logits 0.6281 vs
+          v6.5.21's 0.6719). The four guidance heads (immunogenicity,
+          serum_stability, halflife, cellfree) ARE supported here — see
+          :meth:`Peptides.generate` for the per-head ceilings and the
+          halflife/proteolytic coupling.
         * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor
           features, so its output does not depend on the receptor you select.
           Retained only to reproduce runs made before August 2026.
 
         Omitting ``model`` sends no model key, so the server applies the
-        platform default. See :meth:`Peptides.generate` for the full contract,
-        including the guidance-option conflict on ``"v6.9.21"``.
+        platform default. See :meth:`Peptides.generate` for the full contract.
+        A model known not to support a requested guidance head raises rather
+        than silently dropping it; no model shipped with this SDK build
+        currently triggers that.
         """
         method_key = method.lower().replace("_", "-")
         if method_key not in {"ligandforge", "ligandai", "ptf"}:
