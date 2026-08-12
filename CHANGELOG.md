@@ -16,11 +16,18 @@ argument, sent on the wire as `generatorModelId`.
 - **`"v6.5.21"` (default)** — Receptor-conditioned. Designs respond to the
   receptor you select. Replaces v6.5, which was trained with all-zero receptor
   features and produced the same peptides regardless of target.
-- **`"v6.9.21"`** — Experimental. A different, larger receptor feature space
-  (107 per-residue channels vs 48), with classifier-free guidance applied at
-  inference. Validated for distinguishing sequence composition between
-  receptors. Not validated for where on the structure the peptide binds.
-  Guidance options are not available on this model.
+- **`"v6.9.21"`** — A different, larger receptor feature space (107 per-residue
+  channels vs 48), with classifier-free guidance applied at inference.
+  Validated for distinguishing sequence composition between receptors ONLY —
+  not validated for WHERE on the structure the peptide binds (selection, not
+  guidance, delivers placement), and NOT strictly better than v6.5 (measured
+  contact_logits 0.6281 vs v6.5.21's 0.6719). The four guidance heads
+  (`immunogenicity`, `serum_stability`, `halflife`, `cellfree`) ARE supported —
+  same v6.5 penalty kernels and strength calibration, routed through the
+  normal batch-spawn path rather than the streaming guided pool. `halflife`
+  has no ceiling and can degrade this model's receptor-discrimination
+  property (measured -28% between-receptor JSD at strength 4);
+  `immuno`/`stability` saturate at 1.5/2.0.
 - **`"v6.5"`** — Legacy, deprecated. Trained with all-zero receptor features, so
   its output does not depend on the receptor you select. Retained only to
   reproduce runs made before August 2026.
@@ -30,15 +37,17 @@ platform default. The SDK deliberately keeps no copy of that default: a
 client-side copy would pin every SDK build to whatever the default was on its
 release day, and a later platform-side change would never reach those callers.
 
-**`model="v6.9.21"` + any guidance head raises
+**A model known not to support a requested guidance head raises
 `LigandAIInvalidConfig` before the request is sent**, naming every conflicting
-argument (`serum_stability`, `immunogenicity`, `halflife`, `immuno_modules`,
-`stability_modules`, and the cell-free keys passed through `**extra`). The four
-guidance heads are runtime penalty functions inside the v6.5-line sampling loop;
-v6.9.21 samples by a different loop and does not implement them. They are not
-dropped silently — a design generated without the guidance you asked for is
-indistinguishable from success, which is the failure mode this closes.
-`quality_guided` is a different mechanism and is **not** part of that conflict.
+argument (`serum_stability`, `immunogenicity`, `halflife`, `cellfree`,
+`immuno_modules`, `stability_modules`, and the cell-free keys passed through
+`**extra`), rather than dropping them silently — a design generated without
+the guidance you asked for is indistinguishable from success, which is the
+failure mode this closes. `quality_guided` is a different mechanism and is
+**not** part of that conflict. No model shipped with this SDK build currently
+triggers the raise (`"v6.9.21"` did until its worker was redeployed and
+verified to serve the four heads; the deny-set mechanism stays in place for a
+future model).
 
 The id list is **not** gated client-side. An id this SDK build has not heard of
 is forwarded verbatim and the server's model registry answers; a client-side
@@ -47,6 +56,17 @@ allowlist would make every future model unusable until callers upgraded.
 `client.generate(...)` forwards `model=` like every other kwarg, and the
 Claude-agent skill schema (`skills/claude-agent-sdk/ligandai-skill.ts`) exposes
 it as an enum with the same scope statements.
+
+### Added — `cellfree` / `cellfree_strength` typed guidance kwargs (`bd-LIGANDAI_ALPHA_V2-sxc8j`)
+
+`Peptides.generate()` and `AsyncPeptides.generate()` gain typed
+`cellfree: bool = False` and `cellfree_strength: float = 1.5` kwargs, sent as
+`cellfreeEnabled` / `cellfreeStrength`. Previously cell-free expressability
+guidance was reachable only through `**extra` (`extra["cellfreeEnabled"]`);
+`extra` still works as a raw escape hatch and, if set, wins over the typed
+kwarg. `cellfree` penalizes LOCAL K/R clusters and local GRAVY, not global net
+charge (net charge moves ~-34% as a consequence); it has no established
+ceiling.
 
 ### Added — structured diagnostics: the SDK now tells you when a run did not do what you asked (`bd-LIGANDAI_ALPHA_V2-x4vt8.3.2`)
 
@@ -212,6 +232,38 @@ instead of silently no-op'ing on the server.
   already never swallowed (`_raise_for_status` always raises); connection
   errors during SSE streaming (`stream_lines()`) now also wrap into
   `LigandAIConnectionError`, matching `request()`.
+
+
+### Fixed — endpoints that reported "nothing" when you had something
+
+A sweep of the REST surface found endpoints that answered successfully with an
+empty or wrong body rather than failing. These are the ones an SDK caller would
+have felt, and they are the reason this release exists:
+
+- **Workstreams** — `GET /api/ptf/workstreams` returned an empty list for every
+  caller. If you had workstreams, you were told you had none. It now returns
+  them, and in the documented `{ workstreams: [...] }` shape rather than a bare
+  array.
+- **Memory** — the four `/api/episodic-memory/*` endpoints were placeholders.
+  List, search, save and delete now reach the real service.
+- **Jobs** — `GET /api/jobs` and `GET /api/jobs/active` returned "Job not found".
+  Both work.
+- **Four more REST paths** — receptor-conformation stats, specialized-dataset
+  health, multi-tissue cell types and feedback submissions were each being
+  answered by the wrong handler. All four now reach their own.
+
+### Improved — consistency and access control
+
+- Response shapes now match the documentation on the endpoints above; several
+  were returning a different shape than the reference described.
+- Ownership checks tightened across job, batch and provenance endpoints, so a
+  resource id alone never grants access to another account's data.
+- The API reference was corrected where it described routes that did not exist
+  or listed capabilities the platform does not expose.
+
+Nothing in this section changes a method signature or a parameter. If your
+integration works today it will keep working; the difference is that calls
+which quietly returned nothing now return your data.
 
 ## [0.11.0] — 2026-08-03
 
