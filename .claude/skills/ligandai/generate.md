@@ -125,20 +125,42 @@ job = client.peptides.generate(
 - **`"v6.5.21"` (default)** — Receptor-conditioned. Designs respond to the
   receptor you select. Replaces v6.5, which was trained with all-zero receptor
   features and produced the same peptides regardless of target.
-- **`"v6.9.21"`** — Experimental. A different, larger receptor feature space
-  (107 per-residue channels vs 48), with classifier-free guidance applied at
+- **`"v6.9.21"`** — A different, larger receptor feature space (107
+  per-residue channels vs 48), with classifier-free guidance applied at
   inference. Validated for distinguishing sequence composition between
-  receptors. Not validated for where on the structure the peptide binds.
-  Guidance options are not available on this model.
+  receptors ONLY — not validated for WHERE on the structure the peptide binds
+  (selection, not guidance, delivers placement), and NOT strictly better than
+  v6.5 (measured contact_logits 0.6281 vs v6.5.21's 0.6719). The four
+  guidance heads (`immunogenicity`, `serum_stability`, `residue_composition`,
+  `cellfree`) ARE supported here, via the batch-spawn path rather than the
+  streaming guided pool. `immuno_strength`/`stability_strength` saturate at
+  1.5/2.0; `residue_composition_strength` and `cellfree_strength` are clamped
+  at 4.0.
+
+  ⛔ TWO EFFECTS, NOT ONE. The -26.7% between-receptor JSD drop measured at
+  `residue_composition_strength=4` against an all-knobs-off control is a FIXED
+  -17.7 percentage-point **cysteine-kernel** cost (95% CI [-32.5%, -3.7%],
+  significant — it fires whenever ANY head is enabled at ANY strength,
+  including 0) PLUS this knob's own dose share of -11.5% (95% CI [-27.2%,
+  +4.7%], NOT significant). The dose share first reaches significance at
+  strength 8 (-22.3%, CI [-38.3%, -6.4%]). An earlier version of this page
+  said "-28% JSD at strength 4" for this knob: that was the two effects summed
+  and billed to the wrong one. Do not reintroduce it.
+
+  `serum_stability` and `residue_composition` are one coupled axis, not
+  independent dials.
 - **`"v6.5"`** — Legacy, deprecated. Trained with all-zero receptor features, so
   its output does not depend on the receptor you select. Retained only to
   reproduce runs made before August 2026.
 
-⚠ `model="v6.9.21"` combined with `serum_stability`, `immunogenicity`,
-`halflife`, `immuno_modules`, `stability_modules`, or the cell-free guidance keys
-raises `LigandAIInvalidConfig` before any HTTP call, naming the conflict. Those
-guidance heads are not available on that model and are never dropped silently.
-`quality_guided` is a different mechanism and works on every model.
+⚠ A model known not to support a requested guidance head (`serum_stability`,
+`immunogenicity`, `residue_composition`, `cellfree`, `cysteine_enabled`,
+`immuno_modules`, `stability_modules`,
+or a cell-free key via `**extra`) raises `LigandAIInvalidConfig` before any HTTP
+call, naming the conflict, rather than dropping it silently. No model shipped
+with this SDK build currently triggers it (`"v6.9.21"` used to; its worker was
+redeployed and verified to serve the four heads). `quality_guided` is a
+different mechanism and works on every model.
 
 ## Cost preview before submitting
 

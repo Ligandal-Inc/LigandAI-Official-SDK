@@ -6,49 +6,77 @@ Stage 1+2 of the target-to-order workflow. Resolves a gene to its best
 structure, extracts the pocket, then generates with every guidance head at its
 MEASURED optimum.
 
-Guidance values used here and why (all measured, CD8AB / CD34 campaign):
+Guidance values used here and why (all measured, CD8AB / CD34 campaign).
+Every knob below is shown with DEFAULT / MIN / CEILING, because turning a knob
+on should never require knowing a magic number:
 
-  immuno_strength=3.0      MHC-I epitope burden per 100 residues falls
-                           5.23 (off) -> 4.48 -> 4.17 -> 3.47 (@3.0), then
-                           REVERSES: 3.45 @4.0, 3.59 @5.0, 4.00 @6.0. Above ~3
-                           the sampler collapses toward poly-alanine and alanine
-                           is itself a P2 anchor for much of the allele panel, so
-                           the collapse rebuilds class-I epitopes. Class-II keeps
-                           falling through that range, which is exactly how the
-                           damage hides from a class-II-only check. The worker
-                           CLAMPS this at 3.0. Cost: ~2.6x more generated
-                           material to reach the same yield.
+  immuno_strength=1.5      default 2.0 | min 0.0 | CEILING 1.5
+                           Frequency-weighted epitope burden per 100 residues,
+                           class I and class II NEVER summed:
+                             off  5.31 / 12.67
+                             1.0  3.25 /  6.73
+                             1.5  2.59 /  4.59   <- ceiling, all 5 seeds clean
+                             1.75 2.31 /  3.85   <- L1 guard trips (2/5 seeds)
+                           The ceiling is the composition guard
+                           (L1-distance-to-natural, MAX_L1 = 45), not a reversal:
+                           the objective is STILL IMPROVING at 1.5. That is where
+                           the damage budget runs out. The worker clamps here.
 
-  stability_strength=2.0   The protease knob (called proteolytic_strength in the
+  stability_strength=2.0   default 2.0 | min 0.0 | CEILING 2.0
+                           The protease knob (called proteolytic_strength in the
                            worker). Cleavage sites per residue: 2.033 (off) ->
                            1.933 @0.5 -> 1.733 @1.0 -> 1.535 @2.0 -> 1.625 @4.0.
-                           Optimum 2.0; the worker clamps there. It ALSO lowers
-                           MHC-I burden (3.47 -> 2.59), so the two objectives are
+                           This one genuinely REVERSES past 2.0, and L1-to-natural
+                           runs 40 -> 70 -> 95 at 2.0/4.0/8.0 while YIELD RISES to
+                           100% — a yield-based guard never sees it (bd-qmhck).
+                           It ALSO lowers MHC-I burden, so the two objectives are
                            synergistic rather than competing.
 
-  cellfreeStrength=2.0     E. coli cell-free (CFPS) expressability — Adaptyv's
-                           platform. Safe across the full 0.5-8.0 sweep
-                           (L1-to-natural 14.6-19.5), so it is deliberately NOT
-                           clamped. No named SDK argument yet: passed through
-                           **extra. Server default is enabled at 1.5.
+  cellfree_strength=2.0    SDK default 1.5 | min 0.0 | ceiling 4.0 (JUDGEMENT)
+                           ⛔ The SDK/website/FastAPI default is 1.5 but the
+                           WORKER signature's default is 2.0. Every client sends
+                           the key explicitly so the worker default never
+                           applies; the two disagree and one is wrong. Set here
+                           explicitly for exactly that reason.
+                           E. coli cell-free (CFPS) expressability — Adaptyv's
+                           platform. The 0.5-8.0 sweep was clean throughout
+                           (L1-to-natural 14.6-19.5, no collapse). The 4.0 ceiling
+                           rests on measured kernel SATURATION above s=4
+                           (bd-b8k08) — higher buys nothing — NOT on measured
+                           harm. Flagged as a judgement so it is not later cited
+                           as a measured limit.
 
-  halflife="extended"      Cavaco 2021 regression
-                           ln(t1/2) = 2.226 + 0.053*NP% - 1.515*W + 1.290*Y
-                                      - 1.052*pI
-                           Trp SHORTENS half-life (metabolic oxidation) despite
-                           being nonpolar; Tyr extends it; high pI shortens it
-                           (renal clearance). REPORTED and ranked, never gated —
-                           the paper's (0,1) normalisation is unrecorded, so the
-                           absolute t1/2 is indicative only.
+  residue_composition=     default target None | strength 2.0 | min 0.0 |
+  "extended"               ceiling 4.0 | unsupported above 2.0
+                           ⛔ RENAMED from `halflife` (bd-LIGANDAI_ALPHA_V2-b4f34).
+                           It does NOT measure or predict a half-life. It shapes
+                           SEQUENCE-LEVEL COMPOSITION only: tryptophan load, basic
+                           fraction, tyrosine content and terminal residues. No
+                           N-end-rule term, no PEST term. The old name still works
+                           and warns.
+                           "extended" = full strength; "moderate" = 0.4x.
+                           The ceiling is where the dose effect on between-receptor
+                           JSD stops being indistinguishable from zero: -11.5% at
+                           strength 4 (95% CI [-27.2%, +4.7%], NOT significant),
+                           significant only at strength 8 (-22.3%, CI [-38.3%,
+                           -6.4%]).
 
-  cysteine_mode=           0 or exactly 2 cysteines. Adaptyv expresses in a
-  "disulfide_only"         REDUCING E. coli cell-free lysate, where unpaired
+  cysteine_mode=           default "disulfide_only"
+  "disulfide_only"         0 or exactly 2 cysteines. Adaptyv expresses in a
+  cysteine_enabled=True    REDUCING E. coli cell-free lysate, where unpaired
                            thiols scramble, cross-link between molecules and
                            aggregate — and >2 Cys cannot form one defined
                            disulfide. This is a soft bias, NOT a constraint: a
                            prior CD34 deliverable came back with 8/25 designs at
                            4, 6 and 8 cysteines because nothing counted them on
                            the finished sequence. Example 27 does the counting.
+                           `cysteine_enabled` is the tri-state switch for the
+                           kernel itself: True fires it (and is a guidance request
+                           on its own), False suppresses it whatever the mode says,
+                           None keeps the legacy "fires iff guidance is effectively
+                           active" resolution. Asking for it explicitly matters
+                           because the kernel costs -17.7% between-receptor JSD
+                           (95% CI [-32.5%, -3.7%]) and used to fire unasked.
 
 Tier: academia / pro / enterprise (the immuno + stability heads are gated).
 
@@ -72,10 +100,10 @@ from ligandai.errors import (
 
 # Measured optima. Named as constants so a call site can never silently drift
 # off them, and so the clamp values are visible at the top of the file.
-IMMUNO_STRENGTH = 3.0        # worker ceiling — higher REVERSES class-I burden
-PROTEOLYTIC_STRENGTH = 2.0   # worker ceiling — higher degrades composition
-CELLFREE_STRENGTH = 2.0      # unclamped: clean across 0.5-8.0
-HALFLIFE_STRENGTH = 1.0      # reported + ranked, never gated
+IMMUNO_STRENGTH = 1.5        # worker ceiling — composition guard, not a reversal
+PROTEOLYTIC_STRENGTH = 2.0   # worker ceiling — its own metric REVERSES above it
+CELLFREE_STRENGTH = 2.0      # SDK default 1.5, worker default 2.0 — set explicitly
+RESIDUE_COMPOSITION_STRENGTH = 1.0   # default 2.0; ceiling 4.0; unsupported >2.0
 
 # Gate on the median of k trajectories. k=1 measured an 11% false-positive rate.
 K_SCREENING = 3
@@ -120,7 +148,8 @@ def main() -> int:
             length_range=(20, 40),
             target_residues=target_residues,
 
-            # De-immunisation. 3.0 is the optimum AND the clamp.
+            # De-immunisation. 1.5 is the clamp — the objective is still
+            # improving there; that is where the composition budget runs out.
             immunogenicity=True,
             immuno_strength=IMMUNO_STRENGTH,
 
@@ -129,12 +158,17 @@ def main() -> int:
             stability_strength=PROTEOLYTIC_STRENGTH,
             stability_mode="resist",
 
-            # Plasma half-life bias. Reported, not gated.
-            halflife="extended",
-            halflife_strength=HALFLIFE_STRENGTH,
+            # Residue & terminal composition — Trp down, basic fraction down,
+            # Tyr up, terminal P/Q/D rewarded. NOT a half-life measurement.
+            residue_composition="extended",
+            residue_composition_strength=RESIDUE_COMPOSITION_STRENGTH,
 
-            # 0 or exactly 2 Cys, for the reducing cell-free lysate.
+            # 0 or exactly 2 Cys, for the reducing cell-free lysate. Asked for
+            # explicitly rather than inherited: the kernel costs -17.7%
+            # between-receptor JSD, so it should be a decision, not a side
+            # effect of some other head being on.
             cysteine_mode="disulfide_only",
+            cysteine_enabled=True,
 
             # Fold the survivors at k=5 and gate on the MEDIAN, never the max:
             # max-of-5 passed 63 designs where the median passed 56 — 7 designs
@@ -143,10 +177,11 @@ def main() -> int:
             top_n_fold=50,
             num_trajectories=K_CONFIRMATION,
 
-            # Cell-free expressability has no named SDK argument yet. **extra
-            # keys are merged into the request body verbatim (camelCase).
-            cellfreeEnabled=True,
-            cellfreeStrength=CELLFREE_STRENGTH,
+            # Cell-free expressability. Typed kwarg as of
+            # bd-LIGANDAI_ALPHA_V2-sxc8j (previously **extra-only). Default 2.0,
+            # ceiling 4.0.
+            cellfree=True,
+            cellfree_strength=CELLFREE_STRENGTH,
         )
         print(f"  job {job.id} submitted; waiting…")
 
@@ -164,8 +199,9 @@ def main() -> int:
                 "gen_immuno_strength": IMMUNO_STRENGTH,
                 "gen_proteolytic_strength": PROTEOLYTIC_STRENGTH,
                 "gen_cellfree_strength": CELLFREE_STRENGTH,
-                "gen_halflife_strength": HALFLIFE_STRENGTH,
+                "gen_residue_composition_strength": RESIDUE_COMPOSITION_STRENGTH,
                 "gen_cysteine_mode": "disulfide_only",
+                "gen_cysteine_enabled": True,
                 "gen_job_id": job.id,
             }
             for p in peptides

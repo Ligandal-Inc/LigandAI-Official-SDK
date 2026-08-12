@@ -630,9 +630,15 @@ means the fold was run via the batch path (which skips peptide iPSAE). The legac
 
 ## Folding Controls and Peptide Viewing (v0.3.3+)
 
-Direct SDK folds default to one diffusion sample. Increase
-`num_trajectories`, `sampling_steps`, `recycling_steps`, or `step_scale` only
-when you need ensemble-validation depth. On eligible direct human receptor or
+Direct SDK folds default to one diffusion sample (`num_trajectories`/
+`diffusion_samples` parameter default is still `1` in this SDK version). As of
+2026-08-11 the **platform's own tier default** rose to 4 trajectories for
+academia/pro/pro_beta/pro_commercial/enterprise/discovery_partner tiers (free
+and basic stay capped at 1) — the SDK parameter default did not change, so
+callers on a paid tier who want to match the platform's UI/LigandForge default
+should pass `num_trajectories=4` explicitly. Increase `num_trajectories`,
+`sampling_steps`, `recycling_steps`, or `step_scale` only when you need
+ensemble-validation depth. On eligible direct human receptor or
 receptor-complex folds, set `contribute_to_receptordb=True` to request
 ReceptorDB contribution and the documented discount.
 
@@ -666,9 +672,10 @@ complex (chain A = receptor, chain B = peptide). Pass exactly one of
 `target_gene`, `receptor_pdb`, or `receptor_sequence`. Peptide input accepts
 bare AA strings **or** FASTA blocks (multi-record supported).
 
-Billing is **100 credits per fold per trajectory**, with a
-`max(1.0, sampling_steps / 50)` multiplier — the full batch cost is charged
-upfront. HTTP 402 if balance is short.
+Billing is **25 credits per fold per trajectory**, with a
+`max(1.0, sampling_steps / 50)` multiplier, floored at a **100-credit minimum
+per fold** (so a single-trajectory fold still costs 100, not 25) — the full
+batch cost is charged upfront. HTTP 402 if balance is short.
 
 ```python
 # Gene-based receptor (canonical PDB or human-proteome lookup)
@@ -778,15 +785,17 @@ stability guidance, and logits-style advanced outputs:
 
 ```python
 # Immunogenicity guidance — reduce MHC-I/II epitopes and improve humanness
+# default 2.0 | min 0.0 | CEILING 1.5 (the worker clamps above it)
 job = client.peptides.generate(
     gene="EGFR",
     num_peptides=200,
     immunogenicity=True,
-    immuno_strength=2.5,
+    immuno_strength=1.5,
     immuno_modules={"mhc_i": True, "mhc_ii": True, "humanness": True},
 )
 
 # Serum stability — resist trypsin/DPP-IV/chymotrypsin cleavage
+# default 2.0 | min 0.0 | CEILING 2.0 (its own metric REVERSES above it)
 job = client.peptides.generate(
     gene="EGFR",
     num_peptides=200,
@@ -796,12 +805,26 @@ job = client.peptides.generate(
     stability_modules={"trypsin": True, "chymotrypsin": True, "dppiv": True},
 )
 
-# Extended plasma half-life
+# Residue & terminal composition (renamed from `halflife` — it does NOT measure
+# or predict a half-life; it shapes Trp load, basic fraction, Tyr content and
+# terminal residues, with no N-end rule and no PEST term).
+# target default None | strength default 2.0 | min 0.0 | ceiling 4.0
+# The old `halflife=` / `halflife_strength=` spellings still work and warn.
 job = client.peptides.generate(
     gene="EGFR",
     num_peptides=200,
-    halflife="extended",
-    halflife_strength=2.5,
+    residue_composition="extended",   # "extended" = full strength, "moderate" = 0.4x
+    residue_composition_strength=2.0,
+)
+
+# Cysteine policy as a first-class, explicitly-requested knob. The kernel costs
+# -17.7% between-receptor JSD (95% CI [-32.5%, -3.7%]), so it is worth asking
+# for deliberately rather than inheriting it from another head being on.
+job = client.peptides.generate(
+    gene="EGFR",
+    num_peptides=200,
+    cysteine_mode="disulfide_only",   # default; "allow" is the OFF position
+    cysteine_enabled=True,            # True | False | None (legacy resolution)
 )
 
 # Charge / solubility filtering (server-tier gated)

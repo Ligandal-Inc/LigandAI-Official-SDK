@@ -693,9 +693,11 @@ class LigandAI(_ClientCommon):
           peptide binds (selection, not guidance, delivers placement), and NOT
           strictly better than v6.5 (measured contact_logits 0.6281 vs
           v6.5.21's 0.6719). The four guidance heads (immunogenicity,
-          serum_stability, halflife, cellfree) ARE supported here — see
-          :meth:`Peptides.generate` for the per-head ceilings and the
-          halflife/proteolytic coupling.
+          serum_stability, residue_composition, cellfree) ARE supported here —
+          see :meth:`Peptides.generate` for the per-head defaults, ceilings and
+          the residue_composition/proteolytic coupling. ``residue_composition``
+          was called ``halflife`` through v0.11.x; both names are accepted and
+          the old one warns.
         * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor
           features, so its output does not depend on the receptor you select.
           Retained only to reproduce runs made before August 2026.

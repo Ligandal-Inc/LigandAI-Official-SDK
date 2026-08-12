@@ -9,8 +9,12 @@ Covers wire-format correctness for:
   - quality_guided / immunogenicity / serum_stability guidance flags
   - charge_mode / min_solubility filters
   - tier-gate error propagation (403 → LigandAITierError)
-  - model → generatorModelId (emitted when set, ABSENT when not) and the
-    v6.9.21 + guidance-head conflict (raises, never silently drops)
+  - model → generatorModelId (emitted when set, ABSENT when not). All three
+    known models (v6.5, v6.5.21, v6.9.21) currently accept the four guidance
+    heads, including the typed cellfree/cellfree_strength kwargs. The
+    deny-set + conflict-raise mechanism (bd-LIGANDAI_ALPHA_V2-sxc8j) is
+    exercised only indirectly here since no shipped model triggers it today —
+    it exists for a future model that ships without guidance support.
 
 All tests use pytest-httpx to intercept the POST to /api/ptf/parallel/generate
 and inspect the request body without touching a real server.
@@ -516,57 +520,17 @@ async def test_model_async_generate_emits_generator_model_id(
     assert body["generatorModelId"] == "v6.9.21"
 
 
-# --- v6.9.21 + guidance is an impossible combination, and must say so ---------
+# --- v6.9.21 supports guidance (bd-LIGANDAI_ALPHA_V2-sxc8j) -------------------
 #
 # The four guidance heads (proteolytic/serum stability, immunogenicity,
-# half-life, cell-free) are runtime penalty functions inside the v6.5-line
-# sampling loop. v6.9.21 samples by a different loop and does not implement
-# them. Dropping them silently would return designs generated WITHOUT the
-# guidance the caller asked for, which is indistinguishable from success.
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected_name"),
-    [
-        ({"serum_stability": True}, "serum_stability"),
-        ({"immunogenicity": True}, "immunogenicity"),
-        ({"halflife": "extended"}, "halflife"),
-        ({"immuno_modules": {"mhc_i": True}}, "immuno_modules"),
-        ({"stability_modules": {"trypsin": True}}, "stability_modules"),
-    ],
-)
-def test_v6921_plus_guidance_raises(
-    client: LigandAI,
-    kwargs: dict,
-    expected_name: str,
-) -> None:
-    with pytest.raises(LigandAIInvalidConfig) as exc_info:
-        client.peptides.generate(gene="EGFR", model="v6.9.21", **kwargs)
-    message = str(exc_info.value)
-    assert "v6.9.21" in message
-    assert expected_name in message
-    assert exc_info.value.field == "model"
-
-
-def test_v6921_plus_cellfree_via_extra_raises(client: LigandAI) -> None:
-    """Cell-free has no typed kwarg — it arrives through **extra and must still conflict."""
-    with pytest.raises(LigandAIInvalidConfig) as exc_info:
-        client.peptides.generate(gene="EGFR", model="v6.9.21", cellfreeEnabled=True)
-    assert "cellfreeEnabled" in str(exc_info.value)
-
-
-def test_v6921_conflict_names_every_offending_argument(client: LigandAI) -> None:
-    with pytest.raises(LigandAIInvalidConfig) as exc_info:
-        client.peptides.generate(
-            gene="EGFR",
-            model="v6.9.21",
-            serum_stability=True,
-            immunogenicity=True,
-            halflife="extended",
-        )
-    message = str(exc_info.value)
-    for name in ("serum_stability", "immunogenicity", "halflife"):
-        assert name in message
+# half-life, cell-free) are the same v6.5-line runtime penalty functions on
+# all three known models. v6.5/v6.5.21 route them through the streaming
+# guided pool; v6.9.21 routes them through the normal batch-spawn path
+# ("default_function" transport, no streaming surface) — same kernels, same
+# strength calibration. v6.9.21 used to be denied this combination
+# client-side; the worker has since been redeployed and verified to serve the
+# four heads, so the deny-set is empty and this file exercises the ACCEPT path
+# for all three models instead of a raise.
 
 
 def test_v6921_without_guidance_is_accepted(
@@ -580,6 +544,7 @@ def test_v6921_without_guidance_is_accepted(
     assert body["immunoEnabled"] is False
     assert body["stabilityEnabled"] is False
     assert body["halflifeEnabled"] is False
+    assert body["cellfreeEnabled"] is False
 
 
 def test_v6921_quality_guided_is_not_a_conflict(
@@ -588,8 +553,9 @@ def test_v6921_quality_guided_is_not_a_conflict(
 ) -> None:
     """quality_guided is a different mechanism from the four penalty heads.
 
-    It also defaults to True, so treating it as a conflict would make v6.9.21
-    unusable without an explicit opt-out on every call.
+    It also defaults to True, so treating it as a conflict would make any
+    guidance-less future model unusable without an explicit opt-out on every
+    call.
     """
     httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
     client.peptides.generate(gene="EGFR", model="v6.9.21", quality_guided=True)
@@ -598,31 +564,266 @@ def test_v6921_quality_guided_is_not_a_conflict(
     assert body["qualityGuidedEnabled"] is True
 
 
-@pytest.mark.parametrize("model_id", ["v6.5.21", "v6.5", None])
-def test_guidance_allowed_on_guidance_capable_models(
+@pytest.mark.parametrize("model_id", ["v6.5.21", "v6.5", "v6.9.21", None])
+def test_guidance_allowed_on_all_known_models(
     httpx_mock: HTTPXMock,
     client: LigandAI,
     model_id: str | None,
 ) -> None:
-    """The conflict is specific to v6.9.21 — it must not leak onto other models."""
+    """All three known models (plus the server-default None) accept guidance."""
     httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
     client.peptides.generate(
         gene="EGFR",
         model=model_id,
         serum_stability=True,
         immunogenicity=True,
-        halflife="extended",
+        residue_composition="extended",
+        cellfree=True,
+        cellfree_strength=2.0,
     )
     body = _body(httpx_mock)
     assert body["stabilityEnabled"] is True
     assert body["immunoEnabled"] is True
+    assert body["residueCompositionTarget"] == "extended"
+    assert body["cellfreeEnabled"] is True
+    assert body["cellfreeStrength"] == pytest.approx(2.0)
+
+
+def test_cellfree_defaults_to_disabled_with_platform_default_strength(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """Pins the CLIENT default at 1.5.
+
+    ⛔ This is knowingly NOT the worker signature's own default of 2.0
+    (ligandforge_v6_5_guided_inference_unified.py:2118). Every client — this
+    SDK, the Node SDK, the website, FastAPI — sends 1.5 explicitly, so the
+    worker default never applies to a client-originated run. The two numbers
+    disagree and one is wrong; resolving it changes what every default request
+    does, so it is a platform decision, not a unilateral SDK edit
+    (bd-LIGANDAI_ALPHA_V2-b4f34). This test exists to make a silent drift of
+    that number fail loudly rather than ship.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR")
+    body = _body(httpx_mock)
+    assert body["cellfreeEnabled"] is False
+    assert body["cellfreeStrength"] == pytest.approx(1.5)
+
+
+# ---------------------------------------------------------------------------
+# halflife -> residue_composition rename + back-compat alias
+# [bd-LIGANDAI_ALPHA_V2-b4f34.5]
+#
+# The knob never measured a half-life; it shapes sequence-level composition.
+# The rename is only safe if EVERY existing caller keeps working, so these
+# tests pin the alias contract rather than just the new spelling.
+# ---------------------------------------------------------------------------
+
+
+def test_residue_composition_emits_canonical_and_legacy_wire_keys(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """Both spellings go on the wire, with identical values.
+
+    New key only => a server that has not taken the rename drops the knob
+    (silent no-op). Legacy key only => the SDK keeps a dead name alive. Both is
+    the one option that cannot silently no-op against either server generation.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(
+        gene="EGFR",
+        residue_composition="extended",
+        residue_composition_strength=1.0,
+    )
+    body = _body(httpx_mock)
+    assert body["residueCompositionEnabled"] is True
+    assert body["residueCompositionTarget"] == "extended"
+    assert body["residueCompositionStrength"] == pytest.approx(1.0)
+    assert body["halflifeEnabled"] is True
     assert body["halflifeTarget"] == "extended"
+    assert body["halflifeStrength"] == pytest.approx(1.0)
+    # Canonical spelling => no alias provenance.
+    assert "residueCompositionAliasUsed" not in body
 
 
-async def test_v6921_plus_guidance_raises_on_async_surface() -> None:
-    """Both resource surfaces enforce it — they share one body builder."""
+def test_legacy_halflife_still_works_and_warns(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """An existing caller on the old name must not break — it must warn."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    with pytest.warns(DeprecationWarning, match="residue_composition"):
+        client.peptides.generate(
+            gene="EGFR",
+            halflife="moderate",
+            halflife_strength=1.0,
+        )
+    body = _body(httpx_mock)
+    assert body["residueCompositionTarget"] == "moderate"
+    assert body["residueCompositionStrength"] == pytest.approx(1.0)
+    assert body["halflifeTarget"] == "moderate"
+    assert body["residueCompositionAliasUsed"] == "halflife"
+
+
+def test_new_name_wins_when_both_supplied_and_they_disagree(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    with pytest.warns(DeprecationWarning, match="NEW name wins"):
+        client.peptides.generate(
+            gene="EGFR",
+            residue_composition="extended",
+            residue_composition_strength=1.0,
+            halflife="moderate",
+            halflife_strength=3.0,
+        )
+    body = _body(httpx_mock)
+    assert body["residueCompositionTarget"] == "extended"
+    assert body["residueCompositionStrength"] == pytest.approx(1.0)
+    assert body["halflifeTarget"] == "extended"
+    assert body["halflifeStrength"] == pytest.approx(1.0)
+    # The new name carried the request, so no legacy alias is recorded.
+    assert "residueCompositionAliasUsed" not in body
+
+
+def test_both_supplied_and_agreeing_warns_without_conflict(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    with pytest.warns(DeprecationWarning) as record:
+        client.peptides.generate(
+            gene="EGFR",
+            residue_composition="extended",
+            halflife="extended",
+        )
+    messages = [str(w.message) for w in record]
+    assert any("deprecated names" in m for m in messages)
+    assert not any("they disagree" in m for m in messages)
+
+
+def test_residue_composition_absent_emits_disabled_under_both_names(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR")
+    body = _body(httpx_mock)
+    assert body["residueCompositionEnabled"] is False
+    assert body["halflifeEnabled"] is False
+    assert "residueCompositionTarget" not in body
+    assert "halflifeTarget" not in body
+
+
+def test_strength_above_ceiling_warns_but_is_not_rewritten(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """The SDK is not the enforcement point — it warns and sends verbatim.
+
+    Clamping client-side would hide the fact that the worker clamped, and the
+    two clamps would drift.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    with pytest.warns(UserWarning, match="exceeds the server-side ceiling"):
+        client.peptides.generate(
+            gene="EGFR",
+            residue_composition="extended",
+            residue_composition_strength=8.0,
+        )
+    body = _body(httpx_mock)
+    assert body["residueCompositionStrength"] == pytest.approx(8.0)
+
+
+def test_negative_strength_is_rejected_client_side(client: LigandAI) -> None:
+    """A negative strength inverts every penalty sign — not a supported config."""
+    with pytest.raises(LigandAIInvalidConfig, match="below the minimum"):
+        client.peptides.generate(
+            gene="EGFR",
+            residue_composition="extended",
+            residue_composition_strength=-1.0,
+        )
+
+
+def test_cysteine_enabled_is_tri_state_on_the_wire(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """Absent key preserves legacy resolution; an explicit bool is forwarded."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR")
+    assert "cysteineEnabled" not in _body(httpx_mock)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_cysteine_enabled_explicit_value_reaches_the_wire(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+    flag: bool,
+) -> None:
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(gene="EGFR", cysteine_enabled=flag)
+    body = _body(httpx_mock)
+    assert body["cysteineEnabled"] is flag
+    assert body["cysteineMode"] == "disulfide_only"
+
+
+async def test_legacy_halflife_alias_works_on_the_async_surface(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Both resource surfaces share one resolver — pin that they agree.
+
+    A rename that lands on the sync surface only is a rename that half the
+    callers never see.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
     from ligandai import AsyncLigandAI
 
     async with AsyncLigandAI(api_key="lgai_pro_test", base_url=BASE, max_retries=1) as ac:
-        with pytest.raises(LigandAIInvalidConfig):
-            await ac.peptides.generate(gene="EGFR", model="v6.9.21", serum_stability=True)
+        with pytest.warns(DeprecationWarning, match="residue_composition"):
+            await ac.peptides.generate(gene="EGFR", halflife="extended")
+    body = _body(httpx_mock)
+    assert body["residueCompositionTarget"] == "extended"
+    assert body["halflifeTarget"] == "extended"
+    assert body["residueCompositionAliasUsed"] == "halflife"
+
+
+def test_cellfree_via_extra_still_lands_on_the_wire(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """The typed `cellfree` kwarg is the blessed surface, but **extra remains a
+    supported bypass — it must not be silently dropped or ignored in favor of
+    the typed field.
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    client.peptides.generate(
+        gene="EGFR",
+        model="v6.9.21",
+        cellfreeEnabled=True,
+        cellfreeStrength=3.0,
+    )
+    body = _body(httpx_mock)
+    assert body["cellfreeEnabled"] is True
+    assert body["cellfreeStrength"] == pytest.approx(3.0)
+
+
+async def test_v6921_guidance_accepted_on_async_surface(httpx_mock: HTTPXMock) -> None:
+    """Both resource surfaces accept it — they share one body builder."""
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    from ligandai import AsyncLigandAI
+
+    async with AsyncLigandAI(api_key="lgai_pro_test", base_url=BASE, max_retries=1) as ac:
+        await ac.peptides.generate(
+            gene="EGFR",
+            model="v6.9.21",
+            serum_stability=True,
+            cellfree=True,
+        )
+    body = _body(httpx_mock)
+    assert body["generatorModelId"] == "v6.9.21"
+    assert body["stabilityEnabled"] is True
+    assert body["cellfreeEnabled"] is True

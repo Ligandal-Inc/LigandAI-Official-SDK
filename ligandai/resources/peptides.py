@@ -161,12 +161,16 @@ _LOGITS_EXTRA_KEYS: frozenset[str] = frozenset({
 
 # Raw wire-format guidance keys a caller could set directly through
 # ``extra={...}`` / ``**extra``, bypassing the typed kwargs (``immunogenicity``,
-# ``serum_stability``, ``halflife``, ``cellfree``, ...). All four guidance heads
-# have a typed kwarg as of bd-LIGANDAI_ALPHA_V2-sxc8j (``cellfree``/
-# ``cellfree_strength`` were the last ones added — see
-# ``examples/26_gated_generation.py``), but ``extra`` remains a supported
-# escape hatch and the model-compatibility check must not miss a guidance flag
-# set that way just because it skipped the typed field.
+# ``serum_stability``, ``residue_composition``, ``cellfree``,
+# ``cysteine_enabled``, ...). Every guidance head has a typed kwarg as of
+# bd-LIGANDAI_ALPHA_V2-b4f34, but ``extra`` remains a supported escape hatch and
+# the model-compatibility check must not miss a guidance flag set that way just
+# because it skipped the typed field.
+#
+# Both the canonical (``residueComposition*``) and the legacy (``halflife*``)
+# spellings are listed. A key that stops being recognised here does not stop
+# reaching the server — it just stops being COUNTED, which is how a guidance
+# request goes silently missing from a compatibility check.
 _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
     "cellfreeEnabled",
     "cellfree_enabled",
@@ -178,8 +182,12 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
     "stability_enabled",
     "proteolyticEnabled",
     "proteolytic_enabled",
+    "residueCompositionEnabled",
+    "residue_composition_enabled",
     "halflifeEnabled",
     "halflife_enabled",
+    "cysteineEnabled",
+    "cysteine_enabled",
 })
 
 # Generator models known to this SDK build that do NOT implement the guidance
@@ -190,8 +198,8 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
 #
 # Empty today (bd-LIGANDAI_ALPHA_V2-sxc8j, 2026-08-11): v6.5, v6.5.21, AND
 # v6.9.21 all implement the four guidance heads
-# (immuno/proteolytic/halflife/cellfree) — the v6.5 line via the streaming
-# guided-pool transport, v6.9.21 via the batch-spawn "default_function"
+# (immuno/proteolytic/residue_composition/cellfree) — the v6.5 line via the
+# streaming guided-pool transport, v6.9.21 via the batch-spawn "default_function"
 # transport (guidance kwargs ride the normal generate call; no streaming
 # surface). v6.9.21 used to be in this set; it was removed once the worker
 # was redeployed and verified to serve the four heads.
@@ -238,24 +246,237 @@ def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Guidance knob defaults and bounds — bd-LIGANDAI_ALPHA_V2-b4f34
+#
+# ⛔ THE CEILINGS BELOW ARE ENFORCED IN THE GENERATION WORKER, not here. The SDK
+# does not clamp: silently rewriting a caller's number is how "the run did not do
+# what I asked" bugs are born. It WARNS, sends the value you gave it, and lets the
+# worker's clamp be the single enforcement point (so the website, both SDKs, a raw
+# API call, and the local A2000 fallback generator all converge on the same
+# number and it logs when it intervenes).
+#
+# ``warn_above`` is NOT the ceiling. It is the strength above which the measured
+# evidence stops supporting the setting — the band between ``warn_above`` and
+# ``ceiling`` is "supported, but you are past the calibrated region".
+#
+# Every value here traces to a measurement or is explicitly flagged as a
+# judgement call. Do not add a row without one.
+# ---------------------------------------------------------------------------
+_GUIDANCE_BOUNDS: dict[str, dict[str, float]] = {
+    # MEASURED. The binding guard is the L1-distance-to-natural-composition
+    # bound (MAX_L1 = 45): clean on all 5 seeds at 1.5, trips at 1.75.
+    "immuno_strength": {"default": 2.0, "min": 0.0, "ceiling": 1.5, "warn_above": 1.5},
+    # MEASURED (bd-qmhck). L1 40 @2.0 -> 70 @4.0 -> 95 @8.0 while YIELD RISES to
+    # 100%, so a yield-based guard never sees the damage.
+    "stability_strength": {"default": 2.0, "min": 0.0, "ceiling": 2.0, "warn_above": 2.0},
+    # MEASURED (bd-sxc8j.12). 4.0 is the last strength whose dose effect on
+    # between-receptor JSD is not distinguishable from zero (-11.5%, 95% CI
+    # [-27.2%, +4.7%]); it becomes significant at 8.0 (-22.3%, CI [-38.3%, -6.4%]).
+    "residue_composition_strength": {
+        "default": 2.0, "min": 0.0, "ceiling": 4.0, "warn_above": 2.0,
+    },
+    # ⚠ JUDGEMENT CALL, not a measurement. Basis: bd-b8k08 measured kernel
+    # SATURATION above s=4 at round 0 — i.e. higher values buy nothing, not that
+    # they were shown to cause harm. Stated as a judgement so nobody cites it as
+    # a measured ceiling later.
+    # ⛔ ``default`` here is the CLIENT default (1.5), which is what this SDK, the
+    # Node SDK, the website and FastAPI all send. The generation worker's own
+    # signature defaults to 2.0. That disagreement is real and unresolved; it is
+    # documented at the ``cellfree_strength`` kwarg rather than papered over.
+    "cellfree_strength": {"default": 1.5, "min": 0.0, "ceiling": 4.0, "warn_above": 4.0},
+}
+
+
+def _warn_strength_out_of_band(
+    name: str, value: float | None, *, head_enabled: bool
+) -> None:
+    """Warn when an ACTIVE guidance strength leaves the calibrated band.
+
+    Two distinct warnings, because they mean different things:
+
+    * ``> ceiling`` — the generation worker WILL clamp this to the ceiling. The
+      run will not use the number you passed. This is the loud one.
+    * ``> warn_above`` (but <= ceiling) — accepted and applied verbatim, but past
+      the strength the measurements support.
+
+    Below ``min`` raises rather than warns: a negative strength inverts the sign
+    of every penalty in the kernel, which is not a supported configuration. That
+    check runs even for a disabled head — a negative number is a mistake whether
+    or not it would have been applied.
+
+    ⛔ ``head_enabled`` is load-bearing, not defensive. ``immuno_strength``
+    DEFAULTS to 2.0 while its ceiling is 1.5, so an ungated check would warn on
+    every single ``generate()`` call — including calls that never touch immuno
+    guidance. A warning that fires when nothing is wrong is a warning users
+    learn to ignore, which costs us the one case that mattered.
+    """
+    if value is None:
+        return
+    bounds = _GUIDANCE_BOUNDS.get(name)
+    if bounds is None:
+        return
+    if value < bounds["min"]:
+        raise LigandAIInvalidConfig(
+            f"{name}={value} is below the minimum {bounds['min']}. A negative "
+            "guidance strength inverts every penalty in the kernel and is not a "
+            "supported configuration.",
+            field=name,
+            value=value,
+        )
+    if not head_enabled:
+        # The value is inert on this request — nothing to warn about.
+        return
+    if value == bounds["default"]:
+        # The caller did not choose this number; it is the signature default.
+        # ``immuno_strength`` defaults to 2.0 against a 1.5 ceiling, so warning
+        # here would fire for every caller who simply enabled the head — and the
+        # clamp is documented on the parameter itself. Warn about values the
+        # caller actually picked; document the ones they inherited.
+        return
+    if value > bounds["ceiling"]:
+        warnings.warn(
+            f"{name}={value} exceeds the server-side ceiling of "
+            f"{bounds['ceiling']}. The generation worker clamps it to "
+            f"{bounds['ceiling']} and logs that it did, so the run will NOT use "
+            f"{value}. Pass {bounds['ceiling']} or lower to make the intent "
+            "visible in your call.",
+            UserWarning,
+            stacklevel=3,
+        )
+    elif value > bounds["warn_above"]:
+        warnings.warn(
+            f"{name}={value} is above {bounds['warn_above']}, the highest "
+            "strength the deployed measurements support. It is accepted and "
+            f"applied verbatim (the ceiling is {bounds['ceiling']}), but you are "
+            "past the calibrated region — check composition per design.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def _resolve_residue_composition(
+    *,
+    residue_composition: _ResidueCompositionTarget | None,
+    residue_composition_strength: float | None,
+    halflife: _ResidueCompositionTarget | None,
+    halflife_strength: float | None,
+) -> tuple[_ResidueCompositionTarget | None, float, str | None]:
+    """Resolve the residue-composition knob from its new and legacy names.
+
+    The knob was called ``halflife`` / ``halflife_strength`` through v0.11.x and
+    was renamed to ``residue_composition`` / ``residue_composition_strength`` in
+    bd-LIGANDAI_ALPHA_V2-b4f34 because it never measured a half-life.
+
+    Contract (identical on every layer that accepts this knob — both SDKs, the
+    server, the worker):
+
+    * BOTH names are accepted. Existing callers do not break.
+    * The legacy name emits a :class:`DeprecationWarning`.
+    * If both are supplied and they DISAGREE, the NEW name wins and the warning
+      says so.
+    * If both are supplied and they AGREE, one warning, no conflict.
+
+    Returns ``(target, strength, alias_used)`` where ``alias_used`` is
+    ``"halflife"`` when the caller reached this knob through the legacy name and
+    ``None`` otherwise. ``alias_used`` is recorded in request provenance so a run
+    can be traced back to the name the caller actually used.
+    """
+    default_strength = _GUIDANCE_BOUNDS["residue_composition_strength"]["default"]
+    legacy_used = halflife is not None or halflife_strength is not None
+    new_used = residue_composition is not None or residue_composition_strength is not None
+
+    if not legacy_used:
+        strength = (
+            residue_composition_strength
+            if residue_composition_strength is not None
+            else default_strength
+        )
+        _warn_strength_out_of_band(
+            "residue_composition_strength",
+            strength,
+            head_enabled=residue_composition is not None,
+        )
+        return residue_composition, strength, None
+
+    conflicts: list[str] = []
+    if (
+        residue_composition is not None
+        and halflife is not None
+        and residue_composition != halflife
+    ):
+        conflicts.append(
+            f"residue_composition={residue_composition!r} vs halflife={halflife!r}"
+        )
+    if (
+        residue_composition_strength is not None
+        and halflife_strength is not None
+        and residue_composition_strength != halflife_strength
+    ):
+        conflicts.append(
+            f"residue_composition_strength={residue_composition_strength} vs "
+            f"halflife_strength={halflife_strength}"
+        )
+
+    message = (
+        "halflife= / halflife_strength= are deprecated names for the "
+        "residue-composition guidance knob and will be removed in a future "
+        "major release. Use residue_composition= / "
+        "residue_composition_strength= instead. The knob was renamed because it "
+        "does NOT measure, predict or optimise a half-life: it shapes "
+        "sequence-level composition only (tryptophan load, basic fraction, "
+        "tyrosine content, terminal residues). It implements no N-end rule and "
+        "no PEST term."
+    )
+    if conflicts:
+        message += (
+            " Both names were supplied and they disagree ("
+            + "; ".join(conflicts)
+            + "). The NEW name wins."
+        )
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+
+    target = residue_composition if residue_composition is not None else halflife
+    if residue_composition_strength is not None:
+        strength = residue_composition_strength
+    elif halflife_strength is not None:
+        strength = halflife_strength
+    else:
+        strength = default_strength
+    _warn_strength_out_of_band(
+        "residue_composition_strength", strength, head_enabled=target is not None
+    )
+    # alias_used is reported only when the legacy name is what actually carried
+    # the request — if the caller passed both and the new name won, the canonical
+    # name is what was used.
+    alias_used = "halflife" if not new_used else None
+    return target, strength, alias_used
+
+
 def _requests_advanced_guidance(
     *,
     immunogenicity: bool,
     immuno_modules: dict[str, bool] | None,
     serum_stability: bool,
     stability_modules: dict[str, bool] | None,
-    halflife: _HalflifeTarget | None,
+    residue_composition: _ResidueCompositionTarget | None,
     cellfree: bool,
     cyclic_mode: _CyclicMode | None,
     extra: dict[str, Any] | None,
 ) -> bool:
-    """Return True for guidance outputs gated to academia/pro/enterprise."""
+    """Return True for guidance outputs gated to academia/pro/enterprise.
+
+    ``cysteine_enabled`` / ``cysteine_mode`` are deliberately NOT in this set.
+    Cysteine policy has always been available on every tier, and making an
+    explicit ``cysteine_enabled=`` request newly tier-gated would be a silent
+    downgrade for existing free/basic callers.
+    """
     if (
         immunogenicity
         or immuno_modules is not None
         or serum_stability
         or stability_modules is not None
-        or halflife is not None
+        or residue_composition is not None
         or cellfree
         or (cyclic_mode is not None and cyclic_mode != "none")
     ):
@@ -269,19 +490,21 @@ def _guidance_arguments_in_use(
     immuno_modules: dict[str, bool] | None,
     serum_stability: bool,
     stability_modules: dict[str, bool] | None,
-    halflife: _HalflifeTarget | None,
+    residue_composition: _ResidueCompositionTarget | None,
     cellfree: bool,
+    cysteine_enabled: bool | None = None,
     extra: dict[str, Any] | None,
 ) -> list[str]:
     """Names of the guidance-head arguments the caller actually turned on.
 
-    Scope is the four v6.5-line runtime penalty functions — proteolytic/serum
-    stability, immunogenicity, half-life, and cell-free expressability. Returned
-    sorted so the error message is deterministic. Consulted only when the
-    resolved model is in ``_MODELS_WITHOUT_GUIDANCE_HEADS`` — empty today, kept
-    for a future model that ships without guidance support. ``quality_guided``
-    is NOT in this set: it is a different mechanism, defaults to ``True``, and
-    is not one of the four penalty heads.
+    Scope is the v6.5-line runtime penalty functions — proteolytic/serum
+    stability, immunogenicity, residue & terminal composition, cell-free
+    expressability, and (as of bd-LIGANDAI_ALPHA_V2-b4f34) an explicit
+    ``cysteine_enabled=True`` request. Returned sorted so the error message is
+    deterministic. Consulted only when the resolved model is in
+    ``_MODELS_WITHOUT_GUIDANCE_HEADS`` — empty today, kept for a future model
+    that ships without guidance support. ``quality_guided`` is NOT in this set:
+    it is a different mechanism, defaults to ``True``, and is not a penalty head.
     """
     in_use: list[str] = []
     if immunogenicity:
@@ -292,10 +515,12 @@ def _guidance_arguments_in_use(
         in_use.append("serum_stability")
     if stability_modules is not None:
         in_use.append("stability_modules")
-    if halflife is not None:
-        in_use.append("halflife")
+    if residue_composition is not None:
+        in_use.append("residue_composition")
     if cellfree:
         in_use.append("cellfree")
+    if cysteine_enabled:
+        in_use.append("cysteine_enabled")
     if extra:
         in_use.extend(
             f"extra[{key!r}]" for key in _GUIDANCE_EXTRA_KEYS if bool(extra.get(key))
@@ -310,8 +535,9 @@ def _resolve_generator_model(
     immuno_modules: dict[str, bool] | None,
     serum_stability: bool,
     stability_modules: dict[str, bool] | None,
-    halflife: _HalflifeTarget | None,
+    residue_composition: _ResidueCompositionTarget | None,
     cellfree: bool,
+    cysteine_enabled: bool | None = None,
     extra: dict[str, Any] | None,
 ) -> str | None:
     """Normalize ``model`` and reject request shapes the selected model cannot run.
@@ -347,16 +573,17 @@ def _resolve_generator_model(
             immuno_modules=immuno_modules,
             serum_stability=serum_stability,
             stability_modules=stability_modules,
-            halflife=halflife,
+            residue_composition=residue_composition,
             cellfree=cellfree,
+            cysteine_enabled=cysteine_enabled,
             extra=extra,
         )
         if conflicts:
             raise LigandAIInvalidConfig(
                 f"model={model_id!r} does not support the guidance options "
-                f"{conflicts}. The stability, immunogenicity, half-life and "
-                "cell-free guidance heads run inside the v6.5-line sampling "
-                "loop, which this model does not use. Drop those arguments to "
+                f"{conflicts}. The stability, immunogenicity, residue-composition, "
+                "cell-free and cysteine guidance heads run inside the v6.5-line "
+                "sampling loop, which this model does not use. Drop those arguments to "
                 f"use {model_id}, or use a model that supports them "
                 "(e.g. 'v6.5.21'). They are not dropped silently, because a "
                 "design generated without the guidance you asked for is not "
@@ -501,10 +728,30 @@ _CysteineMode = Literal[
     "exclude",
 ]
 
-# Half-life guidance target. ``"extended"`` biases the model toward sequences
-# with longer plasma half-life; ``"rapid"`` biases toward fast-clearing peptides
-# (e.g. for dosing flexibility); ``"moderate"`` is the middle ground.
-_HalflifeTarget = Literal["extended", "rapid", "moderate"]
+# Residue & terminal composition guidance target (formerly "half-life").
+#
+# ⛔ NAME CHANGE (bd-LIGANDAI_ALPHA_V2-b4f34): this knob was called ``halflife``
+# through v0.11.x. It never measured, predicted or optimised a half-life. The
+# deployed kernel is purely SEQUENCE-LEVEL COMPOSITION shaping:
+#   * an escalating tryptophan penalty (1.0x / 2.5x / 4.0x as Trp count hits 0/1/2),
+#   * an R/K/H penalty gated on the running basic fraction (0.3x / 0.6x / 1.0x at
+#     basic fraction <=0.15 / >0.15 / >0.25),
+#   * a tyrosine reward when Tyr is under-represented,
+#   * terminal-residue rewards (P/Q at the N-terminus, P/D at the C-terminus),
+#   * a proline reward cap and an anti-escape cysteine baseline.
+# There is NO N-end-rule term and NO PEST term anywhere in it, and it consults no
+# measured half-life data. See ``residue_composition`` on
+# :meth:`Peptides.generate` for the full statement.
+#
+# ``"extended"`` applies the kernel at full strength; ``"moderate"`` applies it at
+# 0.4x strength. ``"rapid"`` is accepted for backward compatibility but is a
+# NO-OP in the dynamic kernel — the worker returns a zero penalty tensor for any
+# target outside {"extended", "moderate"}.
+_ResidueCompositionTarget = Literal["extended", "rapid", "moderate"]
+
+#: Deprecated alias retained so downstream type annotations importing the old
+#: private name keep resolving. Prefer :data:`_ResidueCompositionTarget`.
+_HalflifeTarget = _ResidueCompositionTarget
 
 # Proteolytic stability guidance mode. ``"resist"`` pushes the model away from
 # protease-cleavable motifs; ``"target"`` does the inverse (deliberately
@@ -529,24 +776,28 @@ _StabilityMode = Literal["resist", "target"]
 #   better than v6.5: measured contact_logits 0.6281 vs v6.5.21's 0.6719.
 #
 #   The four guidance heads (``immunogenicity``, ``serum_stability`` /
-#   proteolytic, ``halflife``, ``cellfree``) ARE supported on this model — the
-#   same v6.5 penalty kernels and the same strength calibration, routed
-#   through the normal batch-spawn path rather than the streaming guided pool
-#   that v6.5/v6.5.21 use. ``immuno_strength`` and ``stability_strength``
+#   proteolytic, ``residue_composition``, ``cellfree``) ARE supported on this
+#   model — the same v6.5 penalty kernels and the same strength calibration,
+#   routed through the normal batch-spawn path rather than the streaming guided
+#   pool that v6.5/v6.5.21 use. ``immuno_strength`` and ``stability_strength``
 #   SATURATE at their ceilings (1.5 and 2.0 respectively — passing higher has
-#   no further effect). ``halflife_strength`` has NO server-side ceiling — see
-#   its own parameter doc for the recommended 4.0 maximum. Of the measured
-#   -26.7% between-receptor JSD drop at strength 4 (vs an all-knobs-off
-#   control), -17.7 points is a FIXED cysteine-kernel cost that fires whenever
-#   ANY guidance head is enabled at ANY strength (including 0) — it is not
-#   this knob's dose effect. ``halflife_strength``'s own dose effect at
-#   strength 4 is -11.5%, 95% CI [-27.2%, +4.7%] (NOT statistically
-#   significant); it first reaches significance at strength 8 (-22.3%, CI
-#   [-38.3%, -6.4%]). ``serum_stability`` / proteolytic and ``halflife`` are
-#   ONE coupled axis, not independent dials — each measurably moves the
-#   other's metric. ``cellfree`` lowers LOCAL HYDROPHOBICITY (rolling
-#   7-residue GRAVY window), NOT K/R clusters — see its own parameter doc; it
-#   has no established ceiling.
+#   no further effect); ``residue_composition_strength`` and
+#   ``cellfree_strength`` are clamped at 4.0.
+#
+#   ⛔ TWO EFFECTS, NOT ONE. The measured -26.7% between-receptor JSD drop at
+#   ``residue_composition_strength=4`` (vs an all-knobs-off control) decomposes
+#   into a FIXED -17.7 percentage-point cysteine-kernel cost (95% CI [-32.5%,
+#   -3.7%], significant) that fires whenever ANY guidance head is enabled at ANY
+#   strength including 0, PLUS this knob's own dose share of -11.5%, 95% CI
+#   [-27.2%, +4.7%] (NOT statistically significant). The dose share first
+#   reaches significance at strength 8 (-22.3%, CI [-38.3%, -6.4%]). Quoting
+#   ~28% as this knob's cost at strength 4 sums the two and bills them to the
+#   wrong one — that figure is retired, do not reintroduce it.
+#
+#   ``serum_stability`` / proteolytic and ``residue_composition`` are ONE
+#   coupled axis, not independent dials — each measurably moves the other's
+#   metric. ``cellfree`` lowers LOCAL HYDROPHOBICITY (rolling 7-residue GRAVY
+#   window), NOT K/R clusters — see its own parameter doc.
 # - ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor features, so
 #   its output does not depend on the receptor you select. Retained only to
 #   reproduce runs made before August 2026.
@@ -665,6 +916,13 @@ def _generation_body(
     program_id: int | str | None,
     conversation_id: str | None,
     cysteine_mode: _CysteineMode,
+    # Tri-state cysteine-kernel switch (bd-LIGANDAI_ALPHA_V2-b4f34):
+    #   True  -> the cysteine kernel fires with the given ``cysteine_mode``, and
+    #            counts as a guidance request on its own, so cysteine policy can
+    #            be requested WITHOUT enabling any other head.
+    #   False -> the kernel does NOT fire, whatever ``cysteine_mode`` says.
+    #   None  -> legacy behaviour: fires iff guidance is effectively active.
+    cysteine_enabled: bool | None,
     quality_guided: bool,
     quality_guidance_scale: float,
     # Generator model selector. ``None`` = omit the key entirely and let the
@@ -677,8 +935,12 @@ def _generation_body(
     stability_strength: float,
     stability_mode: _StabilityMode,
     stability_modules: dict[str, bool] | None,
-    halflife: _HalflifeTarget | None,
-    halflife_strength: float,
+    # Already resolved from the new + legacy names by
+    # ``_resolve_residue_composition`` in the caller — this builder never sees
+    # ``halflife=`` and must not grow a second resolution site.
+    residue_composition: _ResidueCompositionTarget | None,
+    residue_composition_strength: float,
+    residue_composition_alias_used: str | None,
     cellfree: bool,
     cellfree_strength: float,
     # Charge / solubility filtering (tier-gated; server activates filtered
@@ -748,8 +1010,9 @@ def _generation_body(
         immuno_modules=immuno_modules,
         serum_stability=serum_stability,
         stability_modules=stability_modules,
-        halflife=halflife,
+        residue_composition=residue_composition,
         cellfree=cellfree,
+        cysteine_enabled=cysteine_enabled,
         extra=extra,
     )
 
@@ -782,7 +1045,24 @@ def _generation_body(
         "stabilityEnabled": serum_stability,
         "stabilityStrength": stability_strength,
         "stabilityMode": stability_mode,
-        "halflifeEnabled": halflife is not None,
+        # ── Residue & terminal composition (formerly "half-life") ────────────
+        # Emitted under BOTH the canonical and the legacy wire key, on purpose.
+        #
+        # A renamed knob has exactly two failure modes and they pull in opposite
+        # directions: send only the NEW key and a server that has not taken the
+        # rename yet DROPS the knob — a silent no-op, which is the precise defect
+        # this workstream exists to remove. Send only the LEGACY key and the SDK
+        # is the last thing keeping a dead name alive. Sending both is the only
+        # option that cannot silently no-op against either server generation.
+        # The values are always identical, so the server's alias resolver takes
+        # the "both supplied and they agree" branch — no conflict, one
+        # deprecation note in provenance.
+        #
+        # The legacy keys come out when the renamed server is the only server in
+        # every environment. That is a deliberate, separately-verified step, not
+        # something to tidy up in passing.
+        "residueCompositionEnabled": residue_composition is not None,
+        "halflifeEnabled": residue_composition is not None,
         "cellfreeEnabled": cellfree,
         "cellfreeStrength": cellfree_strength,
     }
@@ -792,9 +1072,21 @@ def _generation_body(
     # pin every SDK build to whatever the default was on its release day.
     if generator_model_id is not None:
         body["generatorModelId"] = generator_model_id
-    if halflife is not None:
-        body["halflifeTarget"] = halflife
-        body["halflifeStrength"] = halflife_strength
+    if residue_composition is not None:
+        body["residueCompositionTarget"] = residue_composition
+        body["residueCompositionStrength"] = residue_composition_strength
+        body["halflifeTarget"] = residue_composition
+        body["halflifeStrength"] = residue_composition_strength
+    # Provenance: record WHICH name the caller reached the knob through, so a run
+    # that used the deprecated spelling is traceable after the fact rather than
+    # only at call time. Absent when the canonical name was used.
+    if residue_composition_alias_used is not None:
+        body["residueCompositionAliasUsed"] = residue_composition_alias_used
+    # Tri-state cysteine switch. Emitted ONLY when the caller took a position:
+    # an absent key preserves the legacy "fires iff guidance is effectively
+    # active" resolution, which is what every existing caller already gets.
+    if cysteine_enabled is not None:
+        body["cysteineEnabled"] = cysteine_enabled
     if num_peptides is not None:
         body["peptidesPerTarget"] = num_peptides
     if top_n_fold is not None:
@@ -3048,6 +3340,10 @@ class Peptides(Resource):
         program_id: int | str | None = None,
         conversation_id: str | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
+        # Tri-state switch for the cysteine kernel itself, independent of the
+        # policy in ``cysteine_mode`` (bd-LIGANDAI_ALPHA_V2-b4f34). See the Args
+        # section for why this exists and what it costs.
+        cysteine_enabled: bool | None = None,
         quality_guided: bool = True,
         quality_guidance_scale: float = 1.0,
         # Generator model to design with — see ``_GeneratorModel`` above for the
@@ -3066,25 +3362,28 @@ class Peptides(Resource):
         stability_strength: float = 2.0,
         stability_mode: _StabilityMode = "resist",
         stability_modules: dict[str, bool] | None = None,
-        # Half-life guidance. Coupled with serum_stability/proteolytic — not
-        # an independent dial. On the standard N-end (Varshavsky) half-life
-        # metric this knob is MONOTONE ADVERSE, not inert: deployed
-        # measurement shows +0.0/+0.3/+2.1/+4.1% at strength 1/2/4/8 and
-        # +13.6% at 16 (z=+5.32, significant) — wrong direction. It does NOT
-        # implement the N-end rule and has NO PEST term; its kernel is Trp
-        # removal, basic-fraction reduction, a Tyr boost, and terminal
-        # P/Q/D rewards. See the Args section below for full detail.
-        halflife: _HalflifeTarget | None = None,
-        # halflife_strength has NO server-side ceiling (recommended max 4.0)
-        # — see the Args section below.
-        halflife_strength: float = 2.0,
+        # Residue & terminal composition guidance (RENAMED from ``halflife`` in
+        # bd-LIGANDAI_ALPHA_V2-b4f34 — it never measured a half-life). Coupled
+        # with serum_stability/proteolytic; not an independent dial. Default
+        # strength 2.0, server ceiling 4.0, unsupported above 2.0. See the Args
+        # section below for the full statement of what the kernel does.
+        residue_composition: _ResidueCompositionTarget | None = None,
+        residue_composition_strength: float | None = None,
+        # ⛔ DEPRECATED ALIASES — accepted so no existing caller breaks. Passing
+        # either emits a DeprecationWarning; if both spellings are supplied and
+        # they disagree, the NEW name wins. Default None (not 2.0) so "did the
+        # caller actually pass this?" is answerable.
+        halflife: _ResidueCompositionTarget | None = None,
+        halflife_strength: float | None = None,
         # Cell-free expressability guidance. Lowers LOCAL HYDROPHOBICITY
         # (rolling 7-residue GRAVY window) inside the same v6.5-line penalty
-        # loop as the other three heads — it does NOT penalize K/R clusters
-        # (K/R content and local cluster density both RISE under this
-        # guidance). NOT a global net-charge objective; net charge moves
-        # ~-14.3% as a SIDE EFFECT of the hydrophobicity term, not the
-        # target. No established ceiling.
+        # loop as the other heads — it does NOT penalize K/R clusters (K/R
+        # content and local cluster density both RISE under this guidance).
+        # NOT a global net-charge objective; net charge moves ~-14.3% as a
+        # SIDE EFFECT of the hydrophobicity term, not the target.
+        # ⛔ 1.5 here is a KNOWN CROSS-LAYER MISMATCH with the worker signature's
+        # own 2.0 (ligandforge_v6_5_guided_inference_unified.py:2118). See the
+        # Args entry — it is flagged for decision, not silently reconciled.
         cellfree: bool = False,
         cellfree_strength: float = 1.5,
         # Charge / solubility filtering (server-tier gated; server activates
@@ -3228,8 +3527,48 @@ class Peptides(Resource):
             fold_gpus: GPU count for folding (default 1). Folding caps are
                 free=1, basic=4, academia=16, pro=25, enterprise=50.
             program_id: Program/workstream ID to associate session with.
-            cysteine_mode: Cysteine placement policy (``"disulfide_only"`` /
-                ``"allow_all"`` / ``"exclude_all"``).
+            cysteine_mode: Cysteine placement policy. **Default
+                ``"disulfide_only"``.** Accepted values: ``"allow"`` /
+                ``"allow_all"`` (unconstrained — this is the OFF position, the
+                kernel returns zeros), ``"disulfide_only"`` /
+                ``"stability_only"`` (0 cysteines, or a pair whose spacing can
+                form one intramolecular disulfide), ``"exclude"`` /
+                ``"exclude_all"`` (no cysteine at all).
+
+                Enforced twice on the v6.5 line: as a logit penalty inside the
+                sampling loop AND as a post-hoc sequence filter that DROPS
+                non-conforming designs. The second one is a yield cost, not
+                just a bias — rejection sampling with backpressure refill means
+                ``num_peptides=N`` still returns N.
+            cysteine_enabled: Tri-state switch for the cysteine kernel itself,
+                separate from the policy in ``cysteine_mode``. **Default
+                ``None``.**
+
+                * ``True`` — the kernel fires with your ``cysteine_mode``, and
+                  counts as a guidance request on its own. This is how you ask
+                  for cysteine policy WITHOUT enabling any other head.
+                * ``False`` — the kernel does NOT fire, whatever
+                  ``cysteine_mode`` says.
+                * ``None`` — legacy behaviour: the kernel fires if and only if
+                  guidance is effectively active (at least one head enabled
+                  *with strength > 0*, or an explicit
+                  ``cysteine_enabled=True``).
+
+                ⛔ WHY THIS EXISTS. On the v6.9 line the cysteine kernel was not
+                independently controllable: it fired whenever any head carried
+                an enabled flag, *regardless of strength*, so
+                ``residue_composition`` enabled at strength 0.0 still activated
+                it at ``CYSTEINE_KERNEL_STRENGTH=2.5``. It costs -17.7%
+                between-receptor JSD (95% CI [-32.5%, -3.7%]) — a real,
+                significant cost that callers were paying without asking for
+                it, and which was for a while misattributed to the
+                residue-composition knob's dose response. ``None`` keeps the old
+                resolution for existing callers; the strength>0 condition is
+                what closes "all knobs at zero is not the same as guidance off".
+
+                Request provenance records ``cys_mode``, ``cysteine_enabled``
+                and the RESOLVED ``cysteine_fired`` so what actually ran is
+                recoverable after the fact.
             quality_guided: Enable quality-guided generation. Defaults to True —
                 without it the base generator can collapse to low-diversity,
                 degenerate sequences, so it should stay on for normal use. Available
@@ -3257,24 +3596,37 @@ class Peptides(Resource):
                   better than v6.5 (measured contact_logits 0.6281 vs
                   v6.5.21's 0.6719).
 
-                  The four guidance heads ARE supported here — same v6.5
-                  penalty kernels and strength calibration, routed through the
-                  normal batch-spawn path rather than the streaming guided
-                  pool v6.5/v6.5.21 use. ``immuno_strength`` /
+                  The guidance heads ARE supported here — same v6.5 penalty
+                  kernels and strength calibration, routed through the normal
+                  batch-spawn path rather than the streaming guided pool
+                  v6.5/v6.5.21 use. ``immuno_strength`` /
                   ``stability_strength`` saturate at their ceilings (1.5 /
-                  2.0). ``halflife_strength`` has NO server-side ceiling — see
-                  its own Args entry for the recommended 4.0 maximum. Of the
-                  measured -26.7% between-receptor JSD drop at strength 4 (vs
-                  an all-knobs-off control), -17.7 points is a FIXED
-                  cysteine-kernel cost that fires whenever ANY guidance head
-                  is enabled at ANY strength (including 0) — ``halflife``'s
-                  own dose effect at strength 4 is -11.5% (CI [-27.2%,
-                  +4.7%], NOT significant); it first reaches significance at
-                  strength 8 (-22.3%, CI [-38.3%, -6.4%]).
-                  ``serum_stability``/proteolytic and ``halflife`` are ONE
-                  coupled axis, not independent dials. ``cellfree`` lowers
-                  LOCAL HYDROPHOBICITY (rolling 7-residue GRAVY window), NOT
-                  K/R clusters.
+                  2.0); ``residue_composition_strength`` and
+                  ``cellfree_strength`` are clamped at 4.0.
+
+                  ⛔ READ THE DECOMPOSITION BEFORE QUOTING A NUMBER. The
+                  measured drop against an all-knobs-off control at
+                  ``residue_composition_strength=4`` is -26.7% between-receptor
+                  JSD, and it is TWO effects, not one:
+
+                  * -17.7 percentage points is a FIXED cysteine-kernel cost
+                    (95% CI [-32.5%, -3.7%], significant). It fires whenever
+                    ANY guidance head is enabled at ANY strength, including 0.
+                    It is not this knob's dose effect and does not scale with
+                    it.
+                  * The knob's OWN dose share at strength 4 is -11.5%, 95% CI
+                    [-27.2%, +4.7%] — NOT statistically significant. It first
+                    reaches significance at strength 8 (-22.3%, CI [-38.3%,
+                    -6.4%]), which is why the ceiling is 4.0.
+
+                  Any statement that this knob costs ~28% JSD at strength 4 is
+                  the two effects added together and attributed to one of them.
+                  Do not propagate it.
+
+                  ``serum_stability``/proteolytic and
+                  ``residue_composition`` are ONE coupled axis, not independent
+                  dials. ``cellfree`` lowers LOCAL HYDROPHOBICITY (rolling
+                  7-residue GRAVY window), NOT K/R clusters.
                 * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero
                   receptor features, so its output does not depend on the
                   receptor you select. Retained only to reproduce runs made
@@ -3294,54 +3646,89 @@ class Peptides(Resource):
                 generation away from MHC-binding motifs toward sequences with low
                 predicted immunogenicity. Uses MHC-I/II anchor avoidance + scoring
                 during diffusion.
-            immuno_strength: Immune guidance strength 0.5-4.0 (default 2.0).
-                Enterprise tier unlocks values above 3.0. Saturates at 1.5 —
-                values above that have no further effect.
+            immuno_strength: Immune guidance strength. **Default 2.0, minimum
+                0.0, server ceiling 1.5.** Values above 1.5 are clamped by the
+                generation worker and logged; the SDK warns rather than
+                rewriting your number. The ceiling is the composition guard
+                (L1-distance-to-natural, MAX_L1 = 45): clean on all 5 seeds at
+                1.5, trips at 1.75. The objective is still improving at the
+                ceiling — 1.5 is where the damage budget runs out, not where
+                the knob stops working.
             immuno_modules: Optional per-module override, e.g.
                 ``{"mhc_i": True, "mhc_ii": True}``.
             serum_stability: Enable proteolytic-stability guidance (academia+
                 tier). Suppresses protease-recognition motifs to resist
                 serum/lysosomal cleavage. Use ``stability_mode="target"`` to
-                flip this for prodrug designs. Coupled with ``halflife`` — each
-                measurably moves the other's metric, they are not independent.
-            stability_strength: Stability guidance strength 1.0-3.0. Saturates
-                at 2.0 — values above that have no further effect.
+                flip this for prodrug designs. Coupled with
+                ``residue_composition`` — each measurably moves the other's
+                metric, they are not independent.
+            stability_strength: Proteolytic guidance strength. **Default 2.0,
+                minimum 0.0, server ceiling 2.0.** 2.0 is both the measured
+                optimum and the clamp: the cleavage metric REVERSES above it
+                (2.033 off → 1.535 at 2.0 → 1.625 at 4.0) while L1-to-natural
+                runs 40 → 70 → 95 and yield RISES to 100%, so a yield-based
+                guard never sees the damage (bd-qmhck).
             stability_mode: ``"resist"`` (avoid cleavage) or ``"target"`` (prodrug).
             stability_modules: Optional dict enabling specific protease modules,
                 e.g. ``{"trypsin": True, "dppiv": True}``.
-            halflife: Half-life target (``"extended"`` / ``"rapid"`` / ``"moderate"``).
-                ``None`` disables half-life guidance (default). Coupled with
-                ``serum_stability``/proteolytic — not an independent dial;
-                each measurably moves the other's metric.
+            residue_composition: Residue & terminal composition target —
+                ``"extended"`` (kernel at full strength) or ``"moderate"``
+                (0.4x strength). ``None`` (default) disables the head.
 
-                On the standard N-end (Varshavsky) half-life metric this
-                knob is MONOTONE ADVERSE, not inert: deployed measurement
-                shows +0.0% / +0.3% / +2.1% / +4.1% at strength 1/2/4/8, and
-                +13.6% at strength 16 (z=+5.32, significant) — it moves the
-                metric in the WRONG direction as strength increases. It does
-                NOT implement the N-end rule and has NO PEST term; its actual
-                kernel is Trp removal, basic-fraction reduction, a Tyr boost,
-                and terminal P/Q/D rewards. The N-end rule IS implemented on
-                this platform, but inside the PROTEOLYTIC head
-                (``serum_stability``) — protease-site strength 0.5→2.0 moves
-                the half-life metric -52%, the opposite direction from this
-                knob. Use ``serum_stability`` (proteolytic), not
-                ``halflife``, when the goal is N-end-rule stability.
-            halflife_strength: Half-life guidance strength (default 2.0, UI
-                range 1.0-3.0). Has NO server-side ceiling — the worker's
-                ceiling map carries only ``immuno`` (1.5) and ``proteolytic``
-                (2.0); ``halflife_strength=16.0`` is accepted verbatim and
-                applied. The website caps the UI at 4.0, but that is a
-                client-side default only — the API will NOT clamp this value
-                for you.
+                ⛔ THIS IS NOT A HALF-LIFE CONTROL. It was called ``halflife``
+                through v0.11.x and the name was wrong. The deployed kernel
+                shapes SEQUENCE-LEVEL COMPOSITION and nothing else:
 
-                Recommended maximum: **4.0**. At 8.0 the between-receptor
-                discrimination signal measurably degrades on v6.9.21 (-22.3%
-                JSD, statistically significant) and 61% of generated
-                peptides start with the same two residues; at 16.0 that
-                rises to 93%. The dose effect on between-receptor JSD is NOT
-                statistically significant at strength 4 (-11.5%, CI
-                [-27.2%, +4.7%]).
+                * tryptophan load — an escalating penalty (1.0x / 2.5x / 4.0x
+                  as the running Trp count reaches 0 / 1 / 2),
+                * basic fraction — an R/K/H penalty that steps up as the
+                  fraction of basic residues crosses 0.15 and 0.25,
+                * tyrosine content — a reward when Tyr is under-represented,
+                * terminal residues — rewards for P/Q at the N-terminus and
+                  P/D at the C-terminus, under a proline reward cap.
+
+                It contains NO N-end-rule term, NO PEST term, and consults no
+                measured half-life data. It does not predict a half-life and
+                nothing downstream treats its output as one. On the standard
+                N-end (Varshavsky) metric it is MONOTONE ADVERSE rather than
+                inert: +0.0% / +0.3% / +2.1% / +4.1% at strength 1/2/4/8 and
+                +13.6% at 16 (z=+5.32, significant) — the wrong direction.
+
+                The N-end rule IS implemented on this platform, inside the
+                PROTEOLYTIC head: ``serum_stability`` strength 0.5→2.0 moves
+                that metric -52%. Reach for ``serum_stability``, never this
+                knob, when N-end-rule stability is the goal.
+
+                ``"rapid"`` is accepted for backward compatibility but is a
+                NO-OP — the worker returns a zero penalty tensor for any target
+                outside {"extended", "moderate"}. Coupled with
+                ``serum_stability``/proteolytic; not an independent dial.
+            residue_composition_strength: Strength for
+                ``residue_composition``. **Default 2.0, minimum 0.0, server
+                ceiling 4.0; unsupported above 2.0.**
+
+                The ceiling is where the dose effect on between-receptor JSD
+                stops being indistinguishable from zero: -11.5% at strength 4
+                (95% CI [-27.2%, +4.7%], NOT significant), reaching
+                significance at strength 8 (-22.3%, CI [-38.3%, -6.4%]). At
+                8.0, 61% of generated peptides start with the same two
+                residues; at 16.0 that rises to 93%.
+
+                ⛔ The -17.7 percentage points of JSD loss attributed to the
+                CYSTEINE KERNEL (95% CI [-32.5%, -3.7%]) are NOT part of this
+                knob's dose effect. That cost is fixed, fires whenever any
+                guidance head is enabled at any strength including 0, and is
+                controlled by ``cysteine_enabled`` / ``cysteine_mode``. Adding
+                the two together and billing the sum to this knob is where the
+                retired "~28% at strength 4" figure came from.
+            halflife: ⚠ **DEPRECATED** — the old name for
+                ``residue_composition``. Still accepted so existing callers do
+                not break; emits a :class:`DeprecationWarning`. If both
+                spellings are supplied and they disagree, the NEW name wins and
+                the warning says so.
+            halflife_strength: ⚠ **DEPRECATED** — the old name for
+                ``residue_composition_strength``. Same acceptance and
+                precedence rules as ``halflife``.
             cellfree: Enable cell-free expressability guidance. Lowers LOCAL
                 HYDROPHOBICITY across the sequence (rolling 7-residue GRAVY
                 window, measured 0.001 → -0.576; windows above the kernel's
@@ -3352,8 +3739,28 @@ class Peptides(Resource):
                 guidance. Net charge shifts -14.3% as a SIDE EFFECT of the
                 hydrophobicity term, not the objective — this is NOT a
                 net-charge target. Free — measured zero entropy/quality cost.
-            cellfree_strength: Strength for ``cellfree`` (default 1.5). No
-                established ceiling.
+            cellfree_strength: Strength for ``cellfree``. **Default 1.5 here,
+                minimum 0.0, server ceiling 4.0.**
+
+                ⛔ KNOWN CROSS-LAYER DEFAULT MISMATCH, stated rather than
+                silently reconciled. This SDK, the Node SDK, the website and the
+                FastAPI layer all default to **1.5**; the generation worker's own
+                signature defaults to **2.0**
+                (``ligandforge_v6_5_guided_inference_unified.py:2118``). Because
+                every client sends the key explicitly, the worker's 2.0 never
+                applies to a client-originated run — so the two numbers disagree
+                and one of them is wrong. Changing it alters what every default
+                request does, so it is a platform decision rather than a
+                unilateral SDK edit; flagged under
+                bd-LIGANDAI_ALPHA_V2-b4f34. Pass the value explicitly if the
+                distinction matters to your run.
+
+                ⚠ The 4.0 ceiling is a JUDGEMENT CALL, not a measurement. The
+                kernel was measured to SATURATE above strength 4 (bd-b8k08) —
+                i.e. higher values buy nothing, not that they were shown to do
+                harm. The 0.5-8.0 composition sweep was clean throughout (L1
+                14.6-19.5, no collapse at any strength). Stated as a judgement
+                so it is not later cited as a measured limit.
             charge_mode: Charge filter mode (academia+ tier). ``"lt"`` keeps peptides
                 with net charge < ``charge_value``; ``"gt"`` keeps those above;
                 ``"between"`` uses ``charge_min``/``charge_max`` bounds;
@@ -3441,6 +3848,31 @@ class Peptides(Resource):
             cascade_gate_threshold = cascadeGateThreshold
         if cascade_gate_top_n is None and cascadeGateTopN is not None:
             cascade_gate_top_n = cascadeGateTopN
+        # Resolve the residue-composition knob from its canonical and legacy
+        # names BEFORE the tier gate, so a caller using the deprecated spelling
+        # is gated identically to one using the new one.
+        (
+            residue_composition,
+            resolved_rc_strength,
+            rc_alias_used,
+        ) = _resolve_residue_composition(
+            residue_composition=residue_composition,
+            residue_composition_strength=residue_composition_strength,
+            halflife=halflife,
+            halflife_strength=halflife_strength,
+        )
+        # Each warning is gated on its OWN head being enabled. immuno_strength
+        # defaults to 2.0 against a 1.5 ceiling, so an ungated check would warn
+        # on every call — including calls with immuno guidance switched off.
+        _warn_strength_out_of_band(
+            "immuno_strength", immuno_strength, head_enabled=immunogenicity
+        )
+        _warn_strength_out_of_band(
+            "stability_strength", stability_strength, head_enabled=serum_stability
+        )
+        _warn_strength_out_of_band(
+            "cellfree_strength", cellfree_strength, head_enabled=cellfree
+        )
         if self._client is not None:
             self._client._require_feature("generate_peptides")
             if _requests_advanced_guidance(
@@ -3448,7 +3880,7 @@ class Peptides(Resource):
                 immuno_modules=immuno_modules,
                 serum_stability=serum_stability,
                 stability_modules=stability_modules,
-                halflife=halflife,
+                residue_composition=residue_composition,
                 cellfree=cellfree,
                 cyclic_mode=cyclic_mode,
                 extra=extra,
@@ -3483,6 +3915,7 @@ class Peptides(Resource):
             program_id=program_id,
             conversation_id=conversation_id,
             cysteine_mode=cysteine_mode,
+            cysteine_enabled=cysteine_enabled,
             quality_guided=quality_guided,
             quality_guidance_scale=quality_guidance_scale,
             model=model,
@@ -3493,8 +3926,9 @@ class Peptides(Resource):
             stability_strength=stability_strength,
             stability_mode=stability_mode,
             stability_modules=stability_modules,
-            halflife=halflife,
-            halflife_strength=halflife_strength,
+            residue_composition=residue_composition,
+            residue_composition_strength=resolved_rc_strength,
+            residue_composition_alias_used=rc_alias_used,
             cellfree=cellfree,
             cellfree_strength=cellfree_strength,
             charge_mode=charge_mode,
@@ -5854,6 +6288,10 @@ class AsyncPeptides(AsyncResource):
         program_id: int | str | None = None,
         conversation_id: str | None = None,
         cysteine_mode: _CysteineMode = "disulfide_only",
+        # Tri-state switch for the cysteine kernel itself, independent of the
+        # policy in ``cysteine_mode`` (bd-LIGANDAI_ALPHA_V2-b4f34). See the Args
+        # section for why this exists and what it costs.
+        cysteine_enabled: bool | None = None,
         quality_guided: bool = True,
         quality_guidance_scale: float = 1.0,
         # Generator model — see :meth:`Peptides.generate` for the per-model scope
@@ -5870,9 +6308,16 @@ class AsyncPeptides(AsyncResource):
         stability_strength: float = 2.0,
         stability_mode: _StabilityMode = "resist",
         stability_modules: dict[str, bool] | None = None,
-        halflife: _HalflifeTarget | None = None,
-        halflife_strength: float = 2.0,
-        # See :meth:`Peptides.generate` for the cellfree guidance docs.
+        # Residue & terminal composition guidance — see :meth:`Peptides.generate`
+        # for the full statement. Renamed from ``halflife`` in
+        # bd-LIGANDAI_ALPHA_V2-b4f34; both spellings accepted, the legacy one
+        # warns, the new one wins on conflict.
+        residue_composition: _ResidueCompositionTarget | None = None,
+        residue_composition_strength: float | None = None,
+        halflife: _ResidueCompositionTarget | None = None,
+        halflife_strength: float | None = None,
+        # See :meth:`Peptides.generate` for the cellfree guidance docs, including
+        # the 1.5-vs-2.0 cross-layer default mismatch.
         cellfree: bool = False,
         cellfree_strength: float = 1.5,
         charge_mode: _ChargeMode | None = None,
@@ -5939,6 +6384,31 @@ class AsyncPeptides(AsyncResource):
             cascade_gate_threshold = cascadeGateThreshold
         if cascade_gate_top_n is None and cascadeGateTopN is not None:
             cascade_gate_top_n = cascadeGateTopN
+        # Resolve the residue-composition knob from its canonical and legacy
+        # names BEFORE the tier gate, so a caller using the deprecated spelling
+        # is gated identically to one using the new one.
+        (
+            residue_composition,
+            resolved_rc_strength,
+            rc_alias_used,
+        ) = _resolve_residue_composition(
+            residue_composition=residue_composition,
+            residue_composition_strength=residue_composition_strength,
+            halflife=halflife,
+            halflife_strength=halflife_strength,
+        )
+        # Each warning is gated on its OWN head being enabled. immuno_strength
+        # defaults to 2.0 against a 1.5 ceiling, so an ungated check would warn
+        # on every call — including calls with immuno guidance switched off.
+        _warn_strength_out_of_band(
+            "immuno_strength", immuno_strength, head_enabled=immunogenicity
+        )
+        _warn_strength_out_of_band(
+            "stability_strength", stability_strength, head_enabled=serum_stability
+        )
+        _warn_strength_out_of_band(
+            "cellfree_strength", cellfree_strength, head_enabled=cellfree
+        )
         if self._client is not None:
             self._client._require_feature("generate_peptides")
             if _requests_advanced_guidance(
@@ -5946,7 +6416,7 @@ class AsyncPeptides(AsyncResource):
                 immuno_modules=immuno_modules,
                 serum_stability=serum_stability,
                 stability_modules=stability_modules,
-                halflife=halflife,
+                residue_composition=residue_composition,
                 cellfree=cellfree,
                 cyclic_mode=cyclic_mode,
                 extra=extra,
@@ -5981,6 +6451,7 @@ class AsyncPeptides(AsyncResource):
             program_id=program_id,
             conversation_id=conversation_id,
             cysteine_mode=cysteine_mode,
+            cysteine_enabled=cysteine_enabled,
             quality_guided=quality_guided,
             quality_guidance_scale=quality_guidance_scale,
             model=model,
@@ -5991,8 +6462,9 @@ class AsyncPeptides(AsyncResource):
             stability_strength=stability_strength,
             stability_mode=stability_mode,
             stability_modules=stability_modules,
-            halflife=halflife,
-            halflife_strength=halflife_strength,
+            residue_composition=residue_composition,
+            residue_composition_strength=resolved_rc_strength,
+            residue_composition_alias_used=rc_alias_used,
             cellfree=cellfree,
             cellfree_strength=cellfree_strength,
             charge_mode=charge_mode,

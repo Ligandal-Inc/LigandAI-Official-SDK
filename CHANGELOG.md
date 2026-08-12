@@ -8,6 +8,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — `halflife` is now `residue_composition` (`bd-LIGANDAI_ALPHA_V2-b4f34.5`)
+
+The guidance knob called `halflife` never measured, predicted or optimised a
+half-life. Reading the deployed kernel, it shapes **sequence-level composition
+only**: an escalating tryptophan penalty, an R/K/H penalty gated on the running
+basic fraction, a tyrosine reward when Tyr is under-represented, terminal-residue
+rewards (P/Q at the N-terminus, P/D at the C-terminus), a proline reward cap and
+an anti-escape cysteine baseline. It contains **no N-end-rule term and no PEST
+term** and consults no measured half-life data. The name was making a claim the
+code does not support, so the name changed.
+
+| old | new |
+|---|---|
+| `halflife=` | `residue_composition=` |
+| `halflife_strength=` | `residue_composition_strength=` |
+| wire `halflifeEnabled` / `halflifeTarget` / `halflifeStrength` | wire `residueCompositionEnabled` / `residueCompositionTarget` / `residueCompositionStrength` |
+
+**Nothing breaks.** Both spellings are accepted. Passing the old one emits a
+`DeprecationWarning`; if both are supplied and they disagree, the **new name
+wins** and the warning says so; if both are supplied and agree, one warning and
+no conflict. Request provenance carries `residueCompositionAliasUsed:
+"halflife"` when the legacy name is what actually carried the request, so a run
+made through the old spelling is identifiable after the fact.
+
+On the wire the SDK emits **both** the canonical and the legacy keys, with
+identical values. Sending only the new key would be silently dropped by a server
+that has not taken the rename — a no-op is the exact defect this change exists to
+remove — and sending only the legacy key would keep a dead name alive. The legacy
+keys come out when every environment runs the renamed server.
+
+Target values are unchanged: `"extended"` (kernel at full strength) and
+`"moderate"` (0.4x). `"rapid"` is still accepted but is a **no-op** — the worker
+returns a zero penalty tensor for any target outside `{"extended", "moderate"}`.
+
+### Added — `cysteine_enabled`: the cysteine kernel is now a first-class knob (`bd-LIGANDAI_ALPHA_V2-b4f34.5`)
+
+`generate()` takes `cysteine_enabled: bool | None = None`:
+
+- `True` — the kernel fires with your `cysteine_mode`, and counts as a guidance
+  request on its own, so cysteine policy can be requested **without** enabling
+  any other head.
+- `False` — the kernel does not fire, whatever `cysteine_mode` says.
+- `None` (default) — legacy resolution: fires iff guidance is effectively active
+  (at least one head enabled **with strength > 0**, or an explicit
+  `cysteine_enabled=True`).
+
+This exists because the kernel was not independently controllable: it fired
+whenever any head carried an enabled flag *regardless of strength*, so a head
+enabled at strength 0.0 still activated it at `CYSTEINE_KERNEL_STRENGTH=2.5`. It
+costs **-17.7% between-receptor JSD (95% CI [-32.5%, -3.7%])** — a real,
+significant cost callers were paying without asking for it.
+
+### Fixed — the "-28% JSD" figure attributed to `halflife` was wrong (`bd-LIGANDAI_ALPHA_V2-b4f34.5`)
+
+Prose in this changelog, the README skill page and the model docstrings said this
+knob cost roughly 28% of between-receptor JSD at strength 4. That number folded
+the cysteine kernel into this knob's column. The measured -26.7% drop against an
+all-knobs-off control decomposes into:
+
+- **-17.7 percentage points, cysteine kernel** — 95% CI [-32.5%, -3.7%],
+  significant. Fixed cost; fires whenever any head is enabled at any strength,
+  including 0. Does not scale with this knob.
+- **-11.5%, this knob's own dose share at strength 4** — 95% CI [-27.2%, +4.7%],
+  **not** statistically significant. First reaches significance at strength 8
+  (-22.3%, CI [-38.3%, -6.4%]).
+
+Every occurrence has been corrected. Do not reintroduce the summed figure.
+
+### Changed — documented defaults, minimums and ceilings for every guidance knob (`bd-LIGANDAI_ALPHA_V2-b4f34.5`)
+
+| knob | default | min | ceiling | unsupported above | basis |
+|---|---|---|---|---|---|
+| `immuno_strength` | 2.0 | 0.0 | **1.5** | 1.5 | MEASURED — composition guard (L1-to-natural, MAX_L1 = 45): clean at 1.5, trips at 1.75 |
+| `stability_strength` | 2.0 | 0.0 | **2.0** | 2.0 | MEASURED (bd-qmhck) — its own metric reverses above 2.0; L1 40→70→95 at 2/4/8 while yield RISES |
+| `residue_composition_strength` | 2.0 | 0.0 | **4.0** | 2.0 | MEASURED — 4.0 is the last strength whose JSD dose effect is indistinguishable from zero |
+| `cellfree_strength` | 1.5 (client) | 0.0 | **4.0** | 4.0 | ⚠ JUDGEMENT CALL — measured kernel *saturation* above s=4 (bd-b8k08), not measured harm |
+| `cysteine_mode` | `"disulfide_only"` | — | — | — | mode-valued; `"allow"` is the OFF position |
+
+The ceilings are enforced in the **generation worker**, not in this SDK. The SDK
+warns and sends your value verbatim: clamping client-side would hide the fact
+that the worker clamped, and two clamps drift apart. A strength **below** the
+minimum raises `LigandAIInvalidConfig` client-side — a negative strength inverts
+the sign of every penalty in the kernel and is not a supported configuration.
+
+⛔ **Reported, not fixed: `cellfree_strength` has two different defaults.** This
+SDK, the Node SDK, the website and the FastAPI layer all default to **1.5**; the
+generation worker's own signature defaults to **2.0**
+(`ligandforge_v6_5_guided_inference_unified.py:2118`). Every client sends the key
+explicitly, so the worker default never applies to a client-originated run — the
+two numbers disagree and one of them is wrong. Changing it alters what every
+default request does, so it is a platform decision rather than a unilateral SDK
+edit. Documented here and pinned by a test so it cannot drift silently while it
+waits for one.
+
 ### Added — pick the generator model: `peptides.generate(model=...)` (`bd-LIGANDAI_ALPHA_V2-dtsel.10.5`)
 
 `Peptides.generate()` and `AsyncPeptides.generate()` take a new `model=`
@@ -22,12 +116,15 @@ argument, sent on the wire as `generatorModelId`.
   not validated for WHERE on the structure the peptide binds (selection, not
   guidance, delivers placement), and NOT strictly better than v6.5 (measured
   contact_logits 0.6281 vs v6.5.21's 0.6719). The four guidance heads
-  (`immunogenicity`, `serum_stability`, `halflife`, `cellfree`) ARE supported —
-  same v6.5 penalty kernels and strength calibration, routed through the
-  normal batch-spawn path rather than the streaming guided pool. `halflife`
-  has no ceiling and can degrade this model's receptor-discrimination
-  property (measured -28% between-receptor JSD at strength 4);
-  `immuno`/`stability` saturate at 1.5/2.0.
+  (`immunogenicity`, `serum_stability`, `residue_composition`, `cellfree`) ARE
+  supported — same v6.5 penalty kernels and strength calibration, routed through
+  the normal batch-spawn path rather than the streaming guided pool.
+  `immuno`/`stability` saturate at 1.5/2.0; `residue_composition` and `cellfree`
+  are clamped at 4.0. `residue_composition`'s own dose share of the
+  receptor-discrimination cost is -11.5% at strength 4 (95% CI [-27.2%, +4.7%],
+  not significant), significant only at strength 8 (-22.3%, CI [-38.3%, -6.4%]);
+  the separate -17.7pp cysteine-kernel cost is not part of it. (An earlier
+  revision of this entry said "-28% at strength 4" — that summed the two.)
 - **`"v6.5"`** — Legacy, deprecated. Trained with all-zero receptor features, so
   its output does not depend on the receptor you select. Retained only to
   reproduce runs made before August 2026.
