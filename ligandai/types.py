@@ -1056,24 +1056,26 @@ class QualityTier(_LGModel):
     the same claim as ``'fail'`` and must never be treated as one: "we did not measure
     this" is not "this design is bad".
 
-    ⛔ ENSEMBLE CO-VALIDATION IS NOT PERSISTABLE ON THE PLATFORM TODAY
-    (bd-LIGANDAI_ALPHA_V2-xv5ih). This is a plumbing gap, not an absence of evidence that
-    dual-engine agreement matters -- OpenDDE never writes ``ptf_fold_results`` (the fold
-    router 422s that engine on the DB-persisting path); its results land only as untyped
-    JSONB in ``fold_trajectory_index`` with no design-level join key; and
-    ``ptf_fold_results`` has no engine column at all, so two engines folding one design
-    collide on the same unique key. Until that plumbing lands, requesting ensemble
-    co-validation (``require_ensemble=True`` on
-    :meth:`~ligandai.resources.peptides.Peptides.search`) yields ``verdict='indeterminate'``
-    and :attr:`co_validated` is ``False`` for essentially every design on the platform
-    today -- it is NOT a dual-gate pass, and :attr:`co_validated` must never be read as
-    evidence of cross-engine agreement until that bead closes. (Dual-engine-scored data does
-    exist -- 940 designs scored by both engines against wet-lab labels, on disk in the
-    research tree, not in the platform tables -- so agreement is measurable in principle;
-    the platform just cannot express a co-validated *result* yet. On that 940-design set
-    Boltz-2 out-ranks OpenDDE by +0.086 AUROC, so the dual gate buys precision from
-    agreement between two independent predictors, not because OpenDDE is the stronger
-    judge.)
+    THE DUAL GATE (``require_ensemble=True``)
+
+    A high-recall ranker followed by a high-precision filter, not two scores averaged.
+    Boltz-2 must clear the structural criterion you selected, AND the LigandIQ Pre-Fold
+    confirmatory screen must independently clear its own calibrated threshold, both on
+    the SAME construct frame. Each engine clears its own bar; neither borrows the
+    other's.
+
+    ⛔ IT TRADES RECALL FOR PRECISION. The confirmatory screen discards a large share of
+    true binders by design, so far fewer designs survive the dual gate than the
+    single-engine bar. A design the screen does not confirm is reported as not
+    co-validated -- that is NOT evidence the design is bad, and it must never be
+    presented as a failed design.
+
+    ⛔ :attr:`co_validated` is ``True`` ONLY when both engines independently cleared
+    their own bar on one frame. When the confirmatory screen has no result for a design,
+    the verdict is ``'indeterminate'`` and :attr:`co_validated` is ``False`` -- never a
+    silent downgrade to the single-engine answer wearing a dual-gate label. If no design
+    in a set has a confirmatory result, that is a COVERAGE statement about the screen not
+    having been run, not a finding of "zero co-validated designs".
     """
 
     criterion: str | None = Field(

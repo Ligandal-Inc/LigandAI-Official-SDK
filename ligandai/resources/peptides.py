@@ -5396,22 +5396,31 @@ class Peptides(Resource):
                 construct frame could not be verified is EXCLUDED
                 (``indeterminate``), never silently admitted as a pass.
                 Defaults to the spec default (``True``) when omitted.
-            require_ensemble: Also require agreement between Boltz-2 AND
-                OpenDDE on the SAME construct frame ("dual gate").
+            require_ensemble: The DUAL GATE. Require the design to clear TWO
+                independent screens on the SAME construct frame: the Boltz-2
+                structural criterion you selected above, AND the LigandIQ
+                Pre-Fold confirmatory screen at its own calibrated threshold.
+                A high-recall ranker followed by a high-precision filter —
+                not two scores averaged. Each engine clears its own bar.
 
-                ⛔ NOT PERSISTABLE ON THE PLATFORM TODAY
-                (bd-LIGANDAI_ALPHA_V2-xv5ih): OpenDDE never writes
-                ``ptf_fold_results`` and its results are not joinable to a
-                design by any key today. Passing ``require_ensemble=True``
-                therefore yields ``verdict='indeterminate'`` /
-                ``co_validated=False`` on ``quality_tier`` for essentially
-                every design on the platform right now — it is a plumbing
-                gap, NOT evidence that dual-engine agreement is unavailable
-                in principle (940 designs scored by both engines exist in the
-                research tree, off-platform). Do not read a
-                ``require_ensemble=True`` result as "these are co-validated
-                hits" until that bead closes. Defaults to the spec default
-                (``False``) when omitted.
+                ⛔ ENTERPRISE-ONLY. A caller whose plan does not include it
+                receives an explicit ``403``; the flag is never silently
+                dropped in favour of a single-engine result reported as
+                though the dual gate had been applied.
+
+                ⛔ IT TRADES RECALL FOR PRECISION. The confirmatory screen
+                discards a large share of true binders by construction, so
+                expect substantially fewer surviving designs. A design it
+                does not confirm comes back ``co_validated=False`` — that is
+                NOT evidence the design is bad.
+
+                When the confirmatory screen has no result for a design the
+                verdict is ``'indeterminate'``, never a pass. If nothing in
+                your result set carries a confirmatory result, that is a
+                statement about the screen not having been run over those
+                designs — not a finding of "zero co-validated designs".
+
+                Defaults to the spec default (``False``) when omitted.
             hotspot_residues: List of ``"chain:resi"`` strings (PDB
                 numbering) for the residues you wanted the peptide to
                 contact, e.g. ``["A:60", "A:62"]``.
