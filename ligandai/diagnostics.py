@@ -325,7 +325,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "severity": "warning",
         "stage": "results",
         "title": "Co-validation engine provenance is unverified",
-        "remediation": "The confirmatory leg ran under conditions whose provenance could not be checked, so its agreement is provisional rather than established. Treat the co-validation as unconfirmed until the run's realized alignment depth is recorded alongside the result.",
+        "remediation": "The co-validation engine ran under conditions that are not provenance-checked: its per-fold artifacts are not retained, so the alignment depth it actually used cannot be confirmed for this fold. Treat the agreement as provisional until the realized MSA depth is recorded alongside the result.",
         "doc_anchor": "guides/acceptance-criteria#ensemble",
     },
 }
