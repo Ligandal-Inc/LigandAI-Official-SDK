@@ -143,7 +143,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "severity": "warning",
         "stage": "fold",
         "title": "Designs contacted residues you excluded",
-        "remediation": "Pocket targeting steers which sequences are generated; it does not physically constrain where the folder places the finished peptide. To bind the fold to the requested site, re-fold with fold_pocket_residues set. Rank or reject the violating designs before synthesis.",
+        "remediation": "Excluding residues does not steer generation. Removing them from the pocket features leaves the sequence distribution unchanged, so nothing at generation time keeps a design off the excluded region. Selecting residues to target does change which sequences are produced, but it has not been shown to aim a design at the face you name, so it is not a substitute for this check. Use the measurement instead: generate, fold, then rank or reject designs on the contacts reported here before synthesis. Re-folding with fold_pocket_residues set biases the pose toward a chosen site, but that pocket constraint is a soft prior rather than a geometric restraint, so re-check the contacts on the re-folded complex.",
         "doc_anchor": "sdk/python/allosteric-targeting#prior-not-constraint",
     },
     "avoid_conformance_clean": {
