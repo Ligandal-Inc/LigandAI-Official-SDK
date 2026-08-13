@@ -582,9 +582,10 @@ def validate_and_normalize_goal_targeting(
     warnings were missing, not inapplicable.
 
     ``hotspots`` plays the role ``target_residues`` plays on the generate
-    surface (the residues the design is steered TOWARD), so it is passed as the
-    "target" side of both cross-field checks. Messages name the caller's own
-    parameter (``hotspots``), not ``target_residues``.
+    surface (the residues the generator is SHOWN — naming them changes which
+    sequences come out, but does not aim the design at them), so it is passed
+    as the "target" side of both cross-field checks. Messages name the caller's
+    own parameter (``hotspots``), not ``target_residues``.
 
     Returns the same :class:`TargetingValidationResult` shape, keyed
     ``{"hotspots", "avoid_residues", "avoid_shell_angstrom"}``. Callers keep
