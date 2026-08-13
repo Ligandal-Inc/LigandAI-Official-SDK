@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.12.2] — 2026-08-12
+
+**A copy-only release.** No behaviour, no API surface, no parameter changed. It
+exists because three diagnostic-message corrections landed after 0.12.1 was
+already on PyPI, and PyPI does not accept a re-upload of a published version.
+Every one of them retracts an instruction that would send a user down a path that
+cannot work.
+
+### Corrected — `avoid_residues_none_resolved` no longer implies that fixing the numbering will make exclusion work
+
+The remediation opened with *"Your exclusion had NO EFFECT on this run. Every
+residue number you asked to avoid is absent from the receptor's featurized residue
+set"*. That reads as a cause: the numbers did not resolve, so the exclusion did
+not apply — correct them and it will. It will not. Removing rows from the pocket
+featurization is a **measured no-op on the generated sequence distribution even
+when every residue resolves** (Jensen-Shannon divergence 2.4e-5, `p = 1.00`; 30 of
+30 top-ranked designs still contacted an excluded region).
+
+A user acting on the old message re-runs with corrected numbering, gets the same
+designs back, and concludes the platform is broken in a different way than it
+actually is. The message keeps the numbering advice — unresolved residue numbers
+are a real and separate defect worth fixing, because they mean the request did not
+describe the residues you meant — but it now states that a resolved exclusion
+still does not keep designs off the region, and that folding the design and
+checking its contacts is what establishes where it binds.
+
+### Corrected — two `degenerate_pocket_*` titles said "steer with"
+
+`degenerate_pocket_after_avoid` was titled *"Exclusion left almost no pocket to
+steer with"*; its body had already been corrected to "condition generation" in
+0.12.0, but the title had not. It is now *"Exclusion left almost no pocket to
+condition on"*.
+
+`degenerate_pocket_risk` — the client-side sibling that fires on the same
+condition before a run is submitted — carried the identical stale verb and is
+corrected the same way.
+
+Excluding residues does not steer generation. The pocket is what generation is
+**conditioned on**, which is the reason a degenerate pocket is worth warning about
+at all.
+
+### Deliberately unchanged — `target_residues_none_resolved`
+
+It describes a **conditioning** failure, and conditioning is the half that works:
+which residues you name changes which sequences come out, reproducibly (`p ≈ 1e-4`
+across six receptor faces). Harmonising its wording with the avoidance messages
+would flatten a true claim into a false one, so it keeps its language.
+
+Mirrored byte-for-byte from the platform diagnostic registry; the parity test in
+`tests/unit/test_diagnostics.py` pins them together.
+
 ## [0.12.1] — 2026-08-12
 
 ### Fixed — credits→USD conversion was wrong by a factor of 100 (balances were under-reported)

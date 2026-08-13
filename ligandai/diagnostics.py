@@ -219,7 +219,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "degenerate_pocket_risk": {
         "severity": "warning",
         "stage": "client",
-        "title": "Exclusion may leave almost no pocket to steer with",
+        "title": "Exclusion may leave almost no pocket to condition on",
         "remediation": "The avoid span is at least as large as the target span, which usually leaves a degenerate (near-empty) design pocket. Check for overlapping or transposed ranges, widen the target face, or narrow the avoid set.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-warning",
     },
