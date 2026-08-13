@@ -1,17 +1,24 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """
-11 — Hotspot-steered generation cascade (Task H, NEW in 0.5.x).
+11 — Hotspot generation cascade (Task H, NEW in 0.5.x).
 
-Demonstrates the new must-contact / pocket-context residue pathway:
-  1. Pick hotspot residues on the receptor (the ones the binder MUST touch).
+Demonstrates the hotspot / pocket-context residue pathway:
+  1. Pick hotspot residues on the receptor (the site you care about).
   2. Auto-expand to the surrounding pocket via expand_hotspot_to_pocket.
-  3. Submit generation with both lists; the the compute backend design worker filters its
+  3. Submit generation with both lists; the design worker filters its
      pocket_features tensor to (hotspots ∪ pocket) BEFORE the V6.5 generator
-     runs, steering peptides to the named site.
+     runs, so the model sees only those receptor rows.
 
-This is the cleanest 'generate against this site, not the whole surface'
-recipe. Use it instead of the legacy targetRegions ranges when the user
-names ≤5 specific residues.
+⚠ WHAT THIS DOES AND DOES NOT DO. Restricting the featurized rows measurably
+changes which sequences are generated — six receptor faces, p ~ 1e-4, 64
+designs per arm. It does NOT aim the designs at the named site: contact there
+was not enriched on either receptor tested, and a randomly scattered residue
+set shifted the distribution as much as a genuine contiguous face did. This is
+a way to VARY a run, not a way to choose a binding site.
+
+To actually get binders at a named site, fold the output and filter on measured
+contacts — example 14 is the other half of this recipe and is where the site
+selectivity comes from.
 
 Run with:
     LIGANDAI_API_KEY=lgai_pro_... python 11_generate_hotspot_cascade.py
@@ -61,7 +68,8 @@ def main() -> int:
         result = job.wait(timeout=600)
         print(f"  generated {len(result.peptides)} peptides")
 
-        # The featurization block (echoed back from the compute backend) confirms the steering:
+        # The featurization block echoes which rows the worker actually kept. It
+        # confirms the request was applied — not that any design bound there:
         feat = getattr(result, "featurization", None) or {}
         if feat:
             print(f"  featurization.mode  = {feat.get('mode')}")

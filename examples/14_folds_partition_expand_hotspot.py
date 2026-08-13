@@ -8,7 +8,12 @@ Covers:
 
 Use this AFTER you've folded a batch of peptides — it tells you which folds
 actually contact the user's hotspots vs the wider pocket vs the wrong
-interface (closes the loop on hotspot-steered design).
+interface.
+
+This is not an optional confirmation step. Hotspot residues on the request do
+not aim the generator at the named site, so this measurement is the only thing
+that establishes where a design binds. Expect a substantial fraction to land on
+the wrong interface, and select accordingly.
 
 Run with:
     LIGANDAI_SESSION_ID=ptf_... LIGANDAI_API_KEY=lgai_pro_... python 14_folds_partition_expand_hotspot.py
