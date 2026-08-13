@@ -15,10 +15,11 @@ inspect contacts before synthesis ordering.
 
 Billing
 -------
-100 credits per fold per trajectory (= $1 per fold). Sampling steps >50
-apply a `max(1.0, sampling_steps / 50)` multiplier. The full cost is
-charged UPFRONT before any GPU work starts — be sure the credit balance
-covers the whole batch.
+25 credits per fold per trajectory, floored at a 100-credit minimum per
+fold (= $1 per fold at that floor, unchanged). Sampling steps >50 apply a
+`max(1.0, sampling_steps / 50)` multiplier. The full cost is charged
+UPFRONT before any GPU work starts — be sure the credit balance covers
+the whole batch.
 
 Run with:
     LIGANDAI_API_KEY=lgai_pro_... python 23_fold_batch.py
