@@ -6,7 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
-## [Unreleased]
+## [0.12.0] — 2026-08-12
+
+**This release exists to retract a published claim.** Since 0.8.0 this SDK has
+told you that `avoid_residues` and `hotspot_residues` place a design on a chosen
+face of a receptor — "enforced unconditionally", "a strong prior", "the effective
+design surface is *target minus avoid* — which is how you target one face of a
+receptor while excluding the canonical orthosteric pocket on the other". Measured
+on the deployed generator, that is false. Row deletion (`avoid_residues`) does
+nothing to the generated sequence distribution; row selection
+(`hotspot_residues`) changes it reproducibly but does not aim it. **No behaviour
+changed, no parameter was removed, and nothing you have already run is invalid —
+only the claim is withdrawn.** What holds is fold, then measure, then filter.
+Details and numbers in the first entry below. Prior changelog entries are left in
+place, marked superseded, rather than rewritten.
 
 ### Corrected — residue targeting is not site placement (retracts claims made in 0.8.0)
 
