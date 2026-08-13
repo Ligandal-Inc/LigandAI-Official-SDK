@@ -6,6 +6,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [0.12.1] — 2026-08-12
+
+### Fixed — credits→USD conversion was wrong by a factor of 100 (balances were under-reported)
+
+`_credits_to_usd` divided credits by 10,000. The platform's rate is **100 credits
+= $1.00**. Every dollar figure this SDK rendered was therefore **one hundredth of
+the real amount**, and balances were under-reported for as long as the helper has
+existed — it is unchanged in 0.11.0 and 0.12.0.
+
+Concretely, before this release:
+
+| Credits | SDK showed | Actual |
+|---|---|---|
+| 5,000 (the $50 top-up tier) | `$0.50` | **$50.00** |
+| 20,000 | `$2.00` | **$200.00** |
+| 100 (one fold at the price floor) | `$0.01` | **$1.00** |
+| 99 or fewer | `$0.0` | up to **$0.99** |
+
+The last row was a second, compounding defect: because the result was rounded to
+two decimals *after* dividing by 10,000, any balance under 100 credits collapsed
+to exactly `$0.0`. Under the corrected rate that cannot happen — credits are whole
+numbers and the rate is 100, so every value lands exactly on a cent boundary and
+the smallest non-zero balance, 1 credit, renders as `$0.01`.
+
+**No money moved and nothing was mis-billed.** This was a display-side conversion
+in the client only; the platform charged, and continues to charge, the correct
+amount. What was wrong is the dollar figure the SDK showed you for a balance,
+a monthly limit, or month-to-date spend.
+
+Affected surfaces, all of which are now correct:
+
+- `client.account.widget()` → `balance_usd`, `monthly_limit_usd`,
+  `spent_this_month_usd` (and their async equivalents)
+- the `ligandai credits` CLI widget, which renders those three fields
+
+Server-supplied dollar amounts were never affected and are unchanged:
+`CostEstimate.cost_usd`, the `amount_usd` you pass to `top_up()` /
+`configure_auto_topup()`, `InsufficientCredits.top_up_usd`, and the validated-binder
+quote's `capCostUsd` all come from the platform already denominated in dollars.
+
+The rate is now pinned by unit tests asserting 100 credits = $1.00. The previous
+tests asserted the wrong rate, which is why the suite stayed green.
+
+### Fixed — six diagnostic `doc_anchor` values pointed at a docs page that does not exist
+
+The six `acceptance_*` diagnostics linked into `guides/acceptance-criteria`, which
+is not a registered docs route — every one of those links 404'd. They now point at
+the real pages, matching `shared/warnings.json`:
+
+| Code | Now links to |
+|---|---|
+| `acceptance_metric_missing` | `guides/conjugate-design#indeterminate` |
+| `acceptance_frame_unverified` | `guides/conjugate-design#linker-leg` |
+| `acceptance_scaffold_mediated` | `guides/conjugate-design#linker-leg` |
+| `acceptance_engine_result_absent` | `guides/ensemble-folding#why` |
+| `acceptance_engine_frame_mismatch` | `guides/conjugate-design#frames` |
+| `acceptance_ensemble_provenance_unverified` | `guides/ensemble-folding#why` |
+
+This also clears the last drift between this SDK's diagnostic registry and the
+platform's, so the registry is once again byte-identical to `shared/warnings.json`.
+
+
 ## [0.12.0] — 2026-08-12
 
 **This release exists to retract a published claim.** Since 0.8.0 this SDK has

@@ -2,7 +2,7 @@
 """Tests for the credits widget + CLI subcommand.
 
 Covers:
-  - _credits_to_usd conversion (100 cr = $0.01)
+  - _credits_to_usd conversion (100 cr = $1.00, the platform base rate)
   - CreditsWidget round-trips through pydantic validation
   - render_credits_widget renders a compact billing layout
   - cmd_credits_widget normalizes /api/credits/balance payload
@@ -30,23 +30,44 @@ from ligandai import cli
 
 
 class TestCreditsToUsd:
+    """Platform rate: 100 credits = $1.00.
+
+    These assertions encoded 10_000 credits/USD until 0.12.1, matching the
+    equally wrong constant in the module under test — so the suite was green
+    while every dollar figure the SDK showed a customer was 1/100th of reality.
+    The rate is pinned here against the platform's own sources: customCreditRate
+    in shared/schema.ts, CREDITS_PER_USD in server/agent-credit-budget.ts, and
+    the credits/100 in the server's cost-estimate route.
+    """
+
     def test_zero_credits_zero_usd(self):
         assert _credits_to_usd(0) == 0.0
 
-    def test_100_credits_one_cent(self):
-        assert _credits_to_usd(100) == 0.01
+    def test_100_credits_one_dollar(self):
+        assert _credits_to_usd(100) == 1.00
 
-    def test_10_000_credits_one_dollar(self):
-        assert _credits_to_usd(10_000) == 1.00
+    def test_one_credit_is_one_cent(self):
+        # Under the old 10_000 rate this collapsed to 0.0.
+        assert _credits_to_usd(1) == 0.01
+
+    def test_10_000_credits_one_hundred_dollars(self):
+        assert _credits_to_usd(10_000) == 100.00
+
+    def test_5_000_credits_fifty_dollars(self):
+        # The $50 top-up tier: 5,000 credits. Reported as $0.50 before 0.12.1.
+        assert _credits_to_usd(5_000) == 50.00
 
     def test_107_61_dollars_in_credits(self):
-        assert _credits_to_usd(1_076_100) == 107.61
+        assert _credits_to_usd(10_761) == 107.61
 
     def test_none_returns_zero(self):
         assert _credits_to_usd(None) == 0.0
 
-    def test_rounding_two_decimals(self):
-        assert _credits_to_usd(99) == 0.01
+    def test_exact_to_the_cent(self):
+        # Whole credits over a rate of 100 always land on a cent boundary, so
+        # the rounding never discards a real amount.
+        assert _credits_to_usd(99) == 0.99
+        assert _credits_to_usd(1) == 0.01
 
 
 # ── CreditsWidget round-trip ──────────────────────────────────────────────────
@@ -56,9 +77,9 @@ class TestCreditsWidgetModel:
     def test_round_trips_from_server_payload(self):
         widget = CreditsWidget.model_validate({
             "available": 5_001,
-            "total": 2_000_000,
-            "usedThisMonth": 1_076_100,
-            "balance_usd": 0.50,
+            "total": 20_000,
+            "usedThisMonth": 10_761,
+            "balance_usd": 50.01,
             "monthly_limit_usd": 200.0,
             "spent_this_month_usd": 107.61,
             "pct_used": 54,
@@ -69,8 +90,8 @@ class TestCreditsWidgetModel:
             "tier": "pro",
         })
         assert widget.balance_credits == 5_001
-        assert widget.monthly_limit_credits == 2_000_000
-        assert widget.balance_usd == 0.50
+        assert widget.monthly_limit_credits == 20_000
+        assert widget.balance_usd == 50.01
         assert widget.monthly_limit_usd == 200.0
         assert widget.spent_this_month_usd == 107.61
         assert widget.pct_used == 54
@@ -148,9 +169,12 @@ def _stub_client_with_widget(payload: dict):
         "available": bal,
         "total": total,
         "usedThisMonth": used,
-        "balance_usd": round(bal / 10_000, 2),
-        "monthly_limit_usd": round(total / 10_000, 2),
-        "spent_this_month_usd": round(used / 10_000, 2),
+        # Delegate to the real conversion rather than restating the rate — a
+        # second hand-written copy of it is how this stub stayed consistent with
+        # the wrong constant instead of catching it.
+        "balance_usd": _credits_to_usd(bal),
+        "monthly_limit_usd": _credits_to_usd(total),
+        "spent_this_month_usd": _credits_to_usd(used),
         "pct_used": pct,
         "resetDate": payload.get("reset_date"),
         "autoReplenish": bool(payload.get("auto_replenish") or False),
@@ -165,10 +189,13 @@ def _stub_client_with_widget(payload: dict):
 
 class TestCmdCreditsWidget:
     def test_widget_command_renders_for_human(self, capsys, monkeypatch):
+        # Credit counts chosen so the rendered dollars are unchanged under the
+        # corrected 100 credits/USD rate: 5,001 cr = $50.01, 20,000 cr = $200,
+        # 10,761 cr = $107.61.
         fake_client = _stub_client_with_widget({
-            "available": 500_100,
-            "total": 2_000_000,
-            "used_this_month": 1_076_100,
+            "available": 5_001,
+            "total": 20_000,
+            "used_this_month": 10_761,
             "reset_date": "2026-06-01T00:00:00Z",
             "auto_replenish": False,
         })

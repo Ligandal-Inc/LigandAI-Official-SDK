@@ -177,7 +177,7 @@ class AutoTopupConfig(_LGModel):
 class CreditsWidget(_LGModel):
     """Snapshot of credit state for a compact billing widget.
 
-    Conversion rate: 100 credits = $0.01 → 1 USD = 10,000 credits.
+    Conversion rate: 100 credits = $1.00 → 1 USD = 100 credits.
 
     The :attr:`pct_used` field is 0-100 (rounded). The :attr:`reset_date`
     is the first of the following month at 00:00 UTC (matches the platform's

@@ -20,11 +20,28 @@ from ligandai.types import (
     User,
 )
 
-# Conversion: 100 credits = $0.01 → 1 USD = 10,000 credits.
-_CREDITS_PER_USD = 10_000
+# Conversion: 100 credits = $1.00 → 1 USD = 100 credits.
+#
+# This is the platform's base rate (`CREDIT_PRICING.customCreditRate` in
+# shared/schema.ts, `CREDITS_PER_USD` in server/agent-credit-budget.ts, and the
+# `credits / 100` used by the server's own cost-estimate route). It is also what
+# the published top-up tiers imply: $25 → 2,500 credits and $50 → 5,000 credits,
+# both exactly 100 credits per dollar before any volume bonus.
+#
+# Until 0.12.1 this constant was 10_000, so every dollar figure the SDK rendered
+# was 1/100th of the real amount.
+_CREDITS_PER_USD = 100
 
 
 def _credits_to_usd(credits: int | None) -> float:
+    """Convert an integer credit count to USD.
+
+    Exact to the cent by construction: credits are whole numbers and the rate is
+    100, so ``credits / 100`` already lands on a cent boundary and the ``round``
+    is a float-representation guard rather than a lossy quantisation. The
+    smallest non-zero balance, 1 credit, renders as ``0.01`` — nothing collapses
+    to ``0.0`` the way it did under the old 10_000 rate.
+    """
     if credits is None:
         return 0.0
     return round(int(credits) / _CREDITS_PER_USD, 2)
