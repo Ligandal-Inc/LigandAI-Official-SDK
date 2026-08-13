@@ -115,7 +115,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "severity": "error",
         "stage": "generate",
         "title": "None of your excluded residues were found",
-        "remediation": "Your exclusion had NO EFFECT on this run. Every residue number you asked to avoid is absent from the receptor's featurized residue set - almost always a numbering mismatch (PDB author numbering vs. sequence index, or the wrong chain). Re-run with residue numbers taken from the structure itself.",
+        "remediation": "Every residue number you asked to avoid is absent from the receptor's featurized residue set - almost always a numbering mismatch (PDB author numbering vs. sequence index, or the wrong chain). Re-run with residue numbers taken from the structure itself so the request describes the residues you meant. Correcting the numbering will not, on its own, keep designs off that surface: row deletion is a measured no-op on the generated sequence distribution even when every residue resolves. Where a design actually binds is established by folding it and checking contacts.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-avoid",
     },
     "target_residues_unresolved": {
@@ -135,8 +135,8 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "degenerate_pocket_after_avoid": {
         "severity": "error",
         "stage": "generate",
-        "title": "Exclusion left almost no pocket to steer with",
-        "remediation": "After removing the excluded residues and their packing shell, too few pocket residues remain to condition generation reliably. This does not by itself keep designs off the excluded surface \u2014 verify on the folded structure. Widen the target face, narrow the avoid set, or reduce avoid_shell_angstrom.",
+        "title": "Exclusion left almost no pocket to condition on",
+        "remediation": "After removing the excluded residues and their packing shell, too few pocket residues remain to condition generation reliably. This does not by itself keep designs off the excluded surface — verify on the folded structure. Widen the target face, narrow the avoid set, or reduce avoid_shell_angstrom.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-warning",
     },
     "avoid_conformance_violation": {

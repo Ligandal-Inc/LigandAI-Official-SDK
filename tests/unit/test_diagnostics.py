@@ -245,8 +245,13 @@ def test_missing_fields_are_backfilled_from_the_registry() -> None:
     assert d is not None
     assert d.severity == "error"
     assert d.stage == "generate"
-    assert d.title == "Exclusion left almost no pocket to steer with"
-    assert d.remediation
+    # Assert against the registry rather than a copied literal: this test is
+    # about the backfill path, not about the wording, and a hardcoded string
+    # here just turns every copy edit into a spurious failure.
+    expected = DIAGNOSTIC_CODES["degenerate_pocket_after_avoid"]
+    assert expected["title"]
+    assert d.title == expected["title"]
+    assert d.remediation == expected["remediation"]
     assert d.occurred_at
 
 
@@ -364,7 +369,12 @@ def test_format_includes_the_actionable_parts() -> None:
     text = d.format()
     assert "avoid_residues_none_resolved" in text
     assert "11 of 11 missing" in text
-    assert "NO EFFECT" in text  # the remediation
+    # The remediation must reach the rendered text. Pinned to the registry, not
+    # to a phrase: the old literal here was "NO EFFECT", which was removed from
+    # this remediation on purpose — it told the user the exclusion failed
+    # because the numbers did not resolve, when a resolved exclusion is a
+    # measured no-op too.
+    assert DIAGNOSTIC_CODES["avoid_residues_none_resolved"]["remediation"] in text
     assert "requested" in text
     assert str(d) == text
 
