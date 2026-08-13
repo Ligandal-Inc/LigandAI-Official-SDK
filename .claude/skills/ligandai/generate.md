@@ -92,15 +92,20 @@ job = client.peptides.generate(
 )
 ```
 
-- Enforced **unconditionally, in every targeting mode** — `target_residues` /
-  `hotspot_residues` / `pocket_config` are all optional for it to apply.
+- Applied **in every targeting mode** — `target_residues` / `hotspot_residues` /
+  `pocket_config` are all optional for it to reach the featurization.
 - The server removes the named residues **and** the residues packing against
   them within 8 Å (Cα-Cα). Tune with `avoid_shell_angstrom`: omit for the 8.0 Å
   server default, `0` for named residues only. Range `[0, 50]`, validated
   client-side before any HTTP call.
-- ⚠ Targeting steers pocket **featurization**. It is a strong prior, **not** a
-  hard geometric constraint — the fold step can still place a peptide on an
-  excluded face. Validate against the folded complex, not the submitted request.
+- ⛔ **Neither parameter places a peptide.** `avoid_residues` is a measured
+  no-op at generation (`p = 1.00`, JSD `2.4e-5`; gate-passing designs still
+  contacted the excluded patch at ~2x chance). `hotspot_residues` does shift the
+  generated distribution (six faces, `p ≈ 1e-4`) but does not aim at the named
+  site — a randomly scattered residue set shifts it as much. Do not call either
+  one steering or a prior. Determine the binding site from the folded complex:
+  `client.evaluator.filter_folds(..., criteria={"required_interface_residues": [...]})`,
+  or the `avoid_conformance_*` fold-stage diagnostics.
 - Residue numbers absent from the receptor's featurized residue set come back as
   `unresolved_resnums` on the generation stream's targeting events instead of
   failing the job. Check that before assuming an exclusion applied.

@@ -244,18 +244,30 @@ job = client.peptides.generate(
   numbers as numbered in the receptor structure** being designed against — never
   0-based indices into an internal array, never sequence positions. `chain` is
   part of a residue's identity and is honoured; do not drop it.
-- `avoid_residues` is enforced **unconditionally, in every targeting mode**. It
-  does not require `target_residues`, `hotspot_residues` or a pocket config.
+- `avoid_residues` is applied **in every targeting mode**. It does not require
+  `target_residues`, `hotspot_residues` or a pocket config. Say "applied", never
+  "enforced" — nothing downstream enforces it on the output.
 - The server removes the named residues **and** the residues packing against
   them within 8 Å (Cα-Cα). Tune with `avoid_shell_angstrom`: omit for the 8.0 Å
   server default, `0` for named residues only. Range `[0, 50]`, validated
   client-side before any HTTP call.
 - `targeting_strategy` is a run label. The generation backend does not read it;
   it does not by itself move the design surface.
-- ⚠ Targeting steers pocket **featurization** — a strong prior, **not** a hard
-  geometric constraint. The fold step can still place a peptide on an excluded
-  face. Never report an exclusion as satisfied on the strength of the submitted
-  request; check the folded complex.
+- ⛔ **Neither parameter places a peptide, and they fail differently. Do not
+  describe either as steering, aiming, or a strong prior.**
+  - `avoid_residues`: **measured no-op at generation.** Sequence distributions
+    with and without the exclusion were indistinguishable (`p = 1.00`, JSD
+    `2.4e-5`), and gate-passing designs still contacted the excluded patch at
+    ~2x the chance rate.
+  - `hotspot_residues`: **real effect, no aim.** It selects the featurized rows
+    and reproducibly shifts the generated distribution (six receptor faces,
+    `p ≈ 1e-4`, n=64/arm), but contact at the named face was not enriched on
+    either receptor tested, and a randomly scattered residue set shifted the
+    distribution as much as a genuine contiguous face.
+  - Never report a site as targeted, or an exclusion as satisfied, on the
+    strength of the submitted request. The post-fold contact check is the only
+    evidence — `client.evaluator.filter_folds(...)` with
+    `required_interface_residues`, or the `avoid_conformance_*` diagnostics.
 - Residue numbers absent from the receptor's featurized residue set are returned
   as `unresolved_resnums` on the generation stream's targeting events rather than
   failing the job. Check that field before concluding an exclusion applied.

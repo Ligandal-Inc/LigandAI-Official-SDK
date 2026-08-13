@@ -28,6 +28,16 @@ The headline use-case is **allosteric-site binders**:
   on a second engine (e.g. ``protenix``) to confirm the fold-quality agreement
   before declaring a final hit list.
 
+⚠ **How a campaign gets there matters, and it is not by aiming generation.**
+The ``hotspots`` and ``avoid_residues`` you supply are *acceptance criteria*
+measured on each iteration's folded complexes, and the campaign converges by
+selecting the designs that satisfy them and reseeding from those. They are not
+placement controls: measured on the deployed generator, ``avoid_residues`` does
+not change which sequences are produced at all, and hotspot selection shifts the
+generated distribution without aiming it at the named face. The site-selectivity
+of a campaign comes from the fold → measure → select loop, so budget enough
+iterations and batch size for that selection to do the work.
+
 Endpoint mapping:
 
 - :meth:`Goals.campaign_scan`            → ``POST /api/v1/goal-campaign/scan``
@@ -860,12 +870,18 @@ class Goals(Resource):
             If set, the campaign automatically cross-validates survivors on
             this engine after completion (e.g. ``"protenix"``).
         hotspots
-            Hotspot residues for ``"allosteric"`` or ``"hotspot"`` goals.
+            Hotspot residues for ``"allosteric"`` or ``"hotspot"`` goals — the
+            residues a surviving design has to CONTACT, measured on each
+            iteration's folded complex.
             Shape: ``[{"chain": "A", "residue": 792, "label": "K792"}, ...]``.
-            ``residue`` is a positive integer (PDB numbering).
+            ``residue`` is a positive integer (PDB numbering). This is an
+            acceptance criterion, not a placement control.
         avoid_residues
-            Residues the peptide must NOT contact (for allosteric goals to
-            avoid the orthosteric site).
+            Residues a surviving design must NOT contact (for allosteric goals,
+            the orthosteric site) — likewise measured on the folded complex and
+            applied as a rejection criterion. It does not steer generation:
+            measured on the deployed generator, supplying it does not change
+            which sequences are produced.
             Shape: ``[{"chain": "A", "residue": 719, "label": "G719"}, ...]``.
         target_ipsae
             Acceptance iPSAE threshold (the goal is "met" when a peptide
@@ -1097,14 +1113,19 @@ class Goals(Resource):
         goal
             Human-readable description of the goal. Echoed in campaign status.
         hotspots
-            Allosteric pocket residues you WANT contacts at.
+            Residues a surviving design has to CONTACT, checked on each
+            iteration's folded complex.
             Shape: ``[{"chain": "A", "residue": 792}, ...]``.
             PDB residue numbering.  For allosteric binders, list the allosteric
-            pocket here.
+            pocket here.  This is what the campaign selects ON; it does not aim
+            generation at the pocket.
         avoid_residues
-            Orthosteric site residues to EXCLUDE from the interface.
+            Residues a surviving design must NOT contact, checked on the same
+            folded complexes and applied as a rejection criterion.
             Shape: ``[{"chain": "A", "residue": 719}, ...]``.
-            For allosteric binders, list the ATP/orthosteric site here.
+            For allosteric binders, list the ATP/orthosteric site here.  Supplying
+            it does not change what the generator produces — the exclusion is
+            realised by rejecting folds that violate it.
         seed_peptides
             Amino-acid sequences to seed the first iteration. Currently
             required until the automated generation integration is live.
@@ -1164,6 +1185,10 @@ class Goals(Resource):
             #     metric; never use overall ipsae.  iPSAE is more reliable than ipTM
             #     for Boltz-2 interface assessment.
             #   - Receptor chains MUST use MSA; peptide chains do not.
+            #   - hotspots/avoid_residues below are ACCEPTANCE CRITERIA scored on
+            #     each iteration's folded complexes. They do not aim generation;
+            #     the site selectivity comes from the fold-measure-select loop, so
+            #     give it iterations and batch size to work with.
 
             campaign = client.goals.drive(
                 receptor_sequence=egfr_sequence,  # full EC domain AA sequence

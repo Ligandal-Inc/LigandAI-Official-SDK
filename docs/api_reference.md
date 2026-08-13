@@ -98,11 +98,19 @@ before any HTTP call — a `start`/`end`/`residue` `< 1` raises
 | `hotspot_residues` | `hotspotResidues` / `hotspot_residues` | flat `[int, ...]` (PDB resnums; `{chain, residue}` dicts also accepted client-side, normalized to ints) |
 | `avoid_shell_angstrom` | `avoidShellAngstrom` / `avoid_shell_angstrom` | `float`, range `[0, 50]`; server default `8.0` when omitted |
 
-`avoid_residues` is enforced **unconditionally, in every targeting mode** —
-`target_residues` / `hotspot_residues` are not required for it to apply. By
+`avoid_residues` is applied **in every targeting mode** — `target_residues` /
+`hotspot_residues` are not required for it to reach the featurization. By
 default the server also removes the residues packing against each named one
 (within `avoid_shell_angstrom`, Cα-Cα); pass `avoid_shell_angstrom=0` to
-exclude only the literally-named residues.
+remove only the literally-named residues.
+
+⚠ **These parameters do not place a peptide.** `avoid_residues` was measured to
+have no effect on generation at all (`p = 1.00`, JSD `2.4e-5` between arms) and
+does not keep designs off the named surface. `hotspot_residues` does change
+which sequences are generated (`p ≈ 1e-4` across six receptor faces) but does
+not aim at the named site. Determine where a design binds from the folded
+complex — `client.evaluator.filter_folds(...)` with
+`required_interface_residues`, or the `avoid_conformance_*` fold diagnostics.
 
 The generation SSE stream (`job.stream()`, `sse_path=/api/ptf/parallel/{id}/stream`)
 surfaces `target_residues_applied`, `avoid_residues_applied`, and

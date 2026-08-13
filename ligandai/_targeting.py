@@ -478,6 +478,11 @@ def _warn_targeting_contradiction(
 ) -> None:
     """WARN: a residue is in BOTH the must-contact set and the must-avoid set.
 
+    Worth catching precisely BECAUSE neither list constrains generation: nothing
+    downstream rejects a contradictory request, so it would run to completion and
+    then have every design discarded by the post-fold contact filter. The client
+    is the only place this is cheap to notice.
+
     Only meaningful where the "target" side is a hard contact requirement (the
     goal-campaign ``hotspots`` field). On ``Peptides.generate`` the equivalent
     overlap is normal and intended — excluding a sub-region of the targeted face
@@ -495,8 +500,9 @@ def _warn_targeting_contradiction(
         "targeting_contradiction",
         f"{len(rendered)} residue(s) appear in BOTH {target_field} and {avoid_field} "
         f"({', '.join(rendered)}) — a design cannot both contact and avoid the same "
-        f"residue, so one of the two criteria can never be satisfied. Remove the "
-        f"overlap from one list.",
+        f"residue. Neither list constrains generation, so nothing downstream would "
+        f"reject this: the run would complete and the post-fold contact filter would "
+        f"discard all of it. Remove the overlap from one list.",
         {
             "target_field": target_field,
             "avoid_field": avoid_field,

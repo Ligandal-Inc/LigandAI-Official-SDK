@@ -1,6 +1,7 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
 """
-32 — Excluding a receptor surface with avoid_residues (and proving it worked).
+32 — Excluding a receptor surface with avoid_residues (and measuring whether
+     the designs actually kept it clear).
 
 [bd-LIGANDAI_ALPHA_V2-x4vt8]
 
@@ -17,19 +18,22 @@ The three things this example exists to demonstrate
    They are NOT indices into any internal array and NOT sequence offsets.
    `chain` is part of a residue's identity and is honoured.
 
-2. `avoid_residues` is enforced UNCONDITIONALLY, in every targeting mode. You do
-   not need `target_residues`, `hotspot_residues` or a pocket config for it to
-   apply. The server also drops the residues packing against the excluded ones
-   within 8 A (Ca-Ca) — excluding only the named residues would leave their
-   immediate neighbours in the pocket, and a peptide steered onto those
-   neighbours still lies across the surface you asked to keep clear. The radius
-   is the generation-API field `avoid_shell_angstrom` (default 8.0, 0 disables).
+2. `avoid_residues` is applied in every targeting mode. You do not need
+   `target_residues`, `hotspot_residues` or a pocket config for it to reach the
+   featurization. The server also drops the residues packing against the
+   excluded ones within 8 A (Ca-Ca), so the removal covers a contiguous patch of
+   surface rather than isolated positions. The radius is the generation-API
+   field `avoid_shell_angstrom` (default 8.0, 0 disables).
 
-3. ⚠ Targeting acts on pocket FEATURIZATION. It is a strong prior, NOT a hard
-   geometric constraint — the downstream folding step can still place a peptide
-   on the excluded face. An exclusion is not verified until you have looked at
-   the folded complex, which is what step 3 below does. The server-side
-   equivalent is `fastapi_backend/core/residue_targeting.py::contacts_violating_avoid`.
+3. ⚠ IT DOES NOT KEEP DESIGNS OFF THAT SURFACE, AND IT DOES NOT CHANGE WHAT IS
+   GENERATED. Measured on the deployed generator, the same request run with and
+   against the exclusion produced indistinguishable sequence distributions
+   (p = 1.00, Jensen-Shannon divergence 2.4e-5), and designs that cleared the
+   downstream quality gates still contacted the excluded patch at roughly twice
+   the chance rate. `avoid_residues` records your intent; it does not constrain
+   the output. The exclusion is not established until you have measured contacts
+   on the folded complex — which is exactly what step 3 below does, and why this
+   example exists.
 
 Run with:
     LIGANDAI_API_KEY=lgai_... LIGANDAI_GENE=MY_DOMAIN python 32_avoid_residues_exclusion.py
@@ -88,7 +92,7 @@ def main() -> int:
         result = job.wait(timeout=2400)
         print(f"  generated={result.peptides_generated} folded={result.peptides_folded}")
 
-        # ── 2. Did the designs land on the face we aimed at? ───────────────
+        # ── 2. Where did the designs actually land? ────────────────────────
         back_helix_resi = _resi(BACK_HELIX)
         partition = client.folds.partition_by_hotspot(
             session_id=result.session_id,
@@ -100,8 +104,9 @@ def main() -> int:
         print(f"  bound elsewhere:      {len(partition.wrong_interface)}")
 
         # ── 3. Prove the exclusion held on the FOLDED structures ───────────
-        # Generation conditioning is a prior, not a constraint. Query the
-        # EXCLUDED residues as the hotspot set: every hit is a violation.
+        # This is the only step that establishes anything: the request-side
+        # exclusion does not constrain the output. Query the EXCLUDED residues
+        # as the hotspot set — every hit is a violation, and expect some.
         violators = client.peptides.search(
             session_id=result.session_id,
             hotspot_residues=_resi([ACIDIC_LOOP]),

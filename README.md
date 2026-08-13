@@ -368,12 +368,11 @@ PDB numbering and start at 1; got start=0. If you meant an array index, that is
 not supported — pass the residue number shown in the structure.
 ```
 
-`avoid_residues` excludes a receptor surface from the design pocket —
-enforced **unconditionally, in every targeting mode** (`target_residues` /
-`hotspot_residues` are not required for it to apply). By default the server
+`avoid_residues` removes a receptor surface from the residue set the generator
+is featurized on. It is applied in every targeting mode (`target_residues` /
+`hotspot_residues` are not required for it to apply), and by default the server
 also removes the residues packing directly against each named one (within
-`avoid_shell_angstrom`, default 8.0 Å Cα-Cα) — excluding only the literal
-named residues would leave their immediate neighbours in the pocket:
+`avoid_shell_angstrom`, default 8.0 Å Cα-Cα):
 
 ```python
 from ligandai import LigandAI, ResidueRange
@@ -390,16 +389,50 @@ job = client.peptides.generate(
 )
 ```
 
-Targeting steers pocket **featurization** — a strong prior, not a hard
-geometric constraint. The downstream folding step can still place a peptide
-on an excluded face, so validate an exclusion against the folded complex
-(`target_residues_applied` / `avoid_residues_applied` events on
-`job.stream()`, or `fastapi_backend/core/residue_targeting.py`'s
-`contacts_violating_avoid()` server-side), not just against the request you
-submitted. A `targeting_warning` event (e.g. a near-empty pocket after
-`avoid_residues` was applied) is surfaced both on `job.stream()` and via
-`warnings.warn(..., ligandai.LigandAITargetingWarning)`, so it's visible even
-if you only call `job.wait()`.
+#### ⚠ Targeting does not place a peptide — measure placement on the fold
+
+Both parameters act on which receptor rows enter the pocket featurization.
+Neither has been shown to put a design on a chosen site, and they fail in
+different ways:
+
+- **`avoid_residues` did not change generation at all.** Running the same
+  request with and against the exclusion produced statistically
+  indistinguishable sequence distributions (two-sample test `p = 1.00`,
+  Jensen-Shannon divergence `2.4e-5`). Downstream, designs that cleared the
+  quality gates still contacted the excluded patch — at roughly twice the rate
+  expected by chance. Treat it as a record of your intent on the request and in
+  run provenance, not as a constraint on the output.
+- **`hotspot_residues` does change which sequences are generated** — it selects
+  the featurized rows, and the shift is real and reproducible (six receptor
+  faces, `p ≈ 1e-4`, 64 designs per arm). It does **not** aim: contact at the
+  named face was not enriched on either receptor tested, and a randomly
+  scattered residue set moved the distribution as much as a genuine contiguous
+  face did. Use it to vary a run, not to choose a binding site.
+
+**The workflow that holds is fold, then measure, then filter.** Fold the
+candidates (`auto_fold=True` or `client.peptides.fold_batch()`), then select on
+measured interface contacts:
+
+```python
+kept = client.evaluator.filter_folds(
+    fold_job_ids,
+    criteria={
+        "min_peptide_ipsae": 0.67,
+        "required_interface_residues": [{"chain": "A", "residue": 792}],
+    },
+)
+```
+
+The `avoid_conformance_violation` / `avoid_conformance_clean` fold-stage
+diagnostics report the same check for an exclusion, on the finished complex.
+
+Targeting events remain observable on the request side:
+`target_residues_applied` / `avoid_residues_applied` on `job.stream()` echo
+what the server accepted, and a `targeting_warning` event (e.g. a near-empty
+pocket after `avoid_residues` was applied) is surfaced both on `job.stream()`
+and via `warnings.warn(..., ligandai.LigandAITargetingWarning)`, so it's
+visible even if you only call `job.wait()`. These confirm the request was
+received — they are not evidence that a design landed where you asked.
 
 ## Authentication
 

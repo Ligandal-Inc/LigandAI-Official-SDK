@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Corrected — residue targeting is not site placement (retracts claims made in 0.8.0)
+
+Measurement on the deployed generator retracts the site-targeting language this
+changelog and the SDK docstrings have carried since 0.8.0. **No behaviour
+changed and no parameter was removed** — `target_residues`, `avoid_residues`
+and `hotspot_residues` still travel to the server and still shape the pocket
+featurization exactly as before. What changed is the claim made about them.
+
+What was measured, on the deployed generator, same request otherwise identical
+between arms:
+
+| Parameter | Mechanism | Measured effect |
+|---|---|---|
+| `avoid_residues` | removes rows from the pocket featurization | **None on generation.** Sequence distributions with and without the exclusion were indistinguishable (`p = 1.00`, Jensen-Shannon divergence `2.4e-5`). Designs that cleared the downstream quality gates still contacted the excluded patch, at ~2x the rate expected by chance. |
+| `hotspot_residues` | selects which rows are featurized | **Real, but not aimed.** The generated distribution shifts reproducibly (six receptor faces, `p ≈ 1e-4`, 64 designs/arm). Contact at the named face was not enriched on either receptor tested, and a randomly scattered residue set shifted the distribution as much as a genuine contiguous face. |
+
+Three specific statements are withdrawn:
+
+- *"enforced unconditionally"* — an exclusion is transmitted and applied to the
+  featurization unconditionally, but nothing downstream enforces it on the
+  output. Say **"applied in every targeting mode"**, never "enforced".
+- *"a strong prior"* — for `avoid_residues` there is no measurable prior at all;
+  for `hotspot_residues` there is a measurable effect that does not point at the
+  named site. Neither supports the phrase.
+- *"the effective design surface is target minus avoid — which is how you target
+  one face of a receptor while excluding the canonical orthosteric pocket on the
+  other"* — the 0.8.0 entry below. It describes the featurization arithmetic
+  correctly and then draws a placement conclusion the data does not support.
+  **That entry is superseded by this one.**
+
+The workflow that does hold is **fold, then measure, then filter**: fold the
+candidates, then select on measured interface contacts via
+`client.evaluator.filter_folds(..., criteria={"required_interface_residues": [...]})`,
+or read the `avoid_conformance_violation` / `avoid_conformance_clean`
+fold-stage diagnostics for an exclusion. Post-fold measurement is the part of
+this pipeline that is validated; pre-fold placement control is not.
+
+Docstrings, README, `docs/api_reference.md`, `AGENTS.md`, the packaged agent
+skill and `examples/32_avoid_residues_exclusion.py` were updated to match.
+
 ### Changed — `halflife` is now `residue_composition` (`bd-LIGANDAI_ALPHA_V2-b4f34.5`)
 
 The guidance knob called `halflife` never measured, predicted or optimised a
@@ -669,6 +709,15 @@ numeric parameter in the resource was audited for the same falsy-zero class of
 bug.
 
 ### Added — `avoid_residues` on `peptides.generate()` (`bd-LIGANDAI_ALPHA_V2-6zyvh`)
+
+> ⚠ **Superseded.** The site-targeting claim in this entry — "negative
+> steering", and "the effective design surface is *target minus avoid*, which is
+> how you target one face of a receptor while excluding the canonical
+> orthosteric pocket on the other" — was later measured to be unsupported.
+> `avoid_residues` had no measurable effect on generation. The parameter, its
+> shape and its wire behaviour are unchanged; only the claim is withdrawn. See
+> *Corrected — residue targeting is not site placement* at the top of this file.
+> The original text is left below as the historical record.
 
 Negative steering. Same shape as `target_residues` (a list of `ResidueRange`, or
 dicts with `chain`/`start`/`end`). The server subtracts these from the design
