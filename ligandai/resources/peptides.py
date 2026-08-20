@@ -196,7 +196,14 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
 # identity of any one model; add an id here only because its capability flag is
 # false, never because of its version number.
 #
-# Empty today (bd-LIGANDAI_ALPHA_V2-sxc8j, 2026-08-11): v6.5, v6.5.21, AND
+# ⛔ NO LONGER EMPTY (2026-08-20): v6.5.22 carries
+# ``supports_guidance_heads = False`` / ``guidance_transport = "unsupported"``
+# in the platform registry, verified by reading GENERATOR_MODELS directly rather
+# than from prose. Asking for guidance on v6.5.22 now fails fast and named here
+# instead of as an opaque server rejection -- which is exactly what the paragraph
+# below asked for.
+#
+# Previously (bd-LIGANDAI_ALPHA_V2-sxc8j, 2026-08-11): v6.5, v6.5.21, AND
 # v6.9.21 all implement the four guidance heads
 # (immuno/proteolytic/residue_composition/cellfree) — the v6.5 line via the
 # streaming guided-pool transport, v6.9.21 via the batch-spawn "default_function"
@@ -217,7 +224,7 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
 # set exists only to turn the combinations we DO know are impossible into a fast,
 # named, pre-flight error instead of an opaque server rejection. Keeping a full
 # copy of the registry here would go stale exactly as fast as a hardcoded id list.
-_MODELS_WITHOUT_GUIDANCE_HEADS: frozenset[str] = frozenset()
+_MODELS_WITHOUT_GUIDANCE_HEADS: frozenset[str] = frozenset({"v6.5.22"})
 
 
 def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
@@ -806,7 +813,7 @@ _StabilityMode = Literal["resist", "target"]
 # a runtime allowlist: ``model`` is typed ``_GeneratorModel | str | None`` and an
 # unrecognized id is forwarded to the server, whose model registry is the
 # authority on what exists.
-_GeneratorModel = Literal["v6.5.21", "v6.9.21", "v6.5"]
+_GeneratorModel = Literal["v6.5.21", "v6.5.22", "v6.9.21", "v6.9.22", "v6.5"]
 
 # Fold partner expansion mode. Controls which receptor chains are included in
 # the peptide co-fold complex.
