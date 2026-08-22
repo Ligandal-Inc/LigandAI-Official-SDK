@@ -248,10 +248,51 @@ def _wrap_transport_error(exc: httpx.TransportError, method: str, url: str) -> L
     timeouts — ``httpx.TimeoutException`` and every other transport-layer
     exception subclass ``httpx.TransportError``.
     """
-    return LigandAIConnectionError(
-        f"Connection error calling {method.upper()} {url}: {exc}",
-        original_error=repr(exc),
-    )
+    msg = f"Connection error calling {method.upper()} {url}: {exc}"
+
+    # ⛔ [bd-LIGANDAI_ALPHA_V2-ci4wp] A DNS failure against a NON-PUBLISHED host
+    # is almost always a stale base_url, not an outage — and it presents as a
+    # generic timeout that sends people looking at the network.
+    #
+    # Observed 2026-08-22: ~/.ligandai/credentials.json carries
+    # server_url = https://api.ligandai.com, which DOES NOT RESOLVE
+    # (gaierror -5). The SDK's own DEFAULT_BASE_URL is correct
+    # (https://ligandai.com) and client.py documents that api.ligandai.com is
+    # not a published host — but nothing checked the value it was HANDED, so a
+    # user taking that file's default could not reach the API at all and got no
+    # hint why.
+    #
+    # Diagnose only. Never rewrite the caller's base_url: silently redirecting a
+    # request to a different host than the caller named is worse than failing.
+    _dns = any(t in str(exc).lower() for t in (
+        "name or service not known", "nodename nor servname",
+        "temporary failure in name resolution", "no address associated",
+        "getaddrinfo", "name resolution",
+    ))
+    if _dns:
+        try:
+            from urllib.parse import urlsplit
+            _host = (urlsplit(url).hostname or "").lower()
+        except Exception:                                          # noqa: BLE001
+            _host = ""
+        _pub = (DEFAULT_BASE_URL.split("//", 1)[-1].split("/", 1)[0] or "").lower()
+        # ⛔ NO SUBDOMAIN EXEMPTION. The first version of this check exempted
+        # anything ending in ".ligandai.com" — which is exactly what
+        # api.ligandai.com is, so the guard silently skipped the one case it was
+        # written for. A host that DID NOT RESOLVE is worth diagnosing whether or
+        # not it looks related to the published one.
+        if _host and _host != _pub:
+            msg += (
+                f"\n\nThe hostname {_host!r} did not resolve, and it is not the "
+                f"published API host. The SDK default is {DEFAULT_BASE_URL!r}.\n"
+                f"  * If you passed base_url explicitly, check it.\n"
+                f"  * If you did not, something handed one to the client — a stale "
+                f"~/.ligandai/credentials.json 'server_url' is the known cause; "
+                f"'api.ligandai.com' in particular has never been a published host.\n"
+                f"  * Set LIGANDAI_BASE_URL={DEFAULT_BASE_URL} to override."
+            )
+
+    return LigandAIConnectionError(msg, original_error=repr(exc))
 
 
 # -- Sync transport ----------------------------------------------------------
