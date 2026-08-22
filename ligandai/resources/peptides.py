@@ -25,11 +25,12 @@ Endpoint mapping (server source-of-truth):
 
 from __future__ import annotations
 
+import math
 import warnings
 from datetime import datetime
 from pathlib import Path
-from collections.abc import AsyncIterator, Iterator
-from typing import Any, Callable, Literal
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+from typing import Any, Callable, Literal, Union
 
 from ligandai._targeting import validate_and_normalize_targeting
 from ligandai.errors import (
@@ -37,6 +38,7 @@ from ligandai.errors import (
     LigandAIError,
     LigandAIInvalidConfig,
     LigandAILegalAcceptanceRequired,
+    LigandAIReusedSessionError,
     LigandAIValidationError,
     LigandAIWaitTimeout,
 )
@@ -3213,6 +3215,339 @@ def _generation_result_from_session(
     return result
 
 
+# ── Multi-target concurrent generation ────────────────────────────────────
+# bd-dre-1u72b. One request, N receptors, one session, concurrent generation
+# on the platform side, per-target progress and per-target peptides.
+#
+# WHY THIS EXISTS AS ITS OWN METHOD RATHER THAN `gene=` GROWING A LIST TYPE:
+# ``generate(gene=...)`` already serializes to a ONE-ELEMENT ``targets`` array
+# on the wire (``_generation_body`` -> ``"targets": [_generation_target(...)]``)
+# and ``POST /api/ptf/parallel/generate`` has accepted an N-element array all
+# along — it is literally documented server-side as "Start parallel peptide
+# generation across multiple targets". What did not exist was any way for an SDK
+# caller to SAY N. Widening ``gene`` to ``str | list[str]`` would have made every
+# downstream single-target affordance (``fallback_gene``, the per-gene result
+# unwrap, ``sessions/by-gene``) ambiguous at runtime instead of at the type
+# level, so the multi-target entry point is explicit.
+#
+# ⛔ WHAT THIS DOES *NOT* CLAIM. Per-target CONCURRENCY is the platform's, not
+# this method's: the orchestrator runs targets in batches (see
+# ``GEN_BATCH_SIZE`` in server/ptf-integration-routes.ts) and this method's job
+# is to hand it the whole list at once so it can. Submitting N targets in ONE
+# request is also the only way to earn the volume discount, which is computed on
+# TOTAL peptides across targets, not per target — see ``estimate_multi_cost``.
+
+# CREDIT_PRICING.generation.perPeptide (shared/schema.ts) — credits per DISPLAYED
+# peptide. Not the fold rate; folding is billed separately.
+_CREDITS_PER_PEPTIDE = 100
+
+_MultiTargetSpec = Union[str, Mapping[str, Any]]
+
+# Per-target keys a caller may vary between targets in one request. Everything
+# NOT in this set (model, guidance, length range, peptide count, fold settings)
+# is SESSION-level on this endpoint and is therefore shared by every target —
+# the server reads ``generatorModelId`` and the guidance flags once, off the
+# request root, never off a target (verified against the handler's destructure).
+_PER_TARGET_KEYS: frozenset[str] = frozenset({
+    "gene", "target_residues", "avoid_residues", "hotspot_residues",
+    "target_chains", "targeting_strategy", "variant_id", "user_pdb_id",
+    "uniprot_id", "pdb_id", "pdb_data",
+})
+
+
+def _normalize_multi_targets(
+    targets: Iterable[_MultiTargetSpec],
+) -> list[dict[str, Any]]:
+    """Turn the caller's target list into wire ``targets`` entries.
+
+    Accepts a bare gene symbol (``"CD274"``) or a mapping carrying any of
+    :data:`_PER_TARGET_KEYS`. Rejects an empty list, a blank gene, and a
+    duplicate gene — a duplicate is never a legitimate request here (the
+    platform reuses one session per gene, so the second copy could only ever
+    return the first copy's peptides) and silently collapsing it would hide
+    that from the caller.
+    """
+    targets = list(targets)
+    if not targets:
+        raise LigandAIError("generate_multi(targets=...) requires at least one target")
+
+    wire: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
+    for idx, spec in enumerate(targets):
+        if isinstance(spec, str):
+            spec_map: Mapping[str, Any] = {"gene": spec}
+        elif isinstance(spec, Mapping):
+            spec_map = spec
+        else:
+            raise LigandAIError(
+                f"generate_multi target #{idx} must be a gene symbol or a mapping, "
+                f"got {type(spec).__name__}"
+            )
+
+        unknown = set(spec_map) - _PER_TARGET_KEYS
+        if unknown:
+            raise LigandAIError(
+                f"generate_multi target #{idx} ({spec_map.get('gene', '?')}) carries "
+                f"{sorted(unknown)}, which are SESSION-level settings on this endpoint, "
+                "not per-target ones. Pass them once as generate_multi(...) keyword "
+                f"arguments instead. Per-target keys are: {sorted(_PER_TARGET_KEYS)}"
+            )
+
+        gene = str(spec_map.get("gene") or "").strip()
+        if not gene:
+            raise LigandAIError(f"generate_multi target #{idx} has no gene")
+        key = gene.upper()
+        if key in seen:
+            raise LigandAIError(
+                f"generate_multi target #{idx} repeats gene {key!r} (already at index "
+                f"{seen[key]}). The platform serves one session per gene, so the "
+                "duplicate could only return the first target's peptides."
+            )
+        seen[key] = idx
+
+        strategy = spec_map.get("targeting_strategy")
+        target_residues = spec_map.get("target_residues")
+        effective_strategy = (
+            strategy if strategy is not None
+            else ("pocket_targeted" if target_residues else "full_surface")
+        )
+        entry = _generation_target(
+            gene,
+            target_residues,                       # type: ignore[arg-type]
+            effective_strategy,                    # type: ignore[arg-type]
+            spec_map.get("variant_id"),            # type: ignore[arg-type]
+            spec_map.get("user_pdb_id"),           # type: ignore[arg-type]
+        )
+        # Optional per-target extras the Express handler lifts off each target.
+        avoid = _serialize_residue_ranges(spec_map.get("avoid_residues"))  # type: ignore[arg-type]
+        if avoid is not None:
+            entry["avoidResidues"] = avoid
+        hotspots = spec_map.get("hotspot_residues")
+        if hotspots:
+            entry["hotspotResidues"] = [int(h) for h in hotspots]
+        chains = spec_map.get("target_chains")
+        if chains:
+            entry["targetChains"] = list(chains)
+        for src, dst in (("uniprot_id", "uniprotId"), ("pdb_id", "pdbId"), ("pdb_data", "pdbData")):
+            if spec_map.get(src) is not None:
+                entry[dst] = spec_map[src]
+        wire.append(entry)
+    return wire
+
+
+def _guidance_was_requested(kwargs: Mapping[str, Any]) -> bool:
+    """True iff this call asked for any guidance head.
+
+    Kept in terms of the SAME knobs the platform's guidance transport reads, so
+    the reuse guard fires on exactly the settings the reuse key omits.
+    """
+    if kwargs.get("immunogenicity") or kwargs.get("serum_stability") or kwargs.get("cellfree"):
+        return True
+    if kwargs.get("residue_composition") is not None or kwargs.get("halflife") is not None:
+        return True
+    if kwargs.get("cysteine_enabled") is True:
+        return True
+    return False
+
+
+def _guard_reused_session(
+    payload: Mapping[str, Any],
+    *,
+    requested_model: str | None,
+    guidance_requested: bool,
+    allow_reused_session: bool,
+) -> None:
+    """⛔ P0 GUARD — refuse to pass off a REUSED session as a fresh run.
+
+    ``POST /api/ptf/parallel/generate`` answers ``success: true`` with a real
+    ``sessionId`` in three different situations, and only one of them is the run
+    the caller asked for:
+
+    1. a genuinely new session,
+    2. a 60-second idempotency-cache hit (``idempotent: true``), and
+    3. a 2-hour gene reuse (``deduplicated: true`` + ``skippedGenes``).
+
+    Neither (2) nor (3) hashes ``generatorModelId`` or any guidance flag, so a
+    request that changes ONLY the model or ONLY the guidance lands on the
+    earlier session and its peptides come back under the new request's label.
+    Measured 2026-08-21 across all five generator models: every accepted cell
+    resolved to one v6.5.21-no-guidance session until the TARGETING was varied.
+
+    This raises when the caller pinned a model or asked for guidance — i.e.
+    precisely when the reuse is known to be lying — and stays quiet otherwise,
+    because reusing a session for an identical repeat request is the behaviour
+    that feature was built for (it stops double-debits on a retry).
+    """
+    if allow_reused_session:
+        return
+    reused_gene_dedup = bool(payload.get("deduplicated"))
+    reused_idempotent = bool(payload.get("idempotent"))
+    if not (reused_gene_dedup or reused_idempotent):
+        return
+    if not (requested_model or guidance_requested):
+        return  # identical repeat request — reuse is correct and intended
+    layer = "gene_dedup" if reused_gene_dedup else "idempotency_cache"
+    sid = (
+        payload.get("existingSessionId")
+        or payload.get("sessionId")
+        or payload.get("session_id")
+    )
+    skipped = payload.get("skippedGenes") or []
+    asked = []
+    if requested_model:
+        asked.append(f"model={requested_model!r}")
+    if guidance_requested:
+        asked.append("guidance heads")
+    raise LigandAIReusedSessionError(
+        "The platform returned an EXISTING generation session "
+        f"({sid}) instead of running this request. Its reuse key ({layer}) does not "
+        f"include the generator model or any guidance flag, and this call asked for "
+        f"{' and '.join(asked)} — so those peptides were NOT produced with the "
+        "settings requested here. Vary the TARGETING (hotspot_residues= / "
+        "target_residues=) to force a genuinely new run, or pass "
+        "allow_reused_session=True to accept the existing session knowingly.",
+        session_id=sid if isinstance(sid, str) else None,
+        requested_model=requested_model,
+        guidance_requested=guidance_requested,
+        reuse_layer=layer,
+        skipped_genes=[str(g) for g in skipped] if isinstance(skipped, list) else [],
+        response=dict(payload),
+    )
+
+
+def estimate_multi_cost(num_targets: int, peptides_per_target: int) -> dict[str, Any]:
+    """Credit cost of an N-target generation, and what it saves over N separate runs.
+
+    ⛔ MIRRORS the server's formula (shared/schema.ts CREDIT_PRICING +
+    shared/forge-pricing.ts GENERATION_VOLUME_TIERS, applied in the
+    ``/api/ptf/parallel/generate`` handler). It is an ESTIMATE, not a quote —
+    the server is the authority, tier caps can reduce the billable count, and a
+    superadmin/unlimited account is not charged at all.
+
+    Guidance is FREE as priced today: the four per-peptide guidance surcharges
+    (``qualityGuidedGenPerPeptide``, ``ligandiqFoldRankingPerPeptide``,
+    ``immunoGuidancePerPeptide``, ``stabilityGuidancePerPeptide``) are all 0 in
+    the platform's pricing table, so this deliberately does NOT take guidance
+    arguments — adding them would imply a price difference that does not exist.
+    FOLDING is billed separately and is not counted here.
+
+    THE WHOLE POINT: the volume discount is computed on TOTAL peptides across
+    every target in ONE request, not per target. Ten targets x 100 peptides
+    submitted together is 1,000 peptides and earns the 1,000-peptide tier;
+    submitted as ten separate runs it is ten lots of 100 and earns only the
+    100-peptide tier, ten times. Same GPUs, same peptides, different bill.
+    """
+    n = int(num_targets) * int(peptides_per_target)
+    if n <= 0:
+        raise LigandAIError("estimate_multi_cost needs positive targets and peptides")
+
+    def _bulk_pct(total: int) -> int:
+        if total >= 5000:
+            return 50
+        if total >= 1000:
+            return 30
+        if total >= 300:
+            return 20
+        if total >= 100:
+            return 10
+        return 0
+
+    def _cost(total: int) -> float:
+        return total * _CREDITS_PER_PEPTIDE * (1 - _bulk_pct(total) / 100)
+
+    joint = math.ceil(_cost(n))
+    serial = int(num_targets) * math.ceil(_cost(int(peptides_per_target)))
+    return {
+        "num_targets": int(num_targets),
+        "peptides_per_target": int(peptides_per_target),
+        "total_peptides": n,
+        "bulk_discount_percent": _bulk_pct(n),
+        "credits_one_request": joint,
+        "credits_n_separate_runs": serial,
+        "credits_saved": serial - joint,
+        "credits_per_target": round(joint / int(num_targets), 1),
+    }
+
+
+def _attach_multi_target_helpers(job: Any, genes: list[str]) -> None:
+    """Bolt per-target accessors onto a generation :class:`~ligandai.jobs.Job`.
+
+    ⛔ WHY ON THE JOB AND NOT ON THE RESULT. ``GenerationResult`` is a
+    single-gene shape — ``_generation_result_from_session`` unwraps ONE gene out
+    of the session's gene-keyed ``peptides`` dict, using the fallback gene the
+    job was created with. For an N-target run that would quietly hand back the
+    first target's peptides as if they were the whole run. These accessors read
+    the gene-keyed structures the server actually returns, so nothing is
+    unwrapped and nothing is lost.
+
+    ``target_status()``      -> ``{gene: {"status", "peptidesGenerated", ...}}``
+                                from ``GET /api/ptf/parallel/{id}/status``,
+                                which already returns one row per target.
+    ``peptides_by_target()`` -> ``{gene: [peptide, ...]}`` from
+                                ``GET /api/ptf/sessions/{id}``, whose
+                                ``session.peptides`` is keyed by gene.
+    ``targets``              -> the gene list this job was submitted with.
+    """
+    transport = job._transport
+    job_id = job.id
+
+    def target_status() -> dict[str, dict[str, Any]]:
+        payload = transport.request("GET", f"/api/ptf/parallel/{job_id}/status") or {}
+        rows = payload.get("generation")
+        out: dict[str, dict[str, Any]] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, Mapping) and row.get("gene"):
+                    out[str(row["gene"])] = dict(row)
+        # A target the server has not reported on yet is PENDING, not missing —
+        # returning a short dict would read as "that target is done".
+        for gene in genes:
+            out.setdefault(gene, {"gene": gene, "status": "pending", "peptidesGenerated": 0})
+        return out
+
+    def peptides_by_target() -> dict[str, list[dict[str, Any]]]:
+        payload = transport.request("GET", f"/api/ptf/sessions/{job_id}") or {}
+        session = payload.get("session") or {}
+        by_gene = session.get("peptides")
+        out: dict[str, list[dict[str, Any]]] = {}
+        if isinstance(by_gene, Mapping):
+            for gene, peps in by_gene.items():
+                out[str(gene)] = list(peps) if isinstance(peps, list) else []
+        for gene in genes:
+            out.setdefault(gene, [])
+        return out
+
+    async def atarget_status() -> dict[str, dict[str, Any]]:
+        payload = await transport.request("GET", f"/api/ptf/parallel/{job_id}/status") or {}
+        rows = payload.get("generation")
+        out: dict[str, dict[str, Any]] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, Mapping) and row.get("gene"):
+                    out[str(row["gene"])] = dict(row)
+        for gene in genes:
+            out.setdefault(gene, {"gene": gene, "status": "pending", "peptidesGenerated": 0})
+        return out
+
+    async def apeptides_by_target() -> dict[str, list[dict[str, Any]]]:
+        payload = await transport.request("GET", f"/api/ptf/sessions/{job_id}") or {}
+        session = payload.get("session") or {}
+        by_gene = session.get("peptides")
+        out: dict[str, list[dict[str, Any]]] = {}
+        if isinstance(by_gene, Mapping):
+            for gene, peps in by_gene.items():
+                out[str(gene)] = list(peps) if isinstance(peps, list) else []
+        for gene in genes:
+            out.setdefault(gene, [])
+        return out
+
+    is_async = isinstance(job, AsyncJob)
+    job.targets = list(genes)                                   # type: ignore[attr-defined]
+    job.target_status = atarget_status if is_async else target_status          # type: ignore[attr-defined]
+    job.peptides_by_target = apeptides_by_target if is_async else peptides_by_target  # type: ignore[attr-defined]
+
+
+
 def _load_generation_result(
     transport: Any,
     info: Any,
@@ -3919,6 +4254,18 @@ class Peptides(Resource):
         # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
         # use the typed kwargs above. Hard-rejected in v0.3.0.
         _warn_deprecated_cys_extra(extra)
+        # ⛔ P0 REUSE GUARD (bd-dre-1u72b). Popped BEFORE the body is built so it
+        # never reaches the wire — it is a client-side policy switch, not a
+        # server field. See _guard_reused_session() for what it protects against.
+        _allow_reused_session = bool(extra.pop("allow_reused_session", False))
+        _reuse_guidance_requested = _guidance_was_requested({
+            "immunogenicity": immunogenicity,
+            "serum_stability": serum_stability,
+            "cellfree": cellfree,
+            "residue_composition": residue_composition,
+            "halflife": halflife,
+            "cysteine_enabled": cysteine_enabled,
+        })
         effective_segment_config = _resolve_segment_config(segments, segment_config)
         body = _generation_body(
             gene=gene,
@@ -3994,6 +4341,12 @@ class Peptides(Resource):
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
+        _guard_reused_session(
+            payload,
+            requested_model=model,
+            guidance_requested=_reuse_guidance_requested,
+            allow_reused_session=_allow_reused_session,
+        )
         job_id = payload.get("sessionId") or payload.get("jobId") or payload.get("session_id") or ""
         if not job_id:
             raise LigandAIError(
@@ -4016,6 +4369,83 @@ class Peptides(Resource):
                 fallback_gene=gene,
             ),
         )
+
+    def generate_multi(
+        self,
+        targets: Iterable[_MultiTargetSpec],
+        num_peptides: int | None = None,
+        **kwargs: Any,
+    ) -> Job[GenerationResult]:
+        """Generate against **N receptors in one concurrent run**.
+
+        One request, one session, one bill, N targets generated concurrently by
+        the platform orchestrator. Every non-targeting setting — generator
+        ``model``, guidance heads, ``length_range``, ``num_peptides``, fold
+        settings — is SESSION-level and applies to every target, because that is
+        how ``POST /api/ptf/parallel/generate`` reads them (it destructures
+        ``generatorModelId`` and the guidance flags once, off the request root,
+        never off an individual target). Per-target you may vary only the
+        TARGETING: see :data:`_PER_TARGET_KEYS`.
+
+        Args:
+            targets: Gene symbols and/or per-target mappings. A bare string is a
+                whole-surface target; a mapping may carry ``gene``,
+                ``target_residues``, ``avoid_residues``, ``hotspot_residues``,
+                ``target_chains``, ``targeting_strategy``, ``variant_id``,
+                ``user_pdb_id``, ``uniprot_id``, ``pdb_id``, ``pdb_data``.
+            num_peptides: Peptides **per target** (not the total). The bill and
+                the volume discount are computed on ``len(targets) *
+                num_peptides`` — see :func:`estimate_multi_cost`.
+            **kwargs: Every other :meth:`generate` keyword, applied session-wide.
+
+        Returns:
+            The same waitable :class:`~ligandai.jobs.Job` :meth:`generate`
+            returns. ``job.wait()`` resolves once EVERY target is done;
+            ``job.target_status()`` reports per-target progress while it runs and
+            ``job.peptides_by_target()`` splits the finished peptides by gene.
+
+        Raises:
+            LigandAIError: empty target list, a blank or duplicated gene, or a
+                session-level setting passed inside a per-target mapping.
+            LigandAIReusedSessionError: the platform answered with a PRE-EXISTING
+                session rather than running this request (see that class — its
+                reuse key ignores the generator model and every guidance flag).
+
+        Example::
+
+            job = client.peptides.generate_multi(
+                targets=["CD274", "EGFR", {"gene": "ERBB2", "hotspot_residues": [310]}],
+                num_peptides=100,
+                model="v6.9.22",
+                immunogenicity=True,
+            )
+            for gene, state in job.target_status().items():
+                print(gene, state["status"], state["peptidesGenerated"])
+            job.wait()
+            by_gene = job.peptides_by_target()
+
+        ⛔ TIER CAPS ARE THE SERVER'S: free 3 simultaneous targets, basic /
+        academia / pro 5, enterprise / discovery_partner 25 — enforced in the
+        handler, which 400s with ``TIER_TARGET_LIMIT_EXCEEDED``. This method does
+        not keep a copy of that table, so a tier change reaches you without an
+        SDK upgrade.
+        """
+        wire_targets = _normalize_multi_targets(targets)
+        # The first gene seeds generate()'s single-target scaffolding (session
+        # fallback gene, targeting auto-strategy). `targets=` then overrides the
+        # one-element array _generation_body built, because **extra is merged
+        # into the body LAST. Nothing about the single-target path changes.
+        first_gene = str(wire_targets[0]["gene"])
+        kwargs.pop("gene", None)
+        job = self.generate(
+            gene=first_gene,
+            num_peptides=num_peptides,
+            targets=wire_targets,
+            **kwargs,
+        )
+        _attach_multi_target_helpers(job, [str(t["gene"]) for t in wire_targets])
+        return job
+
 
     def reattach(self, job_id: str) -> Job[GenerationResult]:
         """Re-create a waitable :class:`~ligandai.jobs.Job` for an in-flight or
@@ -6465,6 +6895,18 @@ class AsyncPeptides(AsyncResource):
         # v0.2.0: cys/cyclic controls passed via extra={...} are deprecated;
         # use the typed kwargs above. Hard-rejected in v0.3.0.
         _warn_deprecated_cys_extra(extra)
+        # ⛔ P0 REUSE GUARD (bd-dre-1u72b). Popped BEFORE the body is built so it
+        # never reaches the wire — it is a client-side policy switch, not a
+        # server field. See _guard_reused_session() for what it protects against.
+        _allow_reused_session = bool(extra.pop("allow_reused_session", False))
+        _reuse_guidance_requested = _guidance_was_requested({
+            "immunogenicity": immunogenicity,
+            "serum_stability": serum_stability,
+            "cellfree": cellfree,
+            "residue_composition": residue_composition,
+            "halflife": halflife,
+            "cysteine_enabled": cysteine_enabled,
+        })
         effective_segment_config = _resolve_segment_config(segments, segment_config)
         body = _generation_body(
             gene=gene,
@@ -6540,6 +6982,12 @@ class AsyncPeptides(AsyncResource):
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
+        _guard_reused_session(
+            payload,
+            requested_model=model,
+            guidance_requested=_reuse_guidance_requested,
+            allow_reused_session=_allow_reused_session,
+        )
         job_id = payload.get("sessionId") or payload.get("jobId") or payload.get("session_id") or ""
         if not job_id:
             raise LigandAIError("Server did not return a session_id/jobId", response=payload)
@@ -6559,6 +7007,83 @@ class AsyncPeptides(AsyncResource):
                 fallback_gene=gene,
             ),
         )
+
+    async def generate_multi(
+        self,
+        targets: Iterable[_MultiTargetSpec],
+        num_peptides: int | None = None,
+        **kwargs: Any,
+    ) -> AsyncJob[GenerationResult]:
+        """Generate against **N receptors in one concurrent run**.
+
+        One request, one session, one bill, N targets generated concurrently by
+        the platform orchestrator. Every non-targeting setting — generator
+        ``model``, guidance heads, ``length_range``, ``num_peptides``, fold
+        settings — is SESSION-level and applies to every target, because that is
+        how ``POST /api/ptf/parallel/generate`` reads them (it destructures
+        ``generatorModelId`` and the guidance flags once, off the request root,
+        never off an individual target). Per-target you may vary only the
+        TARGETING: see :data:`_PER_TARGET_KEYS`.
+
+        Args:
+            targets: Gene symbols and/or per-target mappings. A bare string is a
+                whole-surface target; a mapping may carry ``gene``,
+                ``target_residues``, ``avoid_residues``, ``hotspot_residues``,
+                ``target_chains``, ``targeting_strategy``, ``variant_id``,
+                ``user_pdb_id``, ``uniprot_id``, ``pdb_id``, ``pdb_data``.
+            num_peptides: Peptides **per target** (not the total). The bill and
+                the volume discount are computed on ``len(targets) *
+                num_peptides`` — see :func:`estimate_multi_cost`.
+            **kwargs: Every other :meth:`generate` keyword, applied session-wide.
+
+        Returns:
+            The same waitable :class:`~ligandai.jobs.AsyncJob` :meth:`generate`
+            returns. ``job.wait()`` resolves once EVERY target is done;
+            ``job.target_status()`` reports per-target progress while it runs and
+            ``job.peptides_by_target()`` splits the finished peptides by gene.
+
+        Raises:
+            LigandAIError: empty target list, a blank or duplicated gene, or a
+                session-level setting passed inside a per-target mapping.
+            LigandAIReusedSessionError: the platform answered with a PRE-EXISTING
+                session rather than running this request (see that class — its
+                reuse key ignores the generator model and every guidance flag).
+
+        Example::
+
+            job = await client.peptides.generate_multi(
+                targets=["CD274", "EGFR", {"gene": "ERBB2", "hotspot_residues": [310]}],
+                num_peptides=100,
+                model="v6.9.22",
+                immunogenicity=True,
+            )
+            for gene, state in (await job.target_status()).items():
+                print(gene, state["status"], state["peptidesGenerated"])
+            await job.wait()
+            by_gene = await job.peptides_by_target()
+
+        ⛔ TIER CAPS ARE THE SERVER'S: free 3 simultaneous targets, basic /
+        academia / pro 5, enterprise / discovery_partner 25 — enforced in the
+        handler, which 400s with ``TIER_TARGET_LIMIT_EXCEEDED``. This method does
+        not keep a copy of that table, so a tier change reaches you without an
+        SDK upgrade.
+        """
+        wire_targets = _normalize_multi_targets(targets)
+        # The first gene seeds generate()'s single-target scaffolding (session
+        # fallback gene, targeting auto-strategy). `targets=` then overrides the
+        # one-element array _generation_body built, because **extra is merged
+        # into the body LAST. Nothing about the single-target path changes.
+        first_gene = str(wire_targets[0]["gene"])
+        kwargs.pop("gene", None)
+        job = await self.generate(
+            gene=first_gene,
+            num_peptides=num_peptides,
+            targets=wire_targets,
+            **kwargs,
+        )
+        _attach_multi_target_helpers(job, [str(t["gene"]) for t in wire_targets])
+        return job
+
 
     def reattach(self, job_id: str) -> AsyncJob[GenerationResult]:
         """Async sibling of :meth:`Peptides.reattach`.
