@@ -61,6 +61,7 @@ from ligandai.key_wallet import WALLET_PATH, KeyWallet
 from ligandai.resources.account import Account, AsyncAccount
 from ligandai.resources.analysis import Analysis, AsyncAnalysis
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
+from ligandai.resources.campaigns import AsyncCampaigns, Campaigns
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
 from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
@@ -516,6 +517,9 @@ class LigandAI(_ClientCommon):
         self.linker_modifications: LinkerModifications = LinkerModifications(
             self._transport, client=self,
         )
+        # Recursive contrastive design loop: fold a target + off-target panel,
+        # rank on delta ipSAE, replicate, feed survivors forward. [bd-dre-if562]
+        self.campaigns: Campaigns = Campaigns(self._transport, client=self)
         self.charts: Charts = Charts(self._transport)
         self.diseases: Diseases = Diseases(self._transport)
         self.discovery: Discovery = Discovery(self._transport, client=self)
@@ -959,6 +963,7 @@ class AsyncLigandAI(_ClientCommon):
         self.linker_modifications: AsyncLinkerModifications = AsyncLinkerModifications(
             self._transport, client=self,
         )
+        self.campaigns: AsyncCampaigns = AsyncCampaigns(self._transport, client=self)
         self.charts: AsyncCharts = AsyncCharts(self._transport)
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)

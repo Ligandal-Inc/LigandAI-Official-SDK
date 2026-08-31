@@ -620,6 +620,54 @@ class LigandAIInvalidConfig(LigandAIError):
         self.allowed = allowed
 
 
+class LigandAIParameterNotForwarded(LigandAIInvalidConfig):
+    """A real, supported capability that the request path does not carry — yet.
+
+    Raised CLIENT-SIDE, before any HTTP call, when the SDK knows a parameter
+    would be accepted by the HTTP layer, silently dropped by an intermediate
+    hop, and therefore reported as set while the run executes without it.
+
+    This is NOT "the SDK is being cautious". It is the SDK refusing to
+    manufacture the one defect the platform has paid for repeatedly: a knob
+    that reads ON in the request and OFF in the run, with nothing in the
+    response saying so. Neither the request schemas nor the response bodies
+    reject unknown keys, so a silently-dropped parameter is indistinguishable
+    from an honoured one at the wire level; the check has to live here.
+
+    Attributes
+    ----------
+    parameter : str
+        The kwarg the caller set.
+    reached : str | None
+        The last layer that DOES read the parameter.
+    dropped_at : str | None
+        The layer that drops it.
+    tracking : str | None
+        The tracking id for the plumbing work.
+    override : str | None
+        The kwarg that forces the request through anyway (for a caller running
+        against a server where the gap is already closed).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        parameter: str | None = None,
+        reached: str | None = None,
+        dropped_at: str | None = None,
+        tracking: str | None = None,
+        override: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, field=parameter, **kwargs)
+        self.parameter = parameter
+        self.reached = reached
+        self.dropped_at = dropped_at
+        self.tracking = tracking
+        self.override = override
+
+
 class LigandAIInsufficientCredits(LigandAIError):
     """Client-side credit pre-flight failed before submission.
 

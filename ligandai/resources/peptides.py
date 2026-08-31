@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from typing import Any, Callable, Literal, Union
 
 from ligandai._targeting import validate_and_normalize_targeting
+from ligandai.contrastive import AvoidancePolicy, ContrastiveGuidance
 from ligandai.errors import (
     LigandAICreditError,
     LigandAIError,
@@ -227,6 +228,29 @@ _GUIDANCE_EXTRA_KEYS: frozenset[str] = frozenset({
 # named, pre-flight error instead of an opaque server rejection. Keeping a full
 # copy of the registry here would go stale exactly as fast as a hardcoded id list.
 _MODELS_WITHOUT_GUIDANCE_HEADS: frozenset[str] = frozenset({"v6.5.22"})
+
+
+def _merge_avoidance(
+    avoidance: Any,
+    avoid_residues: Any,
+    avoid_shell_angstrom: float | None,
+) -> tuple[Any, float | None]:
+    """Fold an :class:`~ligandai.contrastive.AvoidancePolicy` into the two kwargs.
+
+    Explicit kwargs win over the policy. The policy's ``hard_negatives`` are NOT
+    sent: the generator has no sequence-repulsion term, and there is no request
+    field for one, so a hard-negative list on the wire would be dropped in
+    silence. They are applied as a client-side filter by
+    ``client.campaigns`` instead, which is the only place they actually bite.
+    """
+    if avoidance is None:
+        return avoid_residues, avoid_shell_angstrom
+    policy_kwargs = avoidance.generation_kwargs()
+    if avoid_residues is None:
+        avoid_residues = policy_kwargs.get("avoid_residues")
+    if avoid_shell_angstrom is None:
+        avoid_shell_angstrom = policy_kwargs.get("avoid_shell_angstrom")
+    return avoid_residues, avoid_shell_angstrom
 
 
 def _warn_deprecated_cys_extra(extra: dict[str, Any] | None) -> None:
@@ -725,9 +749,25 @@ _ChargeMode = Literal["off", "lt", "gt", "between"]
 #   with 0 cysteines OR pairs whose positions form a plausible disulfide
 #   geometry (|i-j| in {3,4} or >=6).
 # - ``"exclude_all"`` / ``"exclude"`` — reject any peptide containing cysteine.
+# - ``"terminal_only"`` — cysteine permitted only at the two terminal positions.
+# - ``"terminal_pair"`` — a cysteine at BOTH termini. This is the mode that
+#   produces head-to-tail cyclisable designs: the kernel hard-masks the terminal
+#   positions so the pair is placed rather than hoped for. Pair it with
+#   ``cyclic_mode="disulfide"`` when you want the cyclisation scored as well.
 #
 # Server-side this is enforced via rejection sampling with backpressure refill,
 # so requesting ``num_peptides=N`` returns exactly N peptides regardless of mode.
+#
+# ⛔ ``terminal_only`` and ``terminal_pair`` were MISSING from this type through
+# v0.12.2 while the platform had accepted both the whole time — so a caller
+# asking for cyclisable designs failed type-checking on a supported request and
+# had no documented way to reach the mode.
+#
+# ⛔ AND THE VALUE IS NOT SERVER-VALIDATED. An unrecognised cysteine mode does
+# not 400: the normaliser falls through to ``"disulfide_only"`` silently, so a
+# typo becomes a different, plausible-looking run. That is why
+# ``_validate_cysteine_mode`` below rejects unknown values CLIENT-SIDE — it is
+# the only place the mistake is visible.
 _CysteineMode = Literal[
     "allow_all",
     "allow",
@@ -735,7 +775,45 @@ _CysteineMode = Literal[
     "stability_only",
     "exclude_all",
     "exclude",
+    "terminal_only",
+    "terminal_pair",
 ]
+
+#: Every cysteine mode the platform recognises. A value outside this set is
+#: silently rewritten to ``"disulfide_only"`` server-side, so it is rejected here.
+_VALID_CYSTEINE_MODES: frozenset[str] = frozenset(
+    {
+        "allow_all",
+        "allow",
+        "disulfide_only",
+        "stability_only",
+        "exclude_all",
+        "exclude",
+        "terminal_only",
+        "terminal_pair",
+    }
+)
+
+
+def _validate_cysteine_mode(mode: Any) -> str:
+    """Reject a cysteine mode the platform would silently rewrite.
+
+    The server normalises an unknown mode to ``"disulfide_only"`` without an
+    error, so ``cysteine_mode="terminal-pair"`` (hyphen) runs a DIFFERENT
+    experiment and reports success. Caught here instead.
+    """
+    value = str(mode).strip()
+    if value not in _VALID_CYSTEINE_MODES:
+        raise LigandAIInvalidConfig(
+            f"cysteine_mode={mode!r} is not a recognised mode. The platform does "
+            f"not reject an unknown mode — it silently substitutes "
+            f"'disulfide_only', so this would run a different experiment and "
+            f"report success.",
+            field="cysteine_mode",
+            value=mode,
+            allowed=sorted(_VALID_CYSTEINE_MODES),
+        )
+    return value
 
 # Residue & terminal composition guidance target (formerly "half-life").
 #
@@ -991,6 +1069,10 @@ def _generation_body(
     cascade_gate_metric: str,
     cascade_gate_threshold: float | None,
     cascade_gate_top_n: int | None,
+    # Contrastive (paralog-mean) guidance — steer AWAY from real off-target
+    # receptor pockets at sampling time. See ligandai.contrastive.
+    contrastive: "ContrastiveGuidance | None",
+    allow_unforwarded_contrastive: bool,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
     # Client-side targeting validation — BEFORE any HTTP call.
@@ -1044,7 +1126,7 @@ def _generation_body(
         "deimmunizeMode": deimmunize_mode,
         "genParallelCount": gen_gpus,
         "foldingGpus": fold_gpus,
-        "cysteineMode": cysteine_mode,
+        "cysteineMode": _validate_cysteine_mode(cysteine_mode),
         # Guidance modules. Quality-guided generation is free+; immunogenicity,
         # serum stability, and logits-style outputs are academia+.
         "qualityGuidedEnabled": quality_guided,
@@ -1385,6 +1467,21 @@ def _generation_body(
     # intracellular→CY, ec_tm→NC+TM, full→no restriction).
     if target_face is not None:
         body["targetFace"] = target_face
+
+    # ── Contrastive (paralog-mean) guidance ─────────────────────────────────
+    # Emitted ONLY when the caller supplied a panel. A v6.9-line run without one
+    # is still contrastive — the platform derives its own real paralog
+    # references and refuses the run if it cannot produce any — this is how you
+    # CHOOSE the panel instead of accepting the derived one.
+    #
+    # ⛔ require_forwardable() is the guard that stops this becoming a knob that
+    # reads ON and executes OFF. See ligandai.contrastive for what it verifies.
+    if contrastive is not None:
+        contrastive.validate_for_model(generator_model_id)
+        contrastive.require_forwardable(
+            allow_unforwarded=bool(allow_unforwarded_contrastive)
+        )
+        body.update(contrastive.to_wire())
 
     if extra:
         body.update(extra)
@@ -3794,6 +3891,10 @@ class Peptides(Resource):
         cascade_gate_metric: str = "ipsae",
         cascade_gate_threshold: float | None = 0.67,
         cascade_gate_top_n: int | None = None,
+        # ── Contrastive guidance + avoidance (bd-dre-if562) ─────────────────
+        contrastive: "ContrastiveGuidance | None" = None,
+        avoidance: "AvoidancePolicy | None" = None,
+        allow_unforwarded_contrastive: bool = False,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
@@ -4267,6 +4368,14 @@ class Peptides(Resource):
             "cysteine_enabled": cysteine_enabled,
         })
         effective_segment_config = _resolve_segment_config(segments, segment_config)
+        # An AvoidancePolicy is a convenience wrapper over the two avoidance
+        # kwargs plus the off-target/hard-negative bookkeeping the campaign loop
+        # needs. Explicit kwargs WIN — a caller who passed both meant the
+        # explicit one, and silently preferring the policy would be the kind of
+        # invisible override this SDK refuses to ship.
+        avoid_residues, avoid_shell_angstrom = _merge_avoidance(
+            avoidance, avoid_residues, avoid_shell_angstrom
+        )
         body = _generation_body(
             gene=gene,
             num_peptides=num_peptides,
@@ -4338,6 +4447,8 @@ class Peptides(Resource):
             cascade_gate_metric=cascade_gate_metric,
             cascade_gate_threshold=cascade_gate_threshold,
             cascade_gate_top_n=cascade_gate_top_n,
+            contrastive=contrastive,
+            allow_unforwarded_contrastive=allow_unforwarded_contrastive,
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -6097,11 +6208,24 @@ class Peptides(Resource):
     # generation + fold, co-fold each candidate binder against the on-target's
     # isoforms (and any off-targets) and score the complexes to rank by
     # selectivity margin. Uses the real fold-compare surface
-    # (/api/v1/fold-compare/*). Generation-TIME negative-selection bias against
-    # provided isoform structures is NOT wired into the current generator (the
-    # v6.5 pocket-conditioned model has no multi-structure repulsion term); it is
-    # documented as a future option. See validate_selectivity() to run this
-    # directly on a completed generation session.
+    # (/api/v1/fold-compare/*). See validate_selectivity() to run this directly
+    # on a completed generation session.
+    #
+    # ⛔ CORRECTED 2026-08-31 (bd-dre-if562). The paragraph here used to say
+    # generation-time negative selection "is NOT wired into the current
+    # generator". That was true of the v6.5 pocket-conditioned line, which has no
+    # multi-structure repulsion term, and it is FALSE of the v6.9 line: those
+    # models are served with a paralog-mean CFG reference and will not run
+    # without REAL off-target receptor pockets to steer away from — the platform
+    # derives them and refuses the request rather than substituting an all-zero
+    # reference. So generation-time negative selection exists and is the default
+    # on v6.9; what is missing is the ability to CHOOSE the panel (see
+    # ligandai.contrastive and client.campaigns).
+    #
+    # The two mechanisms answer different questions and both are wanted:
+    # contrastive guidance shapes what gets generated, fold_compare /
+    # client.campaigns.fold_panel MEASURE what was generated. Guidance is never
+    # evidence of selectivity — folding against the panel is.
 
     def fold_compare(
         self,
@@ -6286,7 +6410,15 @@ class Peptides(Resource):
         elite = self.get_elite(session_id=session_id)
 
         def _ipsae(p: Peptide) -> float:
-            v = getattr(p, "ipsae", None)
+            # ⛔ peptide_ipsae is THE binder metric — the peptide<->receptor
+            # interface only. Whole-complex `ipsae` is inflated by the receptor's
+            # confidence in itself on any multimeric target, so ranking on it
+            # sends the wrong candidates into the selectivity comparison. Fall
+            # back to `ipsae` ONLY when the binder metric was never computed, and
+            # sort a never-computed row last rather than treating it as a zero.
+            v = getattr(p, "peptide_ipsae", None)
+            if not isinstance(v, (int, float)):
+                v = getattr(p, "ipsae", None)
             return float(v) if isinstance(v, (int, float)) else -1.0
 
         ranked = sorted(
@@ -6831,6 +6963,10 @@ class AsyncPeptides(AsyncResource):
         cascade_gate_metric: str = "ipsae",
         cascade_gate_threshold: float | None = 0.67,
         cascade_gate_top_n: int | None = None,
+        # ── Contrastive guidance + avoidance (bd-dre-if562) ─────────────────
+        contrastive: "ContrastiveGuidance | None" = None,
+        avoidance: "AvoidancePolicy | None" = None,
+        allow_unforwarded_contrastive: bool = False,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
@@ -6908,6 +7044,14 @@ class AsyncPeptides(AsyncResource):
             "cysteine_enabled": cysteine_enabled,
         })
         effective_segment_config = _resolve_segment_config(segments, segment_config)
+        # An AvoidancePolicy is a convenience wrapper over the two avoidance
+        # kwargs plus the off-target/hard-negative bookkeeping the campaign loop
+        # needs. Explicit kwargs WIN — a caller who passed both meant the
+        # explicit one, and silently preferring the policy would be the kind of
+        # invisible override this SDK refuses to ship.
+        avoid_residues, avoid_shell_angstrom = _merge_avoidance(
+            avoidance, avoid_residues, avoid_shell_angstrom
+        )
         body = _generation_body(
             gene=gene,
             num_peptides=num_peptides,
@@ -6979,6 +7123,8 @@ class AsyncPeptides(AsyncResource):
             cascade_gate_metric=cascade_gate_metric,
             cascade_gate_threshold=cascade_gate_threshold,
             cascade_gate_top_n=cascade_gate_top_n,
+            contrastive=contrastive,
+            allow_unforwarded_contrastive=allow_unforwarded_contrastive,
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -8315,7 +8461,15 @@ class AsyncPeptides(AsyncResource):
         elite = await self.get_elite(session_id=session_id)
 
         def _ipsae(p: Peptide) -> float:
-            v = getattr(p, "ipsae", None)
+            # ⛔ peptide_ipsae is THE binder metric — the peptide<->receptor
+            # interface only. Whole-complex `ipsae` is inflated by the receptor's
+            # confidence in itself on any multimeric target, so ranking on it
+            # sends the wrong candidates into the selectivity comparison. Fall
+            # back to `ipsae` ONLY when the binder metric was never computed, and
+            # sort a never-computed row last rather than treating it as a zero.
+            v = getattr(p, "peptide_ipsae", None)
+            if not isinstance(v, (int, float)):
+                v = getattr(p, "ipsae", None)
             return float(v) if isinstance(v, (int, float)) else -1.0
 
         ranked = sorted(
