@@ -119,6 +119,30 @@ def _aggregate(values: Sequence[float], statistic: LegStatistic) -> float:
     )
 
 
+def _pocket_features_unreachable(gene: str) -> LigandAIParameterNotForwarded:
+    """The one error for "the featurizer did not answer with a pocket".
+
+    Covers a 404 AND a 200 that carries no features, because an unmounted API
+    path on a single-page-app server commonly returns the app shell rather than
+    a 404 — the two are indistinguishable to a client and have the same fix.
+    """
+    return LigandAIParameterNotForwarded(
+        f"pocket features for {gene!r} are not reachable from this API surface. "
+        f"The featurizer endpoint exists and is what the generation path calls "
+        f"internally, but it is not mounted on the public API, so a client cannot "
+        f"build its own contrastive reference panel yet.\n"
+        f"\n"
+        f"What works today: run a v6.9-line model and let the platform derive its "
+        f"own real paralog references — it refuses the run rather than generating "
+        f"against a fabricated one. What does not work: choosing the panel, or "
+        f"reading back which paralogs were used.",
+        parameter="pocket_features",
+        reached="internal featurizer service",
+        dropped_at="public API surface (endpoint not mounted)",
+        tracking="bd-dre-eadc7",
+    )
+
+
 def _norm_seq(seq: str) -> str:
     s = str(seq).strip().upper()
     if not s or not s.isalpha():
@@ -650,27 +674,22 @@ class Campaigns(Resource):
                 "GET", _POCKET_FEATURES_PATH.format(gene=gene), params=params or None
             ) or {}
         except LigandAINotFoundError as exc:
-            raise LigandAIParameterNotForwarded(
-                f"pocket features for {gene!r} are not reachable from this API surface. "
-                f"The featurizer endpoint exists and is what the generation path calls "
-                f"internally, but it is not mounted on the public API, so a client "
-                f"cannot build its own contrastive reference panel yet.\n"
-                f"\n"
-                f"What works today: run a v6.9-line model and let the platform derive "
-                f"its own real paralog references — it refuses the run rather than "
-                f"generating against a fabricated one. What does not work: choosing "
-                f"the panel, or reading back which paralogs were used.",
-                parameter="pocket_features",
-                reached="internal featurizer service",
-                dropped_at="public API surface (endpoint not mounted)",
-                tracking="bd-dre-if562",
-            ) from exc
+            raise _pocket_features_unreachable(gene) from exc
 
-        feats = payload.get("features")
+        # ⛔ An UNMOUNTED route does not reliably 404. A single-page-app server
+        # commonly answers an unknown /api path with 200 and the app shell, so
+        # "no features in the response" is the same observation as "the endpoint
+        # is not there" and must produce the same actionable error — not an
+        # opaque one about a missing key.
+        feats = (payload or {}).get("features") if isinstance(payload, dict) else None
         if not feats:
+            reason = ""
+            if isinstance(payload, dict):
+                reason = str(payload.get("error") or payload.get("pocket_source") or "")
+            if not isinstance(payload, dict) or not reason:
+                raise _pocket_features_unreachable(gene)
             raise LigandAIError(
-                f"no pocket features returned for {gene!r}: "
-                f"{payload.get('error') or payload.get('pocket_source') or 'unknown reason'}"
+                f"no pocket features returned for {gene!r}: {reason}"
             )
         matrix = PocketFeatureMatrix(
             rows=feats,
@@ -973,15 +992,10 @@ class AsyncCampaigns(AsyncResource):
                 "GET", _POCKET_FEATURES_PATH.format(gene=gene), params=params or None
             ) or {}
         except LigandAINotFoundError as exc:
-            raise LigandAIParameterNotForwarded(
-                f"pocket features for {gene!r} are not reachable from this API surface",
-                parameter="pocket_features",
-                dropped_at="public API surface (endpoint not mounted)",
-                tracking="bd-dre-if562",
-            ) from exc
-        feats = payload.get("features")
+            raise _pocket_features_unreachable(gene) from exc
+        feats = (payload or {}).get("features") if isinstance(payload, dict) else None
         if not feats:
-            raise LigandAIError(f"no pocket features returned for {gene!r}")
+            raise _pocket_features_unreachable(gene)
         matrix = PocketFeatureMatrix(
             rows=feats,
             gene=payload.get("gene") or gene,

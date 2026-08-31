@@ -502,3 +502,46 @@ def test_single_replicate_round_says_the_band_was_not_verified():
     )
     rnd = run.run_round(sequences=[A], replicates=1, confirm=False)
     assert any("band not verified" in n for n in rnd.notes)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# An unmounted route does not reliably 404
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _SpaShellTransport:
+    """A server that answers an unknown /api path with 200 and the app shell.
+
+    Indistinguishable from "the endpoint is not mounted" at the client, and the
+    fix is the same, so it must produce the same named error rather than an
+    opaque KeyError-shaped one.
+    """
+
+    def request(self, method, path, **kw):
+        return {"index": "<!doctype html>"}
+
+
+class _NotFoundTransport:
+    def request(self, method, path, **kw):
+        from ligandai.errors import LigandAINotFoundError
+
+        raise LigandAINotFoundError("not found")
+
+
+@pytest.mark.parametrize("transport", [_SpaShellTransport(), _NotFoundTransport()])
+def test_unmounted_pocket_features_route_gives_one_named_error(transport):
+    camp = Campaigns(transport=transport, client=_FakeClient())  # type: ignore[arg-type]
+    with pytest.raises(LigandAIParameterNotForwarded) as exc:
+        camp.pocket_features("ENPP1", dim=107)
+    assert exc.value.parameter == "pocket_features"
+    assert exc.value.tracking == "bd-dre-eadc7"
+
+
+def test_pocket_features_width_mismatch_is_refused_not_padded():
+    class _WrongWidth:
+        def request(self, method, path, **kw):
+            return {"gene": "ENPP1", "features": _rows(dim=48), "pdb_code": "1ABC"}
+
+    camp = Campaigns(transport=_WrongWidth(), client=_FakeClient())  # type: ignore[arg-type]
+    with pytest.raises(LigandAIValidationError, match="NOT convertible"):
+        camp.pocket_features("ENPP1", dim=107)
