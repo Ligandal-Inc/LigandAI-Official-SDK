@@ -2150,6 +2150,9 @@ def _build_batch_fold_body(
     use_potentials: bool | None = None,
     msa_source_gene: str | None = None,
     gene_range: tuple[int, int] | None = None,
+    # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed; omitted from the body when None
+    # so an unseeded submission is byte-identical to what it was before.
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """Construct the POST /api/v1/folding/predict-batch JSON body.
 
@@ -2201,6 +2204,12 @@ def _build_batch_fold_body(
         body["receptor_name"] = receptor_name
     if recycling_steps is not None:
         body["recycling_steps"] = int(recycling_steps)
+    # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed. Server accepts
+    # z.number().int().min(0).max(4294967295).optional(); the worker appends
+    # `--seed N` to the boltz argv (and to its retry, so a retried fold is not
+    # silently unseeded while the receipt still names a seed).
+    if seed is not None:
+        body["seed"] = int(seed)
     if step_scale is not None:
         body["step_scale"] = float(step_scale)
     if msa_enabled is not None:
@@ -2246,7 +2255,15 @@ def _build_batch_fold_body(
 
 # Partner entity ``type`` values accepted by the grouped API. A "peptide"
 # defaults to NO MSA; a "protein" partner defaults to MSA ON (like a target).
-_PARTNER_TYPES: frozenset[str] = frozenset({"peptide", "protein"})
+# [bd-LIGANDAI_ALPHA_V2-pybsy] 'ligand' | 'dna' | 'rna' were absent here, so a
+# cofactor could not be expressed on the batch surface at all — while
+# modal_workers/boltz2_batch.py has materialised all three since it was written.
+# For a ligand, `sequence` carries the CCD code (ZN, MG, CA, MN, FE2, HEM, ...).
+_PARTNER_TYPES: frozenset[str] = frozenset({"peptide", "protein", "ligand", "dna", "rna"})
+# Entity types that are not polypeptides: never MSA'd, never flagged isPeptide,
+# and emitted with their own Boltz-2 entity type rather than as "protein".
+_NON_PROTEIN_PARTNER_TYPES: frozenset[str] = frozenset({"ligand", "dna", "rna"})
+_CCD_RE = __import__("re").compile(r"^[A-Za-z0-9]{1,5}$")
 
 
 def _normalize_group_target(target: Any, *, group_index: int) -> dict[str, Any]:
@@ -2315,6 +2332,38 @@ def _normalize_group_partner(partner: Any, *, group_index: int, partner_index: i
             f"groups[{group_index}]['partners'][{partner_index}]['type'] must be one "
             f"of {sorted(_PARTNER_TYPES)}, got {ptype!r}"
         )
+    # NON-PROTEIN entities short-circuit: a ligand/dna/rna is emitted with its own
+    # entity type. Forcing type="protein" here (as this function did for every
+    # partner) folded a zinc ion as a one-residue PROTEIN chain — a plausible
+    # structure for the wrong complex, which is worse than a rejection.
+    if ptype in _NON_PROTEIN_PARTNER_TYPES:
+        seq_clean = seq.strip().upper() if ptype == "ligand" else seq.strip()
+        if ptype == "ligand" and not _CCD_RE.match(seq_clean):
+            raise ValueError(
+                f"groups[{group_index}]['partners'][{partner_index}] is type 'ligand' "
+                f"so 'sequence' must be a CCD code (1-5 alphanumeric chars, e.g. 'ZN', "
+                f"'MG', 'HEM'), got {seq_clean[:20]!r}"
+            )
+        copies = partner.get("copies", 1)
+        try:
+            copies = int(copies)
+        except (TypeError, ValueError):
+            copies = -1
+        if copies < 1 or copies > 12:
+            raise ValueError(
+                f"groups[{group_index}]['partners'][{partner_index}]['copies'] must be "
+                f"an integer in 1..12, got {partner.get('copies')!r}"
+            )
+        ent: dict[str, Any] = {
+            "type": ptype,
+            "sequence": seq_clean,
+            "use_msa": False,
+            "copies": copies,
+        }
+        if partner.get("name"):
+            ent["name"] = str(partner["name"])
+        return ent
+
     is_peptide = ptype == "peptide"
     explicit_msa = partner.get("use_msa")
     # Default: peptide → no MSA, protein → MSA. Explicit value overrides.
@@ -2361,10 +2410,15 @@ def _normalize_fold_groups(groups: Any) -> list[dict[str, Any]]:
             )
         target = {**target, "chainId": "A"}
         partners: list[dict[str, Any]] = []
+        _next_chain_idx = 1  # 0 == "A" == the target
         for pi, partner in enumerate(raw_partners):
             ent = _normalize_group_partner(partner, group_index=gi, partner_index=pi)
             # Chain B, C, D, ... for partners.
-            ent = {**ent, "chainId": chr(ord("B") + pi)}
+            # [bd-LIGANDAI_ALPHA_V2-pybsy] Advance by COPIES, not by partner index.
+            # A cofactor with copies=2 occupies two chains; indexing by `pi` gave
+            # the next partner the same chain id as the second copy.
+            ent = {**ent, "chainId": chr(ord("A") + _next_chain_idx)}
+            _next_chain_idx += max(1, int(ent.get("copies", 1) or 1))
             partners.append(ent)
         normalized.append({"target": target, "partners": partners})
     return normalized
@@ -2385,6 +2439,8 @@ def _build_grouped_batch_fold_body(
     num_trajectories: int | None = None,
     msa_depth: int | None = None,
     use_potentials: bool | None = None,
+    # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed (grouped form).
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """Construct the grouped POST /api/v1/folding/predict-batch JSON body.
 
@@ -2399,6 +2455,12 @@ def _build_grouped_batch_fold_body(
     }
     if recycling_steps is not None:
         body["recycling_steps"] = int(recycling_steps)
+    # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed. Server accepts
+    # z.number().int().min(0).max(4294967295).optional(); the worker appends
+    # `--seed N` to the boltz argv (and to its retry, so a retried fold is not
+    # silently unseeded while the receipt still names a seed).
+    if seed is not None:
+        body["seed"] = int(seed)
     if step_scale is not None:
         body["step_scale"] = float(step_scale)
     if glycosylation is not None:
@@ -4860,6 +4922,12 @@ class Peptides(Resource):
         num_trajectories: int | None = None,
         msa_depth: int | None = None,
         use_potentials: bool | None = True,
+        # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed. `boltz predict --seed N` is a
+        # GLOBAL CLI option: one invocation per seed, never a per-row field. Omit for
+        # the previous (unseeded) behaviour. To replicate, submit the SAME batch once
+        # per seed and treat each seed's median over its diffusion samples as ONE
+        # observation — never pool samples across seeds as independent replicates.
+        seed: int | None = None,
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
         # ─── hardening kwargs ────────────────────
         # gpu: only "b200_plus" is accepted by the SDK; anything else raises
@@ -5036,6 +5104,7 @@ class Peptides(Resource):
                 num_trajectories=num_trajectories,
                 msa_depth=msa_depth,
                 use_potentials=use_potentials,
+                seed=seed,
                 on_credit_exhausted=on_credit_exhausted,
                 gpu=gpu,
                 force_resubmit=force_resubmit,
@@ -5160,6 +5229,7 @@ class Peptides(Resource):
             use_potentials=use_potentials,
             msa_source_gene=_effective_msa_gene,
             gene_range=gene_range,
+            seed=seed,
         )
 
         # 4) Record submission BEFORE the POST. If the POST fails we'll mark
@@ -5403,6 +5473,8 @@ class Peptides(Resource):
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None,
         gpu: str | None,
         force_resubmit: bool,
+    # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed (grouped form).
+    seed: int | None = None,
     ) -> BatchFoldJob:
         """Grouped fold_batch submission (one fold job per group).
 
@@ -5446,6 +5518,7 @@ class Peptides(Resource):
             num_trajectories=num_trajectories,
             msa_depth=msa_depth,
             use_potentials=use_potentials,
+            seed=seed,
         )
         normalized_groups = body["groups"]
         group_count = len(normalized_groups)
@@ -7573,6 +7646,12 @@ class AsyncPeptides(AsyncResource):
         num_trajectories: int | None = None,
         msa_depth: int | None = None,
         use_potentials: bool | None = True,
+        # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed. `boltz predict --seed N` is a
+        # GLOBAL CLI option: one invocation per seed, never a per-row field. Omit for
+        # the previous (unseeded) behaviour. To replicate, submit the SAME batch once
+        # per seed and treat each seed's median over its diffusion samples as ONE
+        # observation — never pool samples across seeds as independent replicates.
+        seed: int | None = None,
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None = None,
         # ─── hardening kwargs ────────────────────
         gpu: str | None = None,
@@ -7610,6 +7689,7 @@ class AsyncPeptides(AsyncResource):
                 num_trajectories=num_trajectories,
                 msa_depth=msa_depth,
                 use_potentials=use_potentials,
+                seed=seed,
                 on_credit_exhausted=on_credit_exhausted,
                 gpu=gpu,
                 force_resubmit=force_resubmit,
@@ -7718,6 +7798,7 @@ class AsyncPeptides(AsyncResource):
             use_potentials=use_potentials,
             msa_source_gene=_effective_msa_gene,
             gene_range=gene_range,
+            seed=seed,
         )
 
         record_submission(
@@ -7810,6 +7891,8 @@ class AsyncPeptides(AsyncResource):
         on_credit_exhausted: Callable[[LigandAICreditError, dict[str, Any]], bool] | None,
         gpu: str | None,
         force_resubmit: bool,
+    # [bd-LIGANDAI_ALPHA_V2-pybsy] Boltz-2 --seed (grouped form).
+    seed: int | None = None,
     ) -> AsyncBatchFoldJob:
         """Async grouped fold_batch submission. See :meth:`Peptides._fold_batch_grouped`."""
         from ligandai._hardening import (
@@ -7844,6 +7927,7 @@ class AsyncPeptides(AsyncResource):
             num_trajectories=num_trajectories,
             msa_depth=msa_depth,
             use_potentials=use_potentials,
+            seed=seed,
         )
         normalized_groups = body["groups"]
         group_count = len(normalized_groups)

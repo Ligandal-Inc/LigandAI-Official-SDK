@@ -21,21 +21,27 @@ setting reproduces a DIFFERENT experiment and reports success.
 
 ⛔ WHAT THE SDK DOES NOT REACH, AND WHAT TO DO INSTEAD
 ------------------------------------------------------
-  1. EXPLICIT FOLD SEEDS. The internal run used named seeds (one `boltz
-     predict --seed <n>` invocation per seed, >= 3 independent seeds, unit of
-     analysis = median of the 4 diffusion samples WITHIN a seed). There is no
-     seed argument anywhere on the platform's Boltz-2 fold path. Submit the
-     same batch N times instead: the draws are independent but NOT
-     reproducible, and the returned fold job ids are the only handle on a
-     specific draw. `campaigns.fold_panel(replicates=N)` does exactly this and
-     bypasses the 24h dedupe so replicate 2 is a real second measurement.
+  1. (RESOLVED — bd-LIGANDAI_ALPHA_V2-pybsy) EXPLICIT FOLD SEEDS now exist:
+     `fold_batch(..., seed=N)`. `boltz predict --seed N` is a GLOBAL CLI option,
+     so one invocation per seed — submit the same batch once per seed and treat
+     each seed's median over its 4 diffusion samples as ONE observation. Never
+     pool samples across seeds as independent replicates. The seed also rides
+     the worker's retry path, so a retried fold is not silently unseeded while
+     its receipt still names a seed.
 
-  2. COFACTOR ENTITIES (2x Zn) reach Boltz-2 only through the single-complex
-     `peptides.fold()` surface, as explicit entity dicts carrying the CCD code
-     in `sequence`. The BATCH surface is polymer-only — its request schema has
-     no entity field and silently strips one. Step 3B below is the working
-     2x Zn form. This matters here: removing the Zn drops ipSAE by ~0.38 on
-     this target, so an apo batch fold is NOT the same measurement.
+  2. (RESOLVED — bd-LIGANDAI_ALPHA_V2-pybsy) COFACTOR ENTITIES now reach the
+     BATCH surface through the grouped form:
+         groups=[{"target": {"gene": "ENPP3"},
+                  "partners": [{"sequence": pep, "type": "peptide"},
+                               {"sequence": "ZN", "type": "ligand", "copies": 2}]}]
+     `sequence` carries the CCD code for a ligand. The worker has materialised
+     ligand/dna/rna entities since it was written; what was missing was the type
+     in the SDK normaliser and the server's zod enum, so a cofactor was silently
+     dropped — folding a zinc ion as a one-residue PROTEIN chain, a plausible
+     structure for the wrong complex. Chain ids now advance by `copies`, so a
+     binuclear site occupies two chains without colliding with the next partner.
+     This matters here: removing the Zn drops ipSAE by ~0.38 on this target, so
+     an apo fold is NOT the same measurement.
 
   3. AN EXPLICIT DISULFIDE BOND CONSTRAINT. The internal YAML carried
      `bond: [B,1,SG]-[B,L,SG]` and it is load-bearing (median SG-SG 1.79 A with
@@ -122,14 +128,58 @@ if RECEPTOR_SEQ:
 POCKET = [int(r) for r in os.environ.get("ENPP3_POCKET", "").split(",") if r.strip()]
 target_residues = ResidueRange.from_residues(POCKET, chain="A") or None
 
+# ── OFF-TARGET (paralog-contrastive) GUIDANCE ────────────────────────────────
+# Selectivity is cheapest to buy at GENERATION time. `contrastive_references`
+# builds real paralog-mean references for the named off-targets and the sampler
+# steers away from them; the alternative is generating blind and discovering the
+# cross-reactivity later in a 5-receptor fold panel, which costs ~960 folds.
+#
+# ⛔ These must be REAL references. The v6.9 line refuses a fabricated all-zero
+# reference, which is the guard that stops a silently-unsteered run reporting
+# itself as contrastive. Do not pass allow_unforwarded_contrastive=True to get
+# around a reference that failed to build — that flag suppresses exactly the
+# error you want to see.
+OFF_TARGET_GENES = ["ENPP1", "ENPP6"]
+contrastive_refs = client.campaigns.contrastive_references(
+    target="ENPP3",
+    paralogs=OFF_TARGET_GENES,
+    # ⛔ v6.9.21, NOT v6.9.22. The point release is load-bearing: v6.9.21 carries
+    # pocket_feature_dim=107, v6.9.22 carries 65, and v6.5.x carries 48. They are
+    # different feature spaces, not truncations of one another (48 is NOT a prefix
+    # of 107). Naming the wrong point release reproduces a different generator and
+    # reports success. This campaign's 2,719 designs are v6.9.21 paralog-contrastive
+    # with cfg_reference="paralog_mean" and real nonzero paralog references.
+    model="v6.9.21",
+)
+print(f"contrastive references built for {OFF_TARGET_GENES}")
+
+# ⛔ The references BUILD, but do not yet REACH the generator through the public
+# endpoint: /api/ptf/parallel/generate forwards a fixed key list that omits
+# reference_pocket_features, while the FastAPI request model and the Modal
+# generation path both accept it. Passing `contrastive=` therefore raises
+# LigandAIParameterNotForwarded rather than running unsteered and reporting
+# success. Tracked as bd-LIGANDAI_ALPHA_V2-cjtxi; when it lands, add
+#     contrastive=contrastive_refs,
+# to `common` below. Until then a v6.9-line run is still paralog-contrastive on
+# references the platform derives itself — you do not choose the panel.
+# Do NOT reach for allow_unforwarded_contrastive=True to make the line above
+# work: that flag suppresses the one error that tells you the panel was ignored.
+
 common = dict(
     gene="ENPP3",
     user_pdb_id=user_pdb_id,
     target_residues=target_residues,
     pocket_expansion_radius_a=6.0,   # the packing shell, not just the named residues
-    # v6.9 line = paralog-contrastive by construction: the platform derives real
-    # off-target references and refuses to run against a fabricated all-zero one.
-    model="v6.9.22",
+    # v6.9 line = paralog-contrastive by construction. Passing the references
+    # EXPLICITLY names which paralogs were steered against, so the run records
+    # its own selectivity intent instead of relying on server-side defaults.
+    # ⛔ v6.9.21, NOT v6.9.22. The point release is load-bearing: v6.9.21 carries
+    # pocket_feature_dim=107, v6.9.22 carries 65, and v6.5.x carries 48. They are
+    # different feature spaces, not truncations of one another (48 is NOT a prefix
+    # of 107). Naming the wrong point release reproduces a different generator and
+    # reports success. This campaign's 2,719 designs are v6.9.21 paralog-contrastive
+    # with cfg_reference="paralog_mean" and real nonzero paralog references.
+    model="v6.9.21",
     quality_guided=True,
     quality_guidance_scale=1.0,
     # ⛔ cellfree MUST be on for a terminal-Cys run. The cysteine policy rides
@@ -189,37 +239,67 @@ print(f"  linear run: {linear.view_url}")
 designs = [p.sequence for p in (*cyclic.peptides, *linear.peptides)]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3A. FOLD — batch, production Boltz-2 settings (apo: NO cofactor entities)
+# 3A. FOLD — batch, HOLO (both catalytic Zn), at named seeds
 # ─────────────────────────────────────────────────────────────────────────────
 # 4 diffusion samples, 3 recycling steps — the production pair.
 # ⛔ The 4 samples are CONFIDENCE-RANKED, not exchangeable (mean ipSAE by sample
-# index runs 0.62 / 0.51 / 0.37 / 0.22). Summarise a fold by the MEDIAN of its
-# samples and treat that as ONE observation; never pool samples across designs
-# as if they were independent replicates.
+# index runs 0.62 / 0.51 / 0.37 / 0.22; model_0 is the max in 74% of stems).
+# Summarise a fold by the MEDIAN of its 4 samples and treat that as ONE
+# observation. The median is a fixed quantile, NOT a noise-averaged estimate —
+# its spread is not sd/sqrt(4). Never pool samples across designs as replicates.
+#
+# ENPP3's site is binuclear zinc and the campaign folded HOLO throughout:
+# removing the ions costs ~0.38 ipSAE, so an apo fold is a different experiment.
+# The grouped form below carries the ions as ligand entities; `sequence` holds
+# the CCD code and `copies` gives the second site its own chain.
 FOLD = dict(
     diffusion_samples=4,
     recycling_steps=3,
     sampling_steps=50,
-    msa_enabled=True,       # honoured on this (batch) surface
     use_potentials=True,
     n_parallel_gpus=16,
 )
-receptor_arg = (
-    dict(receptor_pdb=CONSTRUCT_PDB, receptor_name="ENPP3_6C02_355aa")
-    if CONSTRUCT_PDB else dict(target_gene="ENPP3")
-)
 
-batch = client.peptides.fold_batch(peptides=designs, **receptor_arg, **FOLD)
-print(f"fold batch {batch.batch_id}: {batch.peptide_count} designs x "
-      f"{batch.trajectories_per_peptide} trajectories = "
-      f"{batch.total_cost_credits} credits")
-folds = batch.wait(timeout=14400)
+# ⛔ SEEDS. `boltz predict --seed N` is a GLOBAL CLI option, so one submission
+# per seed — never a per-row field. The unit of analysis is (design, seed), and
+# a design is only reproducible if it holds across independent seeds. The
+# campaign's promotion rule: median over units >= 0.67 AND >= 2/3 of units
+# clearing, across >= 2 seeds. A single fold ranks nothing.
+SEEDS = [11223, 44556, 78901]
 
-fold_job_ids = [
-    str(j.get("job_id") or j.get("jobId"))
-    for j in batch.jobs
-    if (j.get("job_id") or j.get("jobId"))
-]
+def _group(pep: str) -> dict:
+    return {
+        "target": (
+            {"pdb": CONSTRUCT_PDB, "name": "ENPP3_6C02_355aa"}
+            if CONSTRUCT_PDB else {"gene": "ENPP3"}
+        ),
+        "partners": [
+            # chain B — the de novo binder. use_msa is forced False for a peptide:
+            # MSA-ing an orphan de novo sequence is wasted work and the worker's
+            # MSA_GUARD skips it anyway.
+            {"sequence": pep, "type": "peptide"},
+            # chains C+D — the two catalytic Zn(II). Declared AFTER both protein
+            # chains: the interface scorer keys on the peptide chain id.
+            {"sequence": "ZN", "type": "ligand", "copies": 2},
+        ],
+    }
+
+fold_job_ids: list[str] = []
+folds_by_seed = {}
+for seed in SEEDS:
+    batch = client.peptides.fold_batch(
+        groups=[_group(p) for p in designs],
+        seed=seed,
+        **FOLD,
+    )
+    print(f"seed {seed}: batch {batch.batch_id}, {batch.total_cost_credits} credits")
+    folds_by_seed[seed] = batch.wait(timeout=14400)
+    fold_job_ids += [
+        str(j.get("job_id") or j.get("jobId"))
+        for j in batch.jobs
+        if (j.get("job_id") or j.get("jobId"))
+    ]
+folds = folds_by_seed[SEEDS[0]]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3B. FOLD — holo, with the 2x Zn cofactors as explicit ligand entities
@@ -228,9 +308,10 @@ fold_job_ids = [
 # SO4, HEM, ...). Declare the ions LAST, after both protein chains — the
 # peptide chain id is what the interface scorer keys on.
 #
-# ⛔ ONE COMPLEX PER CALL. There is no batch form that accepts entities, which
-#    is why the sweep above is the batch surface and this is the confirmatory
-#    re-fold of a shortlist.
+# ⛔ This is the SINGLE-COMPLEX form. Since bd-LIGANDAI_ALPHA_V2-pybsy the batch
+#    grouped form also accepts entities (step 3A above uses it), so prefer the
+#    batch surface for a sweep and keep this for a one-off or for options the
+#    grouped form does not expose.
 # ⛔ MSA is PER CHAIN here: the receptor gets one by default, and the de novo
 #    peptide must carry `use_msa: False`. Top-level `msa_enabled=` is not read
 #    on this route.
