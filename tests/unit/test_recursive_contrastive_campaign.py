@@ -545,3 +545,22 @@ def test_pocket_features_width_mismatch_is_refused_not_padded():
     camp = Campaigns(transport=_WrongWidth(), client=_FakeClient())  # type: ignore[arg-type]
     with pytest.raises(LigandAIValidationError, match="NOT convertible"):
         camp.pocket_features("ENPP1", dim=107)
+
+
+# ─── pocket-feature width per model (bd-LIGANDAI_ALPHA_V2-akqqj) ─────────────
+#
+# 48 / 65 / 107 are three DIFFERENT vectors and nothing converts between them.
+# v6.9.21 and v6.9.22 are both "v6.9 line" and take DIFFERENT widths — mapping
+# both to 107 would width-check a correct 65-wide v6.9.22 panel as wrong.
+# Authority: fastapi_backend/services/paralog_reference_service.py:29.
+def test_pocket_feature_width_is_per_model_not_per_line():
+    from ligandai.contrastive import model_pocket_feature_dim
+
+    assert model_pocket_feature_dim("v6.5") == 48
+    assert model_pocket_feature_dim("v6.5.21") == 48
+    assert model_pocket_feature_dim("v6.5.22") == 48
+    assert model_pocket_feature_dim("v6.9.21") == 107
+    assert model_pocket_feature_dim("v6.9.22") == 65
+    # An id this build has never heard of must answer "ask the server", never
+    # a guessed width.
+    assert model_pocket_feature_dim("v7.0.0") is None

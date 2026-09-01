@@ -48,13 +48,25 @@ __all__ = [
     "AvoidancePolicy",
     "PocketFeatureMatrix",
     "V6_9_POCKET_FEATURE_DIM",
+    "V6_9_22_POCKET_FEATURE_DIM",
     "V6_5_POCKET_FEATURE_DIM",
 ]
 
 
-#: Pocket-feature width declared by the v6.9 generator line (v6.9.21 / v6.9.22).
-#: 57 geometric + 50 all-atom columns.
+#: Pocket-feature width declared by v6.9.21: 57 geometric + 50 all-atom columns.
+#:
+#: ⛔ THIS IS NOT THE WHOLE v6.9 LINE. v6.9.21 and v6.9.22 consume DIFFERENT
+#: widths, and this constant used to be applied to both — which would have
+#: width-checked a v6.9.22 panel against 107 and rejected the correct 65-wide
+#: matrices (or, worse, accepted 107-wide ones the model cannot read).
+#: 48 / 65 / 107 are three different vectors; nothing converts between them.
+#: Authority: fastapi_backend/services/paralog_reference_service.py:29 —
+#: "v6.9.21 consumes 107 dims (geom57 + allatom50); v6.9.22 consumes 65 dims".
 V6_9_POCKET_FEATURE_DIM = 107
+
+#: Pocket-feature width declared by v6.9.22 — the 65-dim SE(3)-invariant
+#: receptor featurizer (fastapi_backend/core/rec_feat65_serving.py).
+V6_9_22_POCKET_FEATURE_DIM = 65
 
 #: Pocket-feature width declared by the v6.5 generator line.
 V6_5_POCKET_FEATURE_DIM = 48
@@ -83,7 +95,7 @@ _MODEL_POCKET_DIM: dict[str, int] = {
     "v6.5.21": V6_5_POCKET_FEATURE_DIM,
     "v6.5.22": V6_5_POCKET_FEATURE_DIM,
     "v6.9.21": V6_9_POCKET_FEATURE_DIM,
-    "v6.9.22": V6_9_POCKET_FEATURE_DIM,
+    "v6.9.22": V6_9_22_POCKET_FEATURE_DIM,
 }
 
 
