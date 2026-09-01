@@ -328,6 +328,50 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "remediation": "The co-validation engine ran under conditions that are not provenance-checked: its per-fold artifacts are not retained, so the alignment depth it actually used cannot be confirmed for this fold. Treat the agreement as provisional until the realized MSA depth is recorded alongside the result.",
         "doc_anchor": "guides/ensemble-folding#why",
     },
+    # ─── selectivity panel (mirrored from shared/warnings.json) ──────────────
+    #
+    # Added platform-side 2026-08-31 by the shared selectivity-verdict evaluator
+    # (bd-LIGANDAI_ALPHA_V2-6ef28.1) and never mirrored here, so every one of
+    # them was dropped on the floor by an SDK caller running a selectivity
+    # panel. These are precisely the codes that say a selectivity verdict is
+    # INDETERMINATE rather than negative — "we could not measure this panel
+    # member" is not "this design is not selective" — so losing them turns an
+    # unmeasured panel into a silent clean bill of health.
+    "selectivity_on_target_unmeasured": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "On-target fold could not be evaluated",
+        "remediation": "The on-target fold has no usable result, so no selectivity verdict can be produced against its off-target panel. Re-run the on-target fold before drawing a selectivity conclusion.",
+        "doc_anchor": "guides/ensemble-folding#why",
+    },
+    "selectivity_panel_member_absent": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Off-target panel member has no fold result",
+        "remediation": "This panel member's fold failed, was skipped, or never ran, so its selectivity relative to the on-target could not be measured. It is reported as indeterminate, never as evidence the design is selective.",
+        "doc_anchor": "guides/ensemble-folding#why",
+    },
+    "selectivity_metric_missing": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "A required selectivity metric was never computed",
+        "remediation": "One or more of the mutual ipSAE/ipTM gate metrics is missing for this fold, so it is excluded from the selectivity call rather than treated as non-binding.",
+        "doc_anchor": "guides/ensemble-folding#why",
+    },
+    "selectivity_frame_mismatch": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Panel member folded in a different construct frame than the on-target",
+        "remediation": "iPSAE is normalised by chain length, so a with_linker fold and a binder_only fold are not comparable. Re-fold the on-target and this panel member in the same construct frame before comparing them.",
+        "doc_anchor": "guides/conjugate-design#frames",
+    },
+    "selectivity_metric_not_length_comparable": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Cross-receptor selectivity delta is not length-comparable",
+        "remediation": "A selectivity panel folds the same binder against different-length receptors. ipSAE (ipsae_d0res) is normalised by chain length, so an absolute-threshold call and a genuine cross-receptor delta are different claims; the length-comparable value (ipsae_d0ref) is not yet available for this fold. Treat any comparison across panel members on the raw ipSAE value with caution until it is.",
+        "doc_anchor": "guides/conjugate-design#frames",
+    },
 }
 
 
