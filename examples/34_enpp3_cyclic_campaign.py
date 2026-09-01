@@ -67,9 +67,10 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from pathlib import Path
 
-from ligandai import LigandAI, ResidueRange
+from ligandai import LigandAI, LigandAIDiagnosticWarning, ResidueRange
 
 OUT = Path(os.environ.get("ENPP3_OUT", "./enpp3_campaign"))
 OUT.mkdir(parents=True, exist_ok=True)
@@ -343,6 +344,26 @@ print(f"selectivity band={band:.3f}; resolvable={len(rows)}, partial={len(partia
     json.dumps({"band": band, "rows": panel.to_rows(), "summary": summary},
                indent=2, default=str)
 )
+
+# ⛔ SURFACE THE SELECTIVITY DIAGNOSTICS. The platform emits five codes that say
+# a leg was NOT MEASURED rather than measured-and-negative:
+#   selectivity_on_target_unmeasured        the on-target fold is unusable
+#   selectivity_panel_member_absent         a comparator has no fold result
+#   selectivity_metric_missing              a gate metric was never computed
+#   selectivity_frame_mismatch              legs folded in different construct frames
+#   selectivity_metric_not_length_comparable  ipSAE is chain-length normalised, so a
+#                                             cross-receptor delta on the raw value
+#                                             is not a like-for-like comparison
+# An unmeasured panel is NOT a clean bill of health. Collect them explicitly:
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", LigandAIDiagnosticWarning)
+    panel_again = client.campaigns.fold_panel(
+        shortlist, target="ENPP3", off_targets=["ENPP1", "ENPP6"],
+        replicates=2, diffusion_samples=4, recycling_steps=3, wait=True,
+    )
+for w in caught:
+    if issubclass(w.category, LigandAIDiagnosticWarning):
+        print(f"  DIAGNOSTIC: {w.message}")
 
 # (b) Comparators that are NOT gene symbols — an unnamed family member, an
 #     isoform pulled from a provided structure, or your own construct. The
