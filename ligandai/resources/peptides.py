@@ -2002,8 +2002,12 @@ def _cofold_normalize_engines(engines: list[str] | tuple[str, ...]) -> list[str]
         if el not in seen:
             seen.add(el)
             out.append(el)
-    if len(out) > 5:
-        raise ValueError("at most 5 engines per ensemble")
+    if len(out) > 6:
+        # The server accepts SIX (fastapi_backend/routers/cofold.py MAX_ENGINES = 6)
+        # and prices a 6-engine bundle at a 25% discount, but this guard said 5 —
+        # so the SDK could not submit the largest ensemble the platform sells, and
+        # the error string one line above already said "1-6". [bd-dre-3jqok]
+        raise ValueError("at most 6 engines per ensemble")
     return out
 
 

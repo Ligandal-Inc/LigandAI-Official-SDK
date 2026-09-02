@@ -72,3 +72,197 @@ print(score.peptides[0].ligandiq, score.peptides[0].deltaforge_dg)
 caps = {"free": 1, "basic": 4, "academia": 16, "pro": 25, "enterprise": 50}
 fold_gpus = caps.get(client.tier, 1)
 ```
+
+---
+
+## E. Ensemble co-fold — N peptides x M engines, and a consensus
+
+`client.peptides.cofold(...)` folds ONE complex on several engines.
+`client.ensemble` is the campaign-scale layer: many candidates, many engines,
+a cost projection before anything runs, a spend ceiling, and a **consensus**
+instead of M separate leaderboards.
+
+### Why you would use it
+
+A single folding engine gives you one opinion. If you are about to pay to
+synthesise 10 of 25 designs, the question that matters is not "what is the
+ranking" but **"how much of my shortlist survives changing the engine"**. A
+candidate every engine puts above the bar is a different proposition from one
+only the default engine likes.
+
+### Cost first — it never runs before you have seen the number
+
+```python
+from ligandai import LigandAI
+client = LigandAI(api_key="...")
+
+est = client.ensemble.estimate(
+    engines=["boltz2", "esmfold2", "protenix"],
+    n_peptides=25,
+)
+print(est)
+# ensemble co-fold: 25 complexes x 3 engines = 75 folds
+#   projected 14,175 credits (~$141.75), 10% bundle discount
+#     boltz2      5 traj x 25 = 6250 cr
+#     esmfold2    5 traj x 25 = 2125 cr
+#     protenix    3 traj x 25 = 4800 cr
+```
+
+The rates come from the platform's own pricing endpoint
+(`POST /api/v1/cofold/estimate`) — the SDK never re-derives them, so the
+estimate cannot drift from the invoice.
+
+### Run it, with a ceiling
+
+```python
+result = client.ensemble.run(
+    receptor=my_receptor_sequence,
+    peptides=my_candidate_sequences,       # 25 designs
+    engines=["boltz2", "esmfold2", "protenix"],
+    bar=0.67,                               # your shortlist threshold
+    max_credits=15_000,                     # hard ceiling; raises before submitting
+)
+
+print(result.consensus_histogram())
+# {0: 4, 1: 7, 2: 6, 3: 8}   <- 8 designs all three engines put above the bar
+
+for row in result.unanimous():
+    print(row.sequence, row.per_engine)
+
+for a in result.rank_agreement():
+    print(f"{a['a']} vs {a['b']}: rho={a['spearman']} (n={a['n']})")
+```
+
+`dry_run=True` returns the estimate and submits nothing. `max_credits` raises
+**before** the first fold if the projection exceeds it — nothing is charged.
+If you already hold a campaign `Budget`, pass `budget=` instead and the
+ceiling comes from `budget.max_credits`, so a campaign spec and an ensemble
+run share one number rather than two.
+
+### Cofactors are part of the interface
+
+Many targets have no meaningful binding interface without their cofactor — a
+catalytic metal, a heme, a bound nucleotide. Folding such a target without it
+is a confident measurement of a different molecule.
+
+Engines split in two: those that take structured **entities** and can carry a
+ligand, and those that take chains or a bare sequence and cannot. The API
+makes that split visible rather than averaging over it:
+
+```python
+client.ensemble.cofactor_support(["boltz2", "esmfold2", "protenix", "opendde"])
+# {'boltz2':   {'engine_can_carry': True,  'reachable_today': ..., 'reason': ...},
+#  'esmfold2': {'engine_can_carry': True,  ...},
+#  'protenix': {'engine_can_carry': True,  ...},
+#  'opendde':  {'engine_can_carry': False, 'reason': 'engine takes chains/sequences
+#               only — no ligand entity'}}
+```
+
+`engine_can_carry` is what the model can do. `reachable_today` is whether the
+hosted co-fold route can currently express it. They are reported separately so
+you are never told "unsupported" when the real answer is "the model supports
+it, the route does not carry it yet".
+
+Asking for a cofactor an arm cannot honour **raises**:
+
+```python
+client.ensemble.run(receptor=..., peptides=..., cofactors=["ZN", "ZN"])
+# LigandAIInvalidConfig: cofactor(s) ZN requested, but no engine in
+# ['boltz2','esmfold2','protenix'] can receive them through the hosted co-fold
+# route ... These folds would run WITHOUT the cofactor, which on a
+# cofactor-dependent target scores a different molecule. Pass
+# allow_cofactor_absent=True to run them anyway; every affected arm is then
+# labelled cofactor_honoured=False and is never pooled with an arm that
+# carried it.
+```
+
+That refusal is deliberate. It is the difference between "your binders score
+0.79" and "your binders score 0.79 *on a protein that is missing the two zincs
+they bind through*".
+
+### Worked example — carbonic anhydrase II (CA2), a zinc metalloenzyme
+
+CA2 is the textbook case: a single catalytic Zn²⁺ coordinated by three
+histidines, and the pocket does not exist without it.
+
+```python
+from ligandai import LigandAI
+
+client = LigandAI(api_key="...")
+
+CA2 = (  # UniProt P00918, mature enzyme
+    "SHHWGYGKHNGPEHWHKDFPIAKGERQSPVDIDTHTAKYDPSLKPLSVSYDQATSLRILNNGHAFNVEFD"
+    "DSQDKAVLKGGPLDGTYRLIQFHFHWGSLDGQGSEHTVDKKKYAAELHLVHWNTKYGDFGKAVQQPDGLA"
+    "VLGIFLKVGSAKPGLQKVVDVLDSIKTKGKSADFTNFDPRGLLPESLDYWTYPGSLTTPPLLECVTWIVL"
+    "KEPISVSSEQVLKFRKLNFNGEGEPEELMVDNWRPAQPLKNRQIKASFK"
+)
+
+candidates = [...]        # your designed binder sequences
+
+# 1. What will this cost?
+est = client.ensemble.estimate(["boltz2", "esmfold2", "protenix"], len(candidates))
+print(est)
+
+# 2. Which arms can carry the catalytic zinc?
+print(client.ensemble.cofactor_support(["boltz2", "esmfold2", "protenix"]))
+
+# 3. Run. Because CA2's pocket is defined by its zinc, ask for it explicitly —
+#    and let the call refuse rather than quietly hand back a zinc-free number.
+result = client.ensemble.run(
+    receptor=CA2,
+    peptides=candidates,
+    engines=["boltz2", "esmfold2", "protenix"],
+    cofactors=["ZN"],
+    gene="CA2",
+    bar=0.67,
+    max_credits=20_000,
+)
+
+# 4. The deliverable: who does every engine agree on?
+print(result.consensus_histogram())
+for row in result.unanimous():
+    print(row.sequence, row.per_engine, row.cofactor_honoured)
+```
+
+Substitute any target: `cofactors=["HEM"]` for a heme protein, `["MG", "ATP"]`
+for a kinase, `cofactors=[{"smiles": "..."}]` for anything without a CCD code.
+
+### Reading the result
+
+| field | meaning |
+|---|---|
+| `consensus_histogram()` | how many designs had k engines above the bar |
+| `unanimous()` | designs every engine that returned a score put above the bar |
+| `row.contested` | some engines above the bar, some below — the ones to look at |
+| `row.n_engines_scored` | the DENOMINATOR. An engine that failed is not counted as a vote against |
+| `row.cofactor_honoured` | per engine, whether the cofactor you asked for actually reached that fold |
+| `rank_agreement()` | pairwise Spearman rho between engines, each with its own n |
+| `failures` | every fold that did not return, with its error. Nothing is imputed |
+
+⛔ A metric an engine did not return is `None`, never `0.0`. A missing score is
+not evidence of a bad interface, and it never counts toward or against the
+consensus.
+
+### Today's limitation, stated plainly
+
+The multi-engine ensemble route cannot carry a cofactor yet — its chain spec
+accepts protein chains only, for every engine. Three of the engines
+(`boltz2`, `esmfold2`, `protenix`) and `openfold3` can each carry a ligand in
+their own worker; the shared route in front of them cannot express one. That is
+tracked as `bd-dre-3jqok.23`.
+
+Until it lands, the way to get a **cofactor-bearing** fold through the SDK is
+the single-engine Boltz-2 batch surface, which does support ligand partners:
+
+```python
+client.peptides.fold_batch(
+    receptor=CA2,
+    peptides=candidates,
+    partners=[{"type": "ligand", "ccd": "ZN", "copies": 1}],
+)
+```
+
+So the honest workflow on a cofactor-dependent target right now is: Boltz-2
+**with** the cofactor for the number you act on, and the ensemble for the
+agreement check — reading the ensemble as cofactor-absent, which
+`cofactor_support()` and `row.cofactor_honoured` both say out loud.

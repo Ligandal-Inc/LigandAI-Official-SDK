@@ -67,6 +67,7 @@ from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
 from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
+from ligandai.resources.ensemble import AsyncEnsemble, Ensemble
 from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
 from ligandai.resources.jobs import AsyncJobs, Jobs
@@ -524,6 +525,11 @@ class LigandAI(_ClientCommon):
         self.diseases: Diseases = Diseases(self._transport)
         self.discovery: Discovery = Discovery(self._transport, client=self)
         self.folds: Folds = Folds(self._transport, client=self)
+        # Ensemble co-fold: N peptides x M engines, priced before it runs,
+        # returning a CONSENSUS rather than M leaderboards. Cofactors are a
+        # first-class argument and an arm that cannot carry one is labelled,
+        # never silently folded without it. [bd-dre-3jqok]
+        self.ensemble: Ensemble = Ensemble(self._transport, client=self)
         self.jobs: Jobs = Jobs(self._transport)
         self.goals: Goals = Goals(self._transport, client=self)
         # Programmatic ToS/EULA review + acceptance (client.legal).
@@ -968,6 +974,7 @@ class AsyncLigandAI(_ClientCommon):
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
         self.folds: AsyncFolds = AsyncFolds(self._transport, client=self)
+        self.ensemble: AsyncEnsemble = AsyncEnsemble(self._transport, client=self)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
         self.goals: AsyncGoals = AsyncGoals(self._transport, client=self)
         # Programmatic ToS/EULA review + acceptance (client.legal).
