@@ -266,3 +266,32 @@ So the honest workflow on a cofactor-dependent target right now is: Boltz-2
 **with** the cofactor for the number you act on, and the ensemble for the
 agreement check — reading the ensemble as cofactor-absent, which
 `cofactor_support()` and `row.cofactor_honoured` both say out loud.
+
+### What an ensemble is and is not worth
+
+An ensemble buys you **agreement information**, not a better ranking. Be clear
+about which one you are asking for.
+
+On the largest public dataset where these engines are scored against *real
+measured binding* — 1,320 designs across 15 targets, both CROs, 354 confirmed
+binders — a rank-averaged ensemble does not reliably beat the best single
+engine:
+
+| scorer | AUROC vs measured binding | 95% CI |
+|---|---|---|
+| best single engine (Chai-1) | 0.744 | 0.714–0.774 |
+| 3-engine selection ensemble (ESMFold2 + ESMFold2-Fast + Protenix v2) | 0.721 | 0.694–0.749 |
+| all 8 engines, rank-averaged | 0.745 | 0.717–0.773 |
+
+Every interval overlaps. Our own internal benchmark found the same thing:
+ensembling scored *below* Boltz-2 alone (0.620 vs 0.625 ipSAE AUROC).
+
+So do not run an ensemble expecting a sharper ranking. Run it to find out
+**which candidates only one engine likes** — `row.contested` — because that is
+the group whose evidence rests on a single model, and it is the group worth a
+second look before you spend synthesis money on it.
+
+⛔ And note what the bar means. A threshold like 0.67 is calibrated on one
+engine's ipSAE scale. Applying it unchanged to an engine whose ipSAE distribution
+tops out lower measures the *scale*, not the *disagreement*. `rank_agreement()`
+is scale-free and is the number to trust when engines are calibrated differently.
