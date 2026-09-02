@@ -106,8 +106,12 @@ fold:
   use_potentials: true
   msa: { receptor: true, peptide: false }
   seeds_per_unit: 2          # 2 INDEPENDENT seed units per fold action
-  credits_per_fold: 500
-  credits_per_generation: 3000
+  # Ledger MEDIANS, not a price list (server/campaign-economics.ts). The mean
+  # fold rate is 504.73 only because <1% of ledger rows are bulk reconciliations
+  # bundling generation and folding into one line.
+  credits_per_fold: 100
+  credits_per_generated_peptide: 100
+  credits_per_scored_design: 25
 
 # Every gate reports the metric's observed range when it runs. A gate that
 # removes (almost) nothing is refused unless it carries a written reason.
@@ -175,10 +179,10 @@ stop_metrics:
     description: "DeltaForge scores the gate-PASSING set, and only that set"
 
 budget:
-  max_credits: 400000
+  max_credits: 120000
   max_iterations: 20
   max_wall_clock_hours: 72
-  per_iteration_credit_cap: 120000
+  per_iteration_credit_cap: 40000
   reserve_fraction: 0.05
   no_progress:
     patience_iterations: 3

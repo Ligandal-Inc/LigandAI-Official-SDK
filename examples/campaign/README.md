@@ -170,6 +170,14 @@ can rule a design out; it cannot certify one. When a design is not yet certified
 the runner tells you how many more runs would do it, or that its rate is too high
 for any number of runs to help.
 
+Budgeting follows from that. The default rates are medians measured from the
+credit ledger — 100 credits per fold, 100 per peptide generated, 25 per design
+scored, so 225 all-in per design — which puts 25 certified designs at roughly
+58,000 credits if nothing fails. `ligandai campaign validate` does this
+arithmetic for your spec and refuses a budget that cannot buy one certified
+design. If your account prices differently, override `credits_per_fold`,
+`credits_per_generated_peptide` and `credits_per_scored_design` under `fold:`.
+
 ## 8. From Python
 
 ```python

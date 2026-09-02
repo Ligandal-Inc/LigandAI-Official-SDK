@@ -239,8 +239,19 @@ class FoldSettings:
     msa_receptor: bool = True
     msa_peptide: bool = False
     seeds_per_unit: int = 1
-    credits_per_fold: int = 500
-    credits_per_generation: int = 3000
+    # ⛔ These are MEASURED MEDIANS from the live credit ledger, not a price list.
+    # Derived over a 365-day window (server/campaign-economics.ts,
+    # bd-LIGANDAI_ALPHA_V2-pxmj8): fold 100.00 median over 8,626 rows,
+    # generation 100.00 median over 229 rows / 47,027 peptides, scoring 25.00 over
+    # 165 rows — 225 credits all-in per design.
+    # Use the MEDIAN, never the mean: the mean fold rate is 504.73 because <1% of
+    # rows are hand-written bulk reconciliations bundling generation and folding
+    # into one line. A campaign quoted at 500/fold when the real charge is 100 is
+    # told it can afford a FIFTH of the work it can actually afford.
+    # Re-derive with: npx tsx scripts/campaign_runner/verify_credit_rates.ts
+    credits_per_fold: int = 100
+    credits_per_generated_peptide: int = 100
+    credits_per_scored_design: int = 25
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "FoldSettings":
@@ -260,8 +271,9 @@ class FoldSettings:
                    int(d.get("recycling_steps", 3)), bool(d.get("use_potentials", True)),
                    bool(msa.get("receptor", True)), bool(msa.get("peptide", False)),
                    int(d.get("seeds_per_unit", 1)),
-                   int(d.get("credits_per_fold", 500)),
-                   int(d.get("credits_per_generation", 3000)))
+                   int(d.get("credits_per_fold", 100)),
+                   int(d.get("credits_per_generated_peptide", 100)),
+                   int(d.get("credits_per_scored_design", 25)))
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -604,24 +616,28 @@ class CampaignSpec:
                 raise SpecError(f"stop_metric {sm.id}: interval_width needs max_interval_width")
 
         # can the budget buy even one certified design?
-        per_design = clean * self.fold.credits_per_fold
-        floor = self.fold.credits_per_generation + per_design
+        gen1 = self.fold.credits_per_generated_peptide
+        per_design = clean * self.fold.credits_per_fold + self.fold.credits_per_scored_design
+        floor = gen1 + per_design
         if floor > self.budget.max_credits:
             raise SpecError(
                 f"budget.max_credits={self.budget.max_credits:,} cannot buy a single "
-                f"certified design: one generation ({self.fold.credits_per_generation:,}) "
-                f"plus {clean} clean runs ({per_design:,}) = {floor:,} credits."
+                f"certified design: generating one peptide ({gen1:,}) plus {clean} "
+                f"clean runs and one scoring pass ({per_design:,}) = {floor:,} credits."
             )
         want = next((sm.target for sm in self.stop_metrics
                      if sm.kind == "certified_designs"), None)
         if want:
-            optimistic = self.fold.credits_per_generation + int(want) * per_design
+            optimistic = int(want) * (gen1 + per_design)
             if optimistic > self.budget.max_credits:
                 warn.append(
                     f"stop metric asks for {int(want)} certified designs; the OPTIMISTIC "
                     f"cost (every design certifying with zero failures) is "
                     f"{optimistic:,} credits against a cap of {self.budget.max_credits:,}. "
-                    f"The loop will stop on budget before it stops on the metric."
+                    f"The loop will stop on budget before it stops on the metric. "
+                    f"(Rates are ledger medians: {self.fold.credits_per_fold}/fold, "
+                    f"{gen1}/peptide generated, "
+                    f"{self.fold.credits_per_scored_design}/design scored.)"
                 )
         if self.budget.per_iteration_credit_cap and \
                 self.budget.per_iteration_credit_cap > self.budget.max_credits:

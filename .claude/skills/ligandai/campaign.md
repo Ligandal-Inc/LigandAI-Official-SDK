@@ -100,9 +100,14 @@ seeds and reports the fold-failure rate with a Wilson 95% interval. CERTIFIED
 means the interval's upper bound sits at or below `reliability.certification_bar`.
 
 With ZERO failures: 8 runs bound the rate no tighter than 0.32, 16 at 0.19, 22 at
-0.149. So a bar of 0.15 needs **22 clean runs per design**, and 25 certified
-designs is ~275,000 credits at 500 credits a fold before anything fails. The spec
-validator computes this and refuses a budget that cannot buy one certified design.
+0.149. So a bar of 0.15 needs **22 clean runs per design**.
+
+Cost defaults are medians measured from the credit ledger, not a price list:
+100 credits per fold, 100 per peptide generated, 25 per design scored — 225
+all-in per design. So 25 certified designs at zero failures is roughly 58,000
+credits. The spec validator computes this for your spec and refuses a budget that
+cannot buy one certified design. Override the rates in `fold:` if your account
+prices differently.
 
 Never count the diffusion samples inside one seed as independent runs. The runner
 does not, and `reliability.count_unit` will not accept anything else.

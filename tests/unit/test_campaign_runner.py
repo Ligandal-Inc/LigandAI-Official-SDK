@@ -317,3 +317,46 @@ def test_runs_needed_is_computed_not_asserted():
     assert runs_needed_for_upper_bound(0.15, 0.0) == 22
     assert runs_needed_for_upper_bound(0.10, 0.0) == 35
     assert runs_needed_for_upper_bound(0.15, 0.30) is None    # genuinely unreachable
+
+
+# ── Cost rates are ledger medians, not a price list ─────────────────────────
+
+def test_default_credit_rates_are_the_measured_ledger_medians():
+    """Derived over 365 days in server/campaign-economics.ts (bd-LIGANDAI_ALPHA_V2-pxmj8).
+
+    The MEAN fold rate is 504.73 only because under 1% of ledger rows are bulk
+    reconciliations bundling generation and folding into one line. Quoting 500
+    tells a campaign it can afford a fifth of the work it can.
+    """
+    from ligandai.campaign import FoldSettings
+
+    f = FoldSettings.from_dict({})
+    assert f.credits_per_fold == 100
+    assert f.credits_per_generated_peptide == 100
+    assert f.credits_per_scored_design == 25
+    all_in = f.credits_per_generated_peptide + f.credits_per_fold + f.credits_per_scored_design
+    assert all_in == 225, "the platform's own all-in per design"
+
+
+def test_budget_floor_uses_22_clean_runs_not_a_guessed_rate():
+    """A 0.15 bar needs 22 clean runs; the validator must price exactly that."""
+    from ligandai.campaign import CampaignSpec, SpecError
+
+    rec = "ACDEFGHIKLMNPQRSTVWY" * 20
+    base = {
+        "campaign_spec_version": 1, "name": "t",
+        "target": {"gene": "G", "construct": {"name": "C", "sequence": rec}},
+        "peptide_classes": [{"name": "l", "length_range": [12, 24], "n_per_round": 50}],
+        "gates": [{"metric": "peptide_ipsae_median", "op": ">=", "threshold": 0.67}],
+        "stop_metrics": [{"id": "c", "kind": "certified_designs", "target": 25}],
+        "ranking": {"score": "peptide_ipsae_median", "higher_is_better": True,
+                    "population": "gate_passing"},
+    }
+    # one certified design = 100 generate + 22*100 folds + 25 scoring = 2,325
+    with pytest.raises(SpecError, match="cannot buy a single"):
+        CampaignSpec.from_dict({**base, "budget": {"max_credits": 2324}}, ".")
+    spec = CampaignSpec.from_dict({**base, "budget": {"max_credits": 2325}}, ".")
+    assert spec.validate(), "25 designs at 2,325 each cannot fit 2,325 — expect a warning"
+    # 25 * 2,325 = 58,125 buys the whole stop metric with no warning
+    clean = CampaignSpec.from_dict({**base, "budget": {"max_credits": 58125}}, ".")
+    assert clean.validate() == []

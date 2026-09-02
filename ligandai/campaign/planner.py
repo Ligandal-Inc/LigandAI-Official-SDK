@@ -352,23 +352,24 @@ def plan_iteration(spec: CampaignSpec, records: Sequence[DesignRecord],
                                estimated_credits=_fold_cost(spec, len(batch), n_runs)))
             # if the candidate pool itself is too thin, make more designs
             hopeful = len(certified) + len(candidates)
-            if hopeful < sm.target and budget_left() > spec.fold.credits_per_generation:
+            if hopeful < sm.target and budget_left() > 0:
                 for pc in spec.peptide_classes:
-                    unit = spec.fold.credits_per_fold * max(1, spec.fold.seeds_per_unit)
-                    room = budget_left() - spec.fold.credits_per_generation
-                    n = max(0, min(pc.n_per_round, room // unit))
+                    # generation is charged PER PEPTIDE, not per batch
+                    unit = (spec.fold.credits_per_generated_peptide
+                            + spec.fold.credits_per_fold * max(1, spec.fold.seeds_per_unit))
+                    n = max(0, min(pc.n_per_round, budget_left() // unit))
                     if n < 1:
                         rejected.append(
                             f"generate/{pc.name}: {budget_left():,} credits left cannot "
-                            f"cover one generation ({spec.fold.credits_per_generation:,}) "
-                            f"plus a single design folded at {spec.fold.seeds_per_unit} "
-                            f"seed unit(s) ({unit:,})")
+                            f"cover one peptide generated "
+                            f"({spec.fold.credits_per_generated_peptide:,}) and folded at "
+                            f"{spec.fold.seeds_per_unit} seed unit(s) ({unit:,} total)")
                         continue
                     trimmed = ("" if n == pc.n_per_round else
                                f" (trimmed from {pc.n_per_round} to fit the "
                                f"{allowance:,}-credit iteration allowance)")
-                    cost = spec.fold.credits_per_generation + _fold_cost(
-                        spec, n, spec.fold.seeds_per_unit)
+                    cost = (n * spec.fold.credits_per_generated_peptide
+                            + _fold_cost(spec, n, spec.fold.seeds_per_unit))
                     add(Action(ActionKind.GENERATE,
                                f"only {hopeful} designs can still reach certification "
                                f"against a target of {int(sm.target)}; the candidate pool "

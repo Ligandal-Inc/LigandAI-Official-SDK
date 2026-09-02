@@ -229,7 +229,8 @@ class CampaignEngine:
                 self.design_meta.setdefault(d.design_id, {}).update(
                     {"topology": d.topology, "molecule_class": d.molecule_class,
                      "peptide_class": d.peptide_class, **d.provenance})
-            self.ledger.charge(f.credits_per_generation, f"generate {pc.name}")
+            gen_cost = len(designs) * f.credits_per_generated_peptide
+            self.ledger.charge(gen_cost, f"generate {len(designs)} x {pc.name}")
             if designs:
                 poses = self.platform.fold(
                     spec, [d.sequence for d in designs],
@@ -239,8 +240,8 @@ class CampaignEngine:
                 self.poses.extend(poses)
                 cost = len(designs) * max(1, a.n_runs_each) * f.credits_per_fold
                 self.ledger.charge(cost, f"fold new {pc.name}")
-                return f.credits_per_generation + cost
-            return f.credits_per_generation
+                return gen_cost + cost
+            return gen_cost
 
         if a.kind is ActionKind.REPLICATE:
             seqs = self._seqs(a.design_ids)
@@ -278,13 +279,17 @@ class CampaignEngine:
         if a.kind is ActionKind.DEVELOPABILITY:
             seqs = self._seqs(a.design_ids)
             self.developability.update(self.platform.score_developability(spec, seqs))
-            return 0
+            cost = len(seqs) * f.credits_per_scored_design
+            self.ledger.charge(cost, "developability scoring")
+            return cost
 
         if a.kind is ActionKind.AFFINITY:
             ids = set(a.design_ids)
             poses = [p for p in self.poses if p.design_id in ids]
             self.affinity.update(self.platform.score_affinity(spec, poses))
-            return 0
+            cost = len(ids) * f.credits_per_scored_design
+            self.ledger.charge(cost, "affinity scoring")
+            return cost
 
         if a.kind is ActionKind.CONSTRUCT_COMPARISON:
             if not spec.target.comparison_constructs:
