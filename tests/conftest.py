@@ -17,6 +17,10 @@ TEST_API_KEY = "lgai_pro_testkey0123456789ABCDEF"
 
 def pytest_configure() -> None:
     os.environ.setdefault("LIGANDAI_SKIP_VERSION_CHECK", "1")
+    # matplotlib defaults to an interactive backend, which BLOCKS on a headless
+    # box: tests/unit/test_fold_charts.py hangs forever rather than failing, and
+    # takes the whole unit suite with it. Set before any test imports pyplot.
+    os.environ.setdefault("MPLBACKEND", "Agg")
 
 
 @pytest.fixture

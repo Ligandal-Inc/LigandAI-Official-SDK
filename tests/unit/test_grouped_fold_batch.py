@@ -161,10 +161,24 @@ def test_target_requires_exactly_one_mode():
 
 
 def test_partner_rejects_bad_type():
+    # "rna" was a rejected type until cofactor entities landed (cb25e6f,
+    # bd-LIGANDAI_ALPHA_V2-pybsy) widened _PARTNER_TYPES to
+    # {peptide, protein, ligand, dna, rna}. The rejection this test exists to
+    # check still holds — it just needs a type that is genuinely not one of them.
     with pytest.raises(ValueError):
         _normalize_group_partner(
-            {"sequence": "AAAA", "type": "rna"}, group_index=0, partner_index=0
+            {"sequence": "AAAA", "type": "glycan"}, group_index=0, partner_index=0
         )
+
+
+def test_partner_accepts_the_widened_entity_types():
+    """Pin the widening, so narrowing it again fails loudly rather than silently."""
+    for ptype, seq in (("peptide", "AAAA"), ("protein", "AAAA"),
+                       ("rna", "ACGU"), ("dna", "ACGT"), ("ligand", "ZN")):
+        entity = _normalize_group_partner(
+            {"sequence": seq, "type": ptype}, group_index=0, partner_index=0
+        )
+        assert entity, f"{ptype!r} should normalize to a wire entity"
 
 
 def test_partner_requires_sequence():
