@@ -372,6 +372,76 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "remediation": "A selectivity panel folds the same binder against different-length receptors. ipSAE (ipsae_d0res) is normalised by chain length, so an absolute-threshold call and a genuine cross-receptor delta are different claims; the length-comparable value (ipsae_d0ref) is not yet available for this fold. Treat any comparison across panel members on the raw ipSAE value with caution until it is.",
         "doc_anchor": "guides/conjugate-design#frames",
     },
+
+    # ⛔ MIRRORED FROM shared/warnings.json, NOT INVENTED. The SDK copies the
+    # platform taxonomy rather than importing it, and
+    # test_registry_is_byte_identical_to_shared_warnings_json is the only thing
+    # keeping the two in sync. These nine campaign codes were registered on the
+    # platform and left unmirrored here, which turned that guard red on main.
+    # [bd-dre-3jqok, mirroring bd-dre-7nn5h]
+    "campaign_criteria_no_ceiling": {
+        "severity": "error",
+        "stage": "request",
+        "title": "This campaign has no stopping ceiling",
+        "remediation": "A run-until-criteria campaign must carry at least one ceiling (maxPoses, maxRounds, maxCredits, maxComputeUsd or maxGpuHours). Without one, a criterion that turns out to be unreachable on this target becomes an open-ended order to keep spending. Set the ceiling you are actually willing to spend and the campaign will stop there and report how far it got.",
+        "doc_anchor": "guides/run-until-criteria#ceilings",
+    },
+    "campaign_criteria_unit_count_dependent": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "This criterion gets harder the more you fold",
+        "remediation": "You asked that EVERY independent seed-unit clear the bar. Each additional seed is another chance to fail that conjunction, so a design can be demoted by evidence gathered to confirm it - measured on this platform at 42% pass with 2 seed-units and 0% with 9. Use a fraction rule (e.g. at least 3 of 4 units) if you meant 'holds up across seeds' rather than 'never once missed'.",
+        "doc_anchor": "guides/run-until-criteria#unit-count-dependence",
+    },
+    "campaign_criteria_monotone_in_effort": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "This criterion rewards folding a design more",
+        "remediation": "Gating on a design's BEST seed-unit means the score can only rise as more seeds are drawn, so designs that were folded more will out-rank equally good designs that were folded less. Use the median statistic, or a seed_replication leg, for a comparison that does not depend on how much effort each design received.",
+        "doc_anchor": "guides/run-until-criteria#statistic",
+    },
+    "campaign_panel_uniform_draw": {
+        "severity": "warning",
+        "stage": "fold",
+        "title": "Comparator panels are being filled in a way that will not complete them",
+        "remediation": "When comparator legs are drawn evenly across every design, a design needing N comparators only completes when all N of its cells happen to be filled, so completions accrue as roughly the Nth power of the fraction folded - measured here as 4 complete panels out of 240 designs at 29% of the grid, where a linear reading predicted 70. Complete every leg of a subset of designs instead; the same spend then yields complete panels in proportion to it.",
+        "doc_anchor": "guides/run-until-criteria#panel-chunking",
+    },
+    "campaign_projection_small_cohort": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "Cost projection rests on a small, selected cohort",
+        "remediation": "The replication rates behind this projection were fitted on a cohort already selected for high scores, and every such rate measured on this campaign came in optimistic. The projection is reported as an interval whose expensive end has been widened for that reason, and it carries no single point estimate on purpose. Budget against the upper bound.",
+        "doc_anchor": "guides/run-until-criteria#projection",
+    },
+    "campaign_projection_unbounded": {
+        "severity": "error",
+        "stage": "results",
+        "title": "Cost to complete cannot be bounded from what has been measured",
+        "remediation": "No design in the campaign has yet produced a scored seed-unit in a band with a measured replication rate, so there is nothing to project from and any number would be invented. Fold a first round and re-project; the interval narrows as soon as real units exist.",
+        "doc_anchor": "guides/run-until-criteria#projection",
+    },
+    "campaign_band_not_converting": {
+        "severity": "info",
+        "stage": "results",
+        "title": "A score band is not converting and is no longer being funded",
+        "remediation": "Designs whose single seed-unit sits in this band replicated at a rate whose lower confidence bound is below the campaign's funding floor, so further seeds are being spent on higher bands instead. This is a budget decision, not a verdict on those designs - they remain candidates and can be funded explicitly if you want them measured anyway.",
+        "doc_anchor": "guides/run-until-criteria#band-allocation",
+    },
+    "campaign_not_converging": {
+        "severity": "warning",
+        "stage": "results",
+        "title": "A full round produced almost no newly qualified designs",
+        "remediation": "The campaign is still inside its budget but the last round added fewer newly qualified designs than the convergence floor you set. This is the stop a budget ceiling never catches. Review whether the criterion is reachable on this target before funding more rounds; the designs measured so far are not discarded by this stop.",
+        "doc_anchor": "guides/run-until-criteria#convergence",
+    },
+    "campaign_candidates_exhausted": {
+        "severity": "warning",
+        "stage": "generate",
+        "title": "No undrawn candidate designs remain to fold",
+        "remediation": "Every design the generator supplied has been folded, and the criterion is still unmet. Generate a further candidate set, or relax the criterion. The campaign has stopped rather than re-folding designs it has already judged, which would add cost without adding evidence.",
+        "doc_anchor": "guides/run-until-criteria#candidates",
+    },
 }
 
 
