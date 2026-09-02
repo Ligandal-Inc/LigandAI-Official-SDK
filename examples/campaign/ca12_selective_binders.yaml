@@ -1,0 +1,203 @@
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLE — deliberately NOT the campaign this runner was built from.
+#
+# Target: carbonic anhydrase XII (CA12), a zinc metalloenzyme with an
+# extracellular catalytic domain and two close paralogs. Nothing about this
+# file is special-cased; it is the same schema any target uses.
+#
+# Every sequence referenced here is real, taken from the UniProt entry named
+# beside it, at the residue range UniProt itself annotates. Nothing is invented.
+#   CA12  O43570  TOPO_DOM 25..301 "Extracellular"; Zn(2+) at 119, 121, 145
+#   CA9   Q16790  TOPO_DOM 38..414 "Extracellular";  Zn(2+) at 226, 228, 251
+#   CA2   P00918  cytosolic, no signal peptide;      Zn(2+) at 94, 96, 119
+#
+# Run it:
+#     ligandai campaign validate ca12_selective_binders.yaml
+#     ligandai campaign explain  ca12_selective_binders.yaml     # costs nothing
+#     ligandai campaign run      ca12_selective_binders.yaml
+# ---------------------------------------------------------------------------
+campaign_spec_version: 1
+name: ca12_selective_binders
+
+customer:
+  org: "Example Org"
+  contact: "you@example.com"
+
+target:
+  gene: CA12
+  construct:
+    name: CA12_ECD_25_301
+    gene: CA12
+    uniprot: O43570
+    pdb: 1JD0
+    sequence_file: constructs/CA12_ECD_25_301.fasta
+    residue_range: [25, 301]
+    numbering_frame: "UniProt O43570 numbering; construct residue 1 == O43570 residue 25"
+  # The catalytic zinc. Declaring it here is what makes the cofactor-free
+  # control below runnable: the runner folds the SAME peptides with the ion
+  # removed and pairs the two legs per peptide.
+  cofactors:
+    - { name: ZN, count: 1, role: catalytic }
+  pocket_residues: [94, 119, 121, 145]
+  pocket_source: "UniProt O43570 ACT_SITE 94 (proton donor/acceptor) + BINDING 119/121/145 Zn(2+)"
+  # Designed against the ECD; also folded against the full-length chain so the
+  # construct the customer actually expresses is compared, not assumed.
+  comparison_constructs:
+    - name: CA12_fulllength_1_354
+      gene: CA12
+      uniprot: O43570
+      sequence_file: constructs/CA12_fulllength_1_354.fasta
+      residue_range: [1, 354]
+      numbering_frame: "UniProt O43570 numbering; construct residue 1 == O43570 residue 1"
+
+# Selectivity is the point of this campaign: CA9 is the near neighbour and CA2
+# is the classic off-target for this enzyme family.
+off_targets:
+  - gene: CA9
+    min_margin: 0.20
+    construct:
+      name: CA9_CAdomain_138_414
+      gene: CA9
+      uniprot: Q16790
+      sequence_file: constructs/CA9_CAdomain_138_414.fasta
+      residue_range: [138, 414]
+      numbering_frame: "UniProt Q16790 numbering"
+    cofactors:
+      - { name: ZN, count: 1, role: catalytic }
+  - gene: CA2
+    min_margin: 0.20
+    construct:
+      name: CA2_full_1_260
+      gene: CA2
+      uniprot: P00918
+      sequence_file: constructs/CA2_full_1_260.fasta
+      residue_range: [1, 260]
+      numbering_frame: "UniProt P00918 numbering"
+    cofactors:
+      - { name: ZN, count: 1, role: catalytic }
+
+peptide_classes:
+  - name: cyclic
+    topology: disulfide
+    molecule_class: cyclic
+    length_range: [12, 24]      # a RANGE; a collapsed range is refused by the loader
+    n_per_round: 200
+  - name: linear
+    topology: linear
+    molecule_class: linear
+    length_range: [12, 24]
+    n_per_round: 200
+
+generation:
+  model: v6.9.21
+  guidance_scale: 1.0
+  # Do not stack all four functional heads: measured composition collapse.
+  heads:
+    cellfree: true
+    immuno: 0.4
+  target_residues: [94, 119, 121, 145]
+  composition_floor: { hydrophobic: 0.25, aromatic: 0.02, k_plus_r: 0.02 }
+
+fold:
+  engine: boltz2
+  diffusion_samples: 4
+  sampling_steps: 50
+  recycling_steps: 3
+  use_potentials: true
+  msa: { receptor: true, peptide: false }
+  seeds_per_unit: 2          # 2 INDEPENDENT seed units per fold action
+  credits_per_fold: 500
+  credits_per_generation: 3000
+
+# Every gate reports the metric's observed range when it runs. A gate that
+# removes (almost) nothing is refused unless it carries a written reason.
+gates:
+  - { label: interface,     metric: peptide_ipsae_median, op: ">=", threshold: 0.67 }
+  - { label: iptm,          metric: iptm_median,          op: ">=", threshold: 0.80 }
+  - label: complex_plddt
+    metric: complex_plddt_median
+    op: ">="
+    threshold: 88
+    min_effect_fraction: 0.01
+    # On the campaign this runner was built from, this exact gate removed 1
+    # design of 2,997. Keep it as a REPORTED metric rather than pretending it
+    # is a quality bar, and say so:
+    allow_vacuous: true
+    allow_vacuous_reason: >-
+      complex pLDDT is reported descriptively. On peptide-receptor complexes it
+      is dominated by the receptor and rarely discriminates; it is retained so
+      the number ships, not because it gates.
+
+reliability:
+  failure_metric: peptide_ipsae
+  failure_threshold: 0.67       # a run below this is a FAILED fold
+  certification_bar: 0.15       # Wilson 95% UPPER bound must sit at or below this
+  confidence: 0.95
+  count_unit: independent_seed_unit
+  min_runs_before_verdict: 8
+
+# Done is a list of numbers. The loop closes each one and says which it is working on.
+stop_metrics:
+  - id: certified_25
+    kind: certified_designs
+    target: 25
+    of_population: gate_passing
+    description: "25 designs whose fold-failure rate has a 95% upper bound <= 0.15"
+  - id: paralog_margins
+    kind: margin_coverage
+    target: 10
+    of_population: certified
+    off_targets: [CA9, CA2]
+    min_margin: 0.20
+    description: "10 certified designs with a measured >= +0.20 margin against BOTH paralogs"
+  - id: zinc_control
+    kind: control_present
+    target: 15
+    control: cofactor_free
+    of_population: certified
+    description: "15 certified designs with a PAIRED zinc-free refold"
+  - id: developability_complete
+    kind: block_coverage
+    target: 1.0                 # a FRACTION for block_coverage
+    block: immunogenicity
+    of_population: certified
+    description: "every certified design carries the immunogenicity block"
+  - id: stability_complete
+    kind: block_coverage
+    target: 1.0
+    block: stability
+    of_population: certified
+  - id: affinity_ranked
+    kind: block_coverage
+    target: 1.0
+    block: affinity
+    of_population: gate_passing
+    description: "DeltaForge scores the gate-PASSING set, and only that set"
+
+budget:
+  max_credits: 400000
+  max_iterations: 20
+  max_wall_clock_hours: 72
+  per_iteration_credit_cap: 120000
+  reserve_fraction: 0.05
+  no_progress:
+    patience_iterations: 3
+    min_absolute_progress: 1.0
+
+ranking:
+  score: deltaforge_predicted_kd_nm
+  higher_is_better: false       # predicted Kd in nM: lower is better
+  population: gate_passing      # named explicitly; the ranker refuses any other rows
+  length_baseline: required
+  length_confound_threshold: 0.20
+
+controls:
+  - scramble
+  - length_matched_random
+
+output_dir: ./ca12_campaign_out
+
+notes: >-
+  Predicted Kd is a PREDICTION. No design in a computational campaign has a
+  measured Kd until it is synthesised and run on BLI. The ranking orders
+  candidates; it does not measure affinity.

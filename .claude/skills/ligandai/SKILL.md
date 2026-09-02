@@ -12,7 +12,11 @@ trigger_phrases:
   - "fold complex", "boltz", "boltz-2", "ipsae", "deltaforge"
   - "bispecific", "bivalent", "adaptyv", "spps", "bli synthesis"
   - "ligandai api key", "lgai_"
+  - "run a campaign", "campaign spec", "until the metrics are hit"
+  - "certified binders", "selectivity margin", "reproducibility", "stop metrics"
 languages: ["python"]
+files:
+  - campaign.md   # one spec file -> a campaign that runs until its stop metrics are met
 sdk_version: ">=0.5.0"
 ---
 
@@ -81,6 +85,7 @@ job = client.peptides.generate(
 | `client.memory` | save/list/search/delete/recent_activity | `examples/19_msa_memory_reports_diseases.py` |
 | `client.msa` | MSA generation for receptor chains | `examples/19_msa_memory_reports_diseases.py` |
 | `client.peptides` | generate / fold / cofold / score / search / list / by-gene / get_elite / fill_until / pocket_for_hotspots / search_by_pocket / estimate_cost / continue_folding / fold_custom_mutation / score_pdb / score_with_ligandiq / analyze_solubility | `examples/02_end_to_end.py`, `examples/04_async_parallel.py`, `examples/06_streaming.py`, `examples/11_generate_hotspot_cascade.py`, `examples/12_peptide_listing_search.py`, `examples/20_parallel_fold_control.py` |
+| `client.ensemble` | estimate / run / cofactor_support / engines — N peptides x M engines, cost projected BEFORE it runs, spend ceiling, and a CONSENSUS (how many engines put each design above the bar) rather than M leaderboards. Cofactors (`cofactors=["ZN"]`) are first-class and an arm that cannot carry one RAISES rather than silently folding without it | `.claude/skills/ligandai/fold.md` §E |
 | `client.programs` | list, create, get, update, archive, workstreams, sessions | `examples/08_program_list_and_structures.py`, `examples/16_programs_sessions_jobs.py` |
 | `client.proteins` | info / disorder / topology / variants / upload_pdb / glycosylation / save_fold_as_variant | `examples/05_custom_variant.py`, `examples/15_proteins_upload_variants.py` |
 | `client.receptors` | search, list, by_gene, chain_classification, download_pdb, request_fold, oligomeric_states, genes | `examples/01_quickstart.py`, `examples/10_receptors_search_resolve.py` |

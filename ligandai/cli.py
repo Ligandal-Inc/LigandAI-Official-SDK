@@ -8,6 +8,9 @@ Sub-commands
 keys mint    Mint a fresh wallet of rotating single-use JWTs.
 keys status  Show the current wallet: path, count, target_hash, scope.
 keys revoke  Delete the local wallet file (does NOT call the backend).
+campaign run       Run a declarative campaign spec until its stop metrics are met.
+campaign validate  Check a spec without spending anything.
+campaign explain   Print the resolved spec and what would be queued first.
 """
 
 from __future__ import annotations
@@ -263,6 +266,45 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="USD",
         help="Dollar amount per reload event.",
     )
+
+    # ── campaign ──────────────────────────────────────────────────────────────
+    campaign_parser = sub.add_parser(
+        "campaign",
+        help="Run a declarative campaign spec until its stop metrics are met.",
+        description=(
+            "A campaign spec is one YAML/JSON file naming the target, construct, "
+            "cofactors, off-target paralogs, peptide classes, gates, and the STOP "
+            "METRICS that define done. `campaign run` generates, folds, scores, "
+            "checks the stop metrics, and queues whatever would close the ones that "
+            "are unmet -- until they are all met, the credit cap is reached, or "
+            "progress stalls."
+        ),
+    )
+    campaign_sub = campaign_parser.add_subparsers(
+        dest="campaign_command", title="campaign sub-commands")
+
+    cr = campaign_sub.add_parser("run", help="Run the campaign.")
+    cr.add_argument("spec", help="Path to the campaign spec (.yaml or .json).")
+    cr.add_argument("--out", default=None,
+                    help="Output directory (default: the spec's output_dir).")
+    cr.add_argument("--dry-run", action="store_true",
+                    help="Plan and cost every iteration; submit nothing, invent nothing.")
+    cr.add_argument("--max-credits", type=int, default=None,
+                    help="Lower the spec's credit cap for this run. Cannot raise it.")
+    cr.add_argument("--timeout", type=float, default=7200.0,
+                    help="Per-job wait timeout in seconds (default 7200).")
+    cr.add_argument("--poll-interval", type=float, default=15.0,
+                    help="Job poll interval in seconds (default 15).")
+
+    cv = campaign_sub.add_parser("validate",
+                                 help="Check a spec is runnable. Spends nothing.")
+    cv.add_argument("spec", help="Path to the campaign spec.")
+    cv.add_argument("--json", action="store_true", help="Also print the resolved spec.")
+
+    ce = campaign_sub.add_parser(
+        "explain", help="Show what the first iteration would queue, and its cost.")
+    ce.add_argument("spec", help="Path to the campaign spec.")
+    ce.add_argument("--out", default=None, help="Output directory.")
 
     # ── legal ─────────────────────────────────────────────────────────────────
     legal_parser = sub.add_parser(
@@ -544,6 +586,122 @@ def cmd_legal_accept(args: argparse.Namespace) -> int:
     return 0
 
 
+
+# ─── campaign ────────────────────────────────────────────────────────────────
+
+
+def _load_spec(path: str):
+    from ligandai.campaign import CampaignSpec, SpecError
+
+    try:
+        return CampaignSpec.load(path)
+    except SpecError as exc:
+        _print_err(f"{path}: {exc}")
+        return None
+    except FileNotFoundError:
+        _print_err(f"no such spec file: {path}")
+        return None
+
+
+def cmd_campaign_validate(args: argparse.Namespace) -> int:
+    """ligandai campaign validate my_campaign.yaml"""
+    spec = _load_spec(args.spec)
+    if spec is None:
+        return 2
+    warnings = spec.validate()
+    print(f"spec OK: {spec.name}")
+    print(f"  fingerprint       {spec.fingerprint()[:16]}")
+    print(f"  target            {spec.target.gene} / {spec.target.construct.name} "
+          f"({len(spec.target.construct.sequence)} aa)")
+    if spec.target.cofactors:
+        print(f"  cofactors         {', '.join(c.name for c in spec.target.cofactors)}")
+    if spec.off_targets:
+        print("  off-targets       " + ", ".join(
+            f"{o.gene} (margin >= {o.min_margin})" for o in spec.off_targets))
+    print("  peptide classes   " + ", ".join(
+        f"{p.name} {p.topology} {p.length_range[0]}-{p.length_range[1]}aa x{p.n_per_round}"
+        for p in spec.peptide_classes))
+    print("  gates             " + "; ".join(
+        f"{g.metric} {g.op} {g.threshold:g}" for g in spec.gates))
+    print(f"  certification     fold-failure rate, Wilson "
+          f"{spec.reliability.confidence:.0%} upper bound <= "
+          f"{spec.reliability.certification_bar}")
+    print("  stop metrics:")
+    for sm in spec.stop_metrics:
+        print(f"    - {sm.id}: {sm.kind} target {sm.target:g} on {sm.of_population}")
+    b = spec.budget
+    print(f"  budget            {b.max_credits:,} credits, <= {b.max_iterations} "
+          f"iterations, <= {b.max_wall_clock_hours}h; stop after "
+          f"{b.no_progress.patience_iterations} iterations closing < "
+          f"{b.no_progress.min_absolute_progress:g}")
+    for w in warnings:
+        print(f"  ! warning: {w}")
+    if args.json:
+        print(json.dumps(spec.as_dict(), indent=2, default=str))
+    return 0
+
+
+def cmd_campaign_explain(args: argparse.Namespace) -> int:
+    """ligandai campaign explain my_campaign.yaml — plan without submitting."""
+    from ligandai.campaign import CampaignEngine, DryRunPlatform
+
+    spec = _load_spec(args.spec)
+    if spec is None:
+        return 2
+    engine = CampaignEngine(spec, DryRunPlatform(),
+                            output_dir=args.out or spec.output_dir)
+    engine.run(dry_run=True)
+    return 0
+
+
+def cmd_campaign_run(args: argparse.Namespace) -> int:
+    """ligandai campaign run my_campaign.yaml"""
+    from ligandai.campaign import CampaignEngine, DryRunPlatform, SDKPlatform, StopReason
+
+    spec = _load_spec(args.spec)
+    if spec is None:
+        return 2
+    if args.max_credits is not None:
+        if args.max_credits > spec.budget.max_credits:
+            _print_err(
+                f"--max-credits {args.max_credits:,} exceeds the spec's cap of "
+                f"{spec.budget.max_credits:,}. The flag may only LOWER the cap."
+            )
+            return 2
+        spec.budget.max_credits = int(args.max_credits)
+
+    if args.dry_run:
+        platform = DryRunPlatform()
+    else:
+        api_key = _require_env_key()
+        if not api_key:
+            _print_err(
+                "LIGANDAI_API_KEY is not set. Export your lgai_* key, or use "
+                "--dry-run to plan the campaign without submitting anything."
+            )
+            return 1
+        try:
+            client = _make_client(args)
+        except Exception as exc:  # noqa: BLE001
+            _print_err(f"could not create a client: {exc}")
+            return 1
+        platform = SDKPlatform(client, timeout=args.timeout,
+                               poll_interval=args.poll_interval,
+                               progress=lambda m: print(f"    {m}", flush=True))
+
+    engine = CampaignEngine(spec, platform, output_dir=args.out or spec.output_dir)
+    try:
+        result = engine.run(dry_run=args.dry_run)
+    except KeyboardInterrupt:
+        print("\ninterrupted — partial results are in "
+              f"{engine.output_dir}", file=sys.stderr)
+        return 130
+    if result.stop_reason is StopReason.METRICS_MET:
+        return 0
+    # Every other exit is a real outcome, not a crash, but it is not success.
+    return 0 if args.dry_run else 4
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -568,6 +726,17 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_credits_auto(args)
         else:
             parser.parse_args(["credits", "--help"])
+            return 1
+    elif args.command == "campaign":
+        sub_cmd = getattr(args, "campaign_command", None)
+        if sub_cmd == "run":
+            return cmd_campaign_run(args)
+        elif sub_cmd == "validate":
+            return cmd_campaign_validate(args)
+        elif sub_cmd == "explain":
+            return cmd_campaign_explain(args)
+        else:
+            parser.parse_args(["campaign", "--help"])
             return 1
     elif args.command == "legal":
         sub = getattr(args, "legal_command", None)
