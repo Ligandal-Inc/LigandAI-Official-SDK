@@ -19,7 +19,7 @@ from importlib.metadata import PackageNotFoundError, version as _dist_version
 
 #: Fallback for an uninstalled source tree. An installed package always wins —
 #: this value is not what users receive.
-_FALLBACK_VERSION = "0.12.2"
+_FALLBACK_VERSION = "0.13.0"
 
 try:
     __version__: str = _dist_version("ligandai")
