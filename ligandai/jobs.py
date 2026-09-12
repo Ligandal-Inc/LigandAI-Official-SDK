@@ -50,9 +50,11 @@ from ligandai.errors import (
     LigandAIIncompleteResult,
     LigandAIJobError,
     LigandAILegalAcceptanceRequired,
+    LigandAIReceptorMsaUnavailable,  # noqa: F401  re-exported for `except` convenience
     LigandAITargetingWarning,
     LigandAITimeoutError,
     LigandAIWaitTimeout,
+    job_error_from_info,
 )
 from ligandai.types import JobEvent, JobInfo
 
@@ -443,10 +445,15 @@ class Job(_DiagnosticsAccumulator, Generic[T]):
                     "Call .wait() first or check .status."
                 )
             if not self.succeeded:
-                raise LigandAIJobError(
+                # [bd-LIGANDAI_ALPHA_V2-7r1sb] Hand over the structured payload
+                # instead of flattening it into a string. See
+                # errors.job_error_from_info — a receptor-MSA refusal becomes
+                # LigandAIReceptorMsaUnavailable with typed rungs/fixes.
+                raise job_error_from_info(
                     self._info.error_message or f"Job {self._job_id} ended with status {self.status}",
                     job_id=self._job_id,
                     job_status=self.status,
+                    result=(self._info.result or {}) if self._info else None,
                 )
             payload = self._result_payload()
             self._result = self._parser(payload)
@@ -596,10 +603,12 @@ class Job(_DiagnosticsAccumulator, Generic[T]):
                 break
             time.sleep(poll_interval)
         if not self.succeeded:
-            raise LigandAIJobError(
+            # [bd-LIGANDAI_ALPHA_V2-7r1sb] See the note at Job.results.
+            raise job_error_from_info(
                 self._info.error_message or f"Job {self._job_id} ended with status {self.status}",
                 job_id=self._job_id,
                 job_status=self.status,
+                result=(self._info.result or {}) if self._info else None,
             )
 
         # Durable-success contract for fold jobs. Outer status="completed" can
@@ -881,10 +890,12 @@ class AsyncJob(_DiagnosticsAccumulator, Generic[T]):
                 break
             await asyncio.sleep(poll_interval)
         if not self.succeeded:
-            raise LigandAIJobError(
+            # [bd-LIGANDAI_ALPHA_V2-7r1sb] See the note at Job.results.
+            raise job_error_from_info(
                 self._info.error_message or f"Job {self._job_id} ended with status {self.status}",
                 job_id=self._job_id,
                 job_status=self.status,
+                result=(self._info.result or {}) if self._info else None,
             )
 
         if durable and self._job_type == "folding":
@@ -930,10 +941,15 @@ class AsyncJob(_DiagnosticsAccumulator, Generic[T]):
                     f"Job {self._job_id} not yet complete (status={self.status})"
                 )
             if not self.succeeded:
-                raise LigandAIJobError(
+                # [bd-LIGANDAI_ALPHA_V2-7r1sb] Hand over the structured payload
+                # instead of flattening it into a string. See
+                # errors.job_error_from_info — a receptor-MSA refusal becomes
+                # LigandAIReceptorMsaUnavailable with typed rungs/fixes.
+                raise job_error_from_info(
                     self._info.error_message or f"Job {self._job_id} ended with status {self.status}",
                     job_id=self._job_id,
                     job_status=self.status,
+                    result=(self._info.result or {}) if self._info else None,
                 )
             payload = await self._result_payload()
             self._result = self._parser(payload)

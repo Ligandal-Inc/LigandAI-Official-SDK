@@ -398,6 +398,194 @@ class LigandAIJobError(LigandAIError):
         self.job_status = job_status
 
 
+#: Where a receptor-MSA diagnosis lives inside a job's ``result`` payload.
+#: Checked in order. The platform writes ``retry_msa_diagnosis`` from
+#: ``/api/retry-fold`` (``fastapi_backend/routers/fold.py``); the others are the
+#: shapes a nested or future writer may use. [bd-LIGANDAI_ALPHA_V2-7r1sb]
+RECEPTOR_MSA_DIAGNOSIS_KEYS: tuple[str, ...] = (
+    "retry_msa_diagnosis",
+    "msa_diagnosis",
+)
+
+#: ``tag`` values the platform emits (``msa-diagnosis/1``). A diagnosis whose
+#: tag is not the refusal means the fold was NOT blocked by MSA availability —
+#: it either never needed help, or a lower rung supplied the alignment.
+RECEPTOR_MSA_TAG_OK = "receptor_msa_complete"
+RECEPTOR_MSA_TAG_SELF_HEALED = "receptor_msa_self_healed"
+RECEPTOR_MSA_TAG_UNAVAILABLE = "receptor_msa_unavailable"
+
+
+def receptor_msa_diagnosis(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Pull the receptor-MSA diagnosis out of a job ``result`` payload, or None.
+
+    Tolerant by design: an older server sends nothing, and a newer one may add
+    keys. Only a dict carrying a ``tag`` is accepted, so a truncated or
+    half-written value reads as absent rather than as a malformed diagnosis.
+    """
+    if not isinstance(result, dict):
+        return None
+    for key in RECEPTOR_MSA_DIAGNOSIS_KEYS:
+        candidate = result.get(key)
+        if isinstance(candidate, dict) and candidate.get("tag"):
+            return candidate
+    return None
+
+
+class LigandAIReceptorMsaUnavailable(LigandAIJobError):
+    """No alignment could be found for a receptor chain, so the fold was refused.
+
+    ⛔ WHY THIS IS A REFUSAL AND NOT A DEGRADED RESULT
+    An MSA-free receptor fold does not fail. It returns a confident-looking
+    structure whose ipSAE is meaningless and which downstream ranking cannot
+    tell from a real one. The platform therefore refuses rather than degrade,
+    and this error carries the machine-readable reason so a caller can act on
+    it instead of parsing prose.
+
+    The platform tried, in order: the local MSA service (forced endpoint
+    re-probe), the Modal volume cache, and a UniProt canonical-parent alignment.
+    :attr:`rungs` records each attempt — which endpoint, which cause, how long.
+
+    Attributes
+    ----------
+    diagnosis : dict
+        The whole ``msa-diagnosis/1`` object, verbatim. Prefer the typed
+        attributes below; reach in here for a field a newer server added.
+    tag : str
+        ``"receptor_msa_unavailable"``. The stable machine identifier for THE
+        FLAW, suitable for branching, metrics, and issue routing.
+    flaw : str
+        One sentence saying what is actually wrong.
+    receptor_chains / missing_chains : list[str]
+        Every chain that needed an alignment, and those that still have none.
+    rungs : list[dict]
+        Per-rung receipts: ``{rung, order, ok, cause, error, endpoint,
+        elapsed_ms, chains_recovered, realized_depth, attempts, detail}``.
+    required_fixes : list[dict]
+        What would make this work, ordered, each ``{order, id, action, who,
+        automatable, because, verify}``. Derived from what ACTUALLY failed — a
+        healthy MSA service is never blamed for an orphan receptor.
+    retryable : bool
+        True only when at least one rung failed for a transient reason. False
+        means the identical request cannot succeed and retrying burns budget.
+    gene, uniprot_id : str | None
+        The receptor identity the platform resolved, when it could.
+    schema : str
+        e.g. ``"msa-diagnosis/1"``. An unrecognised major means the typed
+        attributes may be incomplete — fall back to :meth:`human_text`.
+
+    Examples
+    --------
+    >>> try:
+    ...     fold = job.wait()
+    ... except LigandAIReceptorMsaUnavailable as exc:
+    ...     print(exc.tag, exc.missing_chains, exc.retryable)
+    ...     for fix in exc.required_fixes:
+    ...         print(fix["order"], fix["id"], fix["action"])
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        job_id: str,
+        job_status: str,
+        diagnosis: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, job_id=job_id, job_status=job_status, **kwargs)
+        d = diagnosis or {}
+        self.diagnosis = d
+        self.schema = d.get("schema") or ""
+        self.tag = d.get("tag") or RECEPTOR_MSA_TAG_UNAVAILABLE
+        self.failure_class = d.get("failure_class") or self.tag
+        self.severity = d.get("severity") or "error"
+        self.flaw = d.get("flaw") or ""
+        self.receptor_chains = list(d.get("receptor_chains") or [])
+        self.missing_chains = list(d.get("missing_chains") or [])
+        self.recovered_by = dict(d.get("recovered_by") or {})
+        self.rungs = list(d.get("rungs") or [])
+        self.required_fixes = list(d.get("required_fixes") or [])
+        self.retryable = bool(d.get("retryable"))
+        self.gene = d.get("gene")
+        self.uniprot_id = d.get("uniprot_id")
+
+    # -- convenience -------------------------------------------------------
+
+    def human_text(self) -> str:
+        """The platform's own prose block, including "FIXES, in order:".
+
+        Always available, even when :attr:`schema` is a major this SDK does not
+        recognise — which is exactly when a caller should read it instead of the
+        typed fields.
+        """
+        return self.diagnosis.get("human") or self.message
+
+    def rung(self, name: str) -> dict[str, Any] | None:
+        """The receipt for one rung by name, or None if it never ran."""
+        for r in self.rungs:
+            if r.get("rung") == name:
+                return r
+        return None
+
+    def fixes_text(self) -> str:
+        """The required fixes as a numbered block, for logs and tickets."""
+        lines = []
+        for fix in self.required_fixes:
+            who = "the platform retries this for you" if fix.get("automatable") \
+                else f"{fix.get('who', 'caller')} must act"
+            lines.append(f"{fix.get('order')}. {fix.get('action')} ({who})")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(job_id={self.job_id!r}, tag={self.tag!r}, "
+            f"missing_chains={self.missing_chains!r}, retryable={self.retryable!r}, "
+            f"fixes={[f.get('id') for f in self.required_fixes]!r})"
+        )
+
+
+def job_error_from_info(
+    message: str,
+    *,
+    job_id: str,
+    job_status: str,
+    result: dict[str, Any] | None = None,
+) -> LigandAIJobError:
+    """Build the most specific job-failure error the payload supports.
+
+    ⛔ THE GAP THIS CLOSES. Every ``LigandAIJobError`` raise site used to pass
+    only ``message``/``job_id``/``job_status``, so ``.response`` was always
+    ``None`` for a failed job and the structured payload — which was sitting
+    right there in ``self._info.result`` — was discarded into a string. The
+    sibling timeout path (:class:`LigandAIWaitTimeout`) already kept it as
+    ``server_state``; job failures did not. So a caller whose fold was refused
+    for an unavailable receptor MSA could only regex the message.
+
+    Now the whole result rides on ``.response``, and when it carries a
+    ``msa-diagnosis/1`` refusal the caller gets
+    :class:`LigandAIReceptorMsaUnavailable` with typed fields instead.
+    A self-healed or complete diagnosis is NOT a refusal and does not change
+    the class — the fold failed for some other reason and mislabelling it would
+    send the caller after the wrong cause.
+    """
+    diag = receptor_msa_diagnosis(result)
+    if diag is not None and diag.get("tag") == RECEPTOR_MSA_TAG_UNAVAILABLE:
+        return LigandAIReceptorMsaUnavailable(
+            diag.get("human") or message,
+            job_id=job_id,
+            job_status=job_status,
+            diagnosis=diag,
+            code=RECEPTOR_MSA_TAG_UNAVAILABLE,
+            response=result,
+        )
+    return LigandAIJobError(
+        message,
+        job_id=job_id,
+        job_status=job_status,
+        response=result,
+    )
+
+
 class LigandAITimeoutError(LigandAIError):
     """A `.wait()` call exceeded its timeout while polling a job."""
 
@@ -1127,6 +1315,22 @@ def error_from_response(
                 # short snake_case kinds, not user-facing prose.
                 or payload.get("error")
             ),
+            **common,
+        )
+    # [bd-LIGANDAI_ALPHA_V2-7r1sb] A receptor-MSA refusal, whatever status it
+    # arrives under. /api/retry-fold answers 200 with status='refused' (the
+    # daemon keys on the body, and a non-200 would reduce the diagnosis to a
+    # `detail` string), but a route that chooses to surface it as an HTTP error
+    # must still produce the typed class rather than a bare message.
+    _msa_diag = receptor_msa_diagnosis(payload) or (
+        payload if payload.get("tag") == RECEPTOR_MSA_TAG_UNAVAILABLE else None
+    )
+    if _msa_diag is not None and _msa_diag.get("tag") == RECEPTOR_MSA_TAG_UNAVAILABLE:
+        return LigandAIReceptorMsaUnavailable(
+            _msa_diag.get("human") or message,
+            job_id=str(payload.get("job_id") or payload.get("jobId") or ""),
+            job_status=str(payload.get("status") or "refused"),
+            diagnosis=_msa_diag,
             **common,
         )
     if status_code == 404:

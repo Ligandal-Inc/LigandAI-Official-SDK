@@ -328,6 +328,41 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "remediation": "The co-validation engine ran under conditions that are not provenance-checked: its per-fold artifacts are not retained, so the alignment depth it actually used cannot be confirmed for this fold. Treat the agreement as provisional until the realized MSA depth is recorded alongside the result.",
         "doc_anchor": "guides/ensemble-folding#why",
     },
+    # ─── receptor MSA availability (bd-LIGANDAI_ALPHA_V2-7r1sb) ──────────────
+    #
+    # The platform can now RECOVER a receptor alignment the primary prefetch
+    # missed (local MSA service re-probe -> Modal volume cache -> UniProt
+    # canonical-parent slice) and refuses the fold when it cannot. Before this,
+    # /api/retry-fold answered {"prefetch_msa": true} whether it attached an
+    # 813-row alignment or nothing at all, so an SDK caller had no way to tell a
+    # compensated fold from a blind one — which is how 145 of one customer's
+    # Brd4ET folds died blaming a healthy MSA service (bd-dre-7ae4n).
+    #
+    # The full machine-readable object rides on
+    # `LigandAIReceptorMsaUnavailable.diagnosis` (and on a job result's
+    # `retry_msa_diagnosis`); these codes are the SUMMARY line so a caller
+    # watching `job.diagnostics` sees the condition without catching an error.
+    "receptor_msa_self_healed": {
+        "severity": "warning",
+        "stage": "fold",
+        "title": "Receptor alignment was recovered from a fallback source",
+        "remediation": "A receptor chain had no alignment from the primary MSA path, so the platform recovered one (a forced local-service re-probe, the Modal volume cache, or a column subset of the receptor's UniProt canonical parent). The fold is valid and was NOT run MSA-free, but the alignment did not come from the usual route: check `details.recovered_by` and the per-chain realized depth before comparing this fold's ipSAE against folds whose depth came from the primary path.",
+        "doc_anchor": "guides/ensemble-folding#why",
+    },
+    "receptor_msa_unavailable": {
+        "severity": "error",
+        "stage": "fold",
+        "title": "No alignment could be found for a receptor chain",
+        "remediation": "Every source was tried and none could align this receptor, so the fold was refused rather than degraded — an MSA-free receptor fold returns a confident structure with a meaningless ipSAE that downstream ranking cannot tell from a real one. Read `details.required_fixes` for the ordered, cause-specific remedy and `details.retryable` to decide whether to retry at all; `details.rungs` records which source was tried, what it answered and how long it took.",
+        "doc_anchor": "guides/ensemble-folding#why",
+    },
+    "receptor_msa_parent_not_sliceable": {
+        "severity": "warning",
+        "stage": "fold",
+        "title": "Receptor's UniProt parent is known but cannot be sliced",
+        "remediation": "The receptor resolved to a UniProt accession whose full-length alignment exists on disk, but the MSA service will not column-subset it: the entry predates the per-isoform commit record the service requires. Supply the parent link explicitly (msaSourceGene + geneRange) or ask an operator to re-precompute the parent so a committed entry is written.",
+        "doc_anchor": "guides/ensemble-folding#why",
+    },
     # ─── selectivity panel (mirrored from shared/warnings.json) ──────────────
     #
     # Added platform-side 2026-08-31 by the shared selectivity-verdict evaluator
