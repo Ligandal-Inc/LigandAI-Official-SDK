@@ -688,7 +688,16 @@ job = client.peptides.generate(
 )
 
 fold_job = client.peptides.fold(
-    ["ACDEFGHIK", "MNPQRSTVWY"],
+    [
+        # Receptor: leave it unflagged so it KEEPS its MSA.
+        {"chainId": "A", "sequence": receptor_seq, "geneName": "EGFR"},
+        # ⛔ Flag the designed chain. An unflagged protein chain is folded as a
+        # RECEPTOR, and a receptor is required to have an MSA — a de novo binder
+        # has no homologs, so the fold can be refused outright. See
+        # "Folding a designed binder" below.
+        {"chainId": "B", "sequence": designed_binder, "is_peptide": True},
+    ],
+    target_gene="EGFR",
     sampling_steps=1000,
     recycling_steps=5,
     num_trajectories=10,
@@ -696,6 +705,76 @@ fold_job = client.peptides.fold(
     contribute_to_receptordb=True,
 )
 ```
+
+## Folding a designed binder
+
+Every `protein` chain you submit is treated as a **receptor** unless you say
+otherwise, and a receptor is entitled to a multiple-sequence alignment. A
+LigandForge design — or any de novo binder — has **no homologs**; that is the
+entire point of designing it. So the platform runs a full mmseqs search that
+can only come back degenerate, and when the MSA service cannot answer at all
+**the fold is refused** for an alignment that cannot exist.
+
+Flag the designed chain. Any **one** of these is sufficient — the SDK
+normalizes whichever you set into every spelling the platform reads:
+
+```python
+job = client.peptides.fold(
+    sequences=[
+        # Receptor: unflagged, and geneName is what sources its MSA.
+        {"chainId": "A", "sequence": BRD4_ET_DOMAIN, "geneName": "BRD4"},
+
+        # The design. Pick any one:
+        {"chainId": "B", "sequence": binder, "is_peptide": True},
+        # {"chainId": "B", "sequence": binder, "isPeptide": True},
+        # {"chainId": "B", "sequence": binder, "use_msa": False},
+        # {"chainId": "B", "sequence": binder, "role": "peptide"},   # or "binder"
+    ],
+    target_gene="BRD4",
+    diffusion_samples=4,
+)
+
+result = job.wait()
+print(result.peptide_ipsae)      # peptide<->receptor interface confidence
+```
+
+The typed form works too:
+
+```python
+from ligandai.types import Sequence
+
+job = client.peptides.fold(sequences=[
+    Sequence(sequence=BRD4_ET_DOMAIN, target_chain="A", target_gene="BRD4"),
+    Sequence(sequence=binder, target_chain="B", is_peptide=True),
+])
+```
+
+And for the plain two-chain case, the shorthand flags chain B for you:
+
+```python
+job = client.fold(BRD4_ET_DOMAIN, binder)
+```
+
+Flagging is also **faster**, not merely safer: a flagged chain is folded with an
+empty MSA, which is what the model wants for a design anyway. Measured on an
+identical two-chain fold (306 aa receptor + 10-mer peptide, same settings, warm
+container): **34.2 s flagged vs 77.3 s unflagged** — about 43 s of extra GPU
+time per fold, spent searching for homologs that do not exist.
+
+Do **not** flag the receptor. Folding a receptor without its MSA measurably
+degrades the predicted complex, and because the result still scores, a
+wrongly-flagged receptor yields a plausible number for the wrong complex rather
+than an error. Ligand, DNA and RNA entities are never MSA'd and never need the
+flag.
+
+You only need this when you build the `sequences` list by hand.
+`generate(auto_fold=True)` folds its own output,
+`fold_batch(peptides=[...], target_gene=...)` takes bare peptide strings against
+one receptor and treats them all as de novo, the grouped
+`fold_batch(groups=[...])` form flags any partner typed `"peptide"`, and
+`cofold()` derives it from each chain's `kind`.
+`ligandai.resources.peptides.is_peptide_chain(entity)` is exported if you want
+to test an entity yourself.
 
 ## Batch fold against a fixed receptor (v0.5.5+)
 
