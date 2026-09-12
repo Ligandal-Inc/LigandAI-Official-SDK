@@ -20,7 +20,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, TypeAlias, TypedDict, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import NotRequired
 
 # -- Base ---------------------------------------------------------------------
@@ -3663,11 +3670,37 @@ class ProgramInviteAcceptResult(_LGModel):
 
 
 class Chart(_LGModel):
-    id: str
-    chart_type: str = Field(alias="chartType")
-    title: str
-    image_url: str | None = Field(default=None, alias="imageUrl")
-    created_at: datetime | None = Field(default=None, alias="createdAt")
+    """One server-rendered chart.
+
+    ⛔ Three different server surfaces emit this shape and NONE of them emits
+    ``id``, ``imageUrl`` or ``chartType``: ``POST /api/charts/generate`` returns
+    ``{success, chart_id, url, svg_url, file_path}``, ``GET /api/charts/{id}``
+    returns ``{chartId, url, format}``, and a ``/api/charts/list`` row carries
+    ``{chart_id, chart_type, title, formats, file_paths, program_id, created_at}``.
+    The alias sets below cover all three; before they existed every
+    ``client.charts.*`` call raised ``ValidationError`` on a perfectly good
+    response. [bd-dre-mc8jm]
+    """
+
+    id: str = Field(validation_alias=AliasChoices("id", "chart_id", "chartId"))
+    chart_type: str | None = Field(
+        default=None, validation_alias=AliasChoices("chart_type", "chartType")
+    )
+    title: str | None = None
+    image_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("image_url", "imageUrl", "url"),
+    )
+    """PNG (or, for a ``format="svg"`` render, SVG) URL. The server names this
+    field ``url``; ``image_url`` is the SDK's stable name for it."""
+    svg_url: str | None = Field(
+        default=None, validation_alias=AliasChoices("svg_url", "svgUrl")
+    )
+    """Only populated when the chart was rendered with ``format="svg"`` or
+    ``format="both"`` — a PNG-only render has no SVG to point at."""
+    created_at: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("created_at", "createdAt")
+    )
 
 
 class ReportSection(_LGModel):
