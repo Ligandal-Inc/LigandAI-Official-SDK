@@ -1679,28 +1679,99 @@ def _fold_body(
             body["name"] = normalized[0]["name"]
     else:
         body["entities"] = [
-            {
-                "type": s.get("type", "protein"),
-                "chainId": s.get("chainId") or chr(ord("A") + i),
-                "sequence": s["sequence"],
-                **({"name": s["name"]} if "name" in s else {}),
-                **({"geneName": s["geneName"]} if "geneName" in s else {}),
-                # Forward peptide / no-MSA flags so the server skips MSA prefetch
-                # for de novo binder chains. Without these the platform would POST
-                # the orphan peptide to the local MSA service, which rejects it as
-                # "Degenerate MSA: only 1 sequence" after a wasted mmseqs search.
-                # bd-LIGANDAI_ALPHA_V2-5319n.
-                **({"isPeptide": True} if (s.get("isPeptide") or s.get("is_peptide")) else {}),
-                **({"is_peptide": True} if (s.get("isPeptide") or s.get("is_peptide")) else {}),
-                **({"use_msa": False} if s.get("use_msa") is False else {}),
-                **({"role": s["role"]} if "role" in s else {}),
-            }
-            for i, s in enumerate(normalized)
+            _fold_entity(s, i) for i, s in enumerate(normalized)
         ]
     return body
 
 
+#: Role strings the platform accepts as "this chain is a designed binder".
+#: Mirrors ``fastapi_backend/services/msa_prefetch_guard.py::_is_flagged_peptide``.
+PEPTIDE_ROLES: frozenset[str] = frozenset({"peptide", "binder", "ligand_peptide"})
+
+
+def is_peptide_chain(entity: dict[str, Any]) -> bool:
+    """True when a fold chain carries ANY de novo peptide / no-MSA signal.
+
+    Accepts every spelling the platform honors — ``isPeptide``, ``is_peptide``,
+    ``use_msa=False``, and ``role``/``entity_role``/``chain_role`` in
+    :data:`PEPTIDE_ROLES`. One is sufficient. Mirrors the server-side guard
+    ``msa_prefetch_guard._is_flagged_peptide`` so the SDK and the platform agree
+    on what counts as a flag.
+    """
+    if entity.get("isPeptide") is True or entity.get("is_peptide") is True:
+        return True
+    if entity.get("use_msa") is False:
+        return True
+    for role_key in ("role", "entity_role", "chain_role"):
+        role = entity.get(role_key)
+        if isinstance(role, str) and role.strip().lower() in PEPTIDE_ROLES:
+            return True
+    return False
+
+
+def _fold_entity(s: dict[str, Any], index: int) -> dict[str, Any]:
+    """Build one wire entity for ``POST /api/folding/predict``.
+
+    ⛔ ONE CALLER FLAG MUST BECOME EVERY WIRE SPELLING. [bd-dre-yt8kx]
+
+    Four independent consumers decide "is this chain a designed binder" and they
+    do NOT read the same keys:
+
+      * ``msa_prefetch_guard._is_flagged_peptide`` — isPeptide, is_peptide,
+        use_msa=False, role/entity_role/chain_role
+      * ``modal_workers/boltz2.py`` (~2567)  — the same four
+      * ``modal_workers/boltz2_batch.py`` (~403) — ``isPeptide`` and
+        ``use_msa`` ONLY
+      * ``modal_workers/boltz2_fda_v2.py`` (~205) — ``isPeptide`` and
+        ``use_msa`` ONLY
+
+    So a caller who sets only ``role="binder"`` (or only snake-case
+    ``is_peptide``) clears the prefetch guard and is still folded as a RECEPTOR
+    by the batch and FDA workers — which then demand an MSA the design cannot
+    have. Normalizing any one signal to ``isPeptide`` + ``is_peptide`` +
+    ``use_msa: False`` is what makes a single caller-side flag actually hold all
+    the way to the GPU. Do not "simplify" this back to forwarding whatever the
+    caller happened to type.
+    """
+    entity: dict[str, Any] = {
+        "type": s.get("type", "protein"),
+        "chainId": s.get("chainId") or chr(ord("A") + index),
+        "sequence": s["sequence"],
+    }
+    if "name" in s:
+        entity["name"] = s["name"]
+    if "geneName" in s:
+        entity["geneName"] = s["geneName"]
+    if "role" in s:
+        entity["role"] = s["role"]
+    # A non-polypeptide (ligand / dna / rna) is never MSA'd and is never
+    # labelled a peptide — it carries its own Boltz-2 entity type instead.
+    if entity["type"] != "protein":
+        return entity
+    if is_peptide_chain(s):
+        # De novo binders are orphan sequences: the local MSA service runs a full
+        # mmseqs search and then rejects the result as "Degenerate MSA: only 1
+        # sequence", and when it cannot answer at all the fold is REFUSED for an
+        # alignment that cannot exist. bd-LIGANDAI_ALPHA_V2-5319n / bd-dre-yt8kx.
+        entity["isPeptide"] = True
+        entity["is_peptide"] = True
+        entity["use_msa"] = False
+    elif s.get("use_msa") is True:
+        # Explicit receptor opt-IN travels too, so a caller can be unambiguous.
+        entity["use_msa"] = True
+    return entity
+
+
 def _norm_seq(s: Sequence | str | dict[str, Any]) -> dict[str, Any]:
+    """Normalize one fold chain into the flat dict ``_fold_body`` consumes.
+
+    ⛔ The ``Sequence`` branch used to emit ONLY sequence/name/geneName/chainId,
+    so every peptide/no-MSA flag a caller set on a typed ``Sequence`` was
+    dropped before the body was built — and ``Sequence.msa`` was never read at
+    all. A caller who wrote ``Sequence(sequence=design, msa=False)`` got a chain
+    that the platform folded as a RECEPTOR and demanded an MSA for. Keep the
+    flags travelling. [bd-dre-yt8kx]
+    """
     if isinstance(s, str):
         return {"sequence": s}
     if isinstance(s, Sequence):
@@ -1711,6 +1782,25 @@ def _norm_seq(s: Sequence | str | dict[str, Any]) -> dict[str, Any]:
             out["geneName"] = s.target_gene
         if s.target_chain:
             out["chainId"] = s.target_chain
+        if s.type:
+            out["type"] = s.type
+        if s.role:
+            out["role"] = s.role
+        if s.is_peptide is not None:
+            out["isPeptide"] = bool(s.is_peptide)
+            out["is_peptide"] = bool(s.is_peptide)
+        # `msa` is the deprecated alias for `use_msa`; an explicit `use_msa`
+        # always wins. Either False also implies the peptide flag below.
+        effective_use_msa = s.use_msa if s.use_msa is not None else s.msa
+        if effective_use_msa is not None:
+            out["use_msa"] = bool(effective_use_msa)
+        # Any no-MSA spelling implies isPeptide on the wire, so a single flag is
+        # enough for the caller and every downstream guard sees a signal it
+        # recognizes regardless of which key it reads.
+        if s.msa_disabled:
+            out["isPeptide"] = True
+            out["is_peptide"] = True
+            out["use_msa"] = False
         return out
     return dict(s)
 
@@ -2024,17 +2114,34 @@ def _cofold_chains(chains: list[Any]) -> list[dict[str, Any]]:
     if not isinstance(chains, list) or not chains:
         raise ValueError("chains must be a non-empty list")
     n = len(chains)
+    normalized_chains = [_norm_seq(c) for c in chains]
+    # When ANY chain is explicitly flagged, the caller has told us which chain is
+    # the design and the positional "last chain is the peptide" fallback must NOT
+    # also fire — otherwise a flagged binder listed first leaves the RECEPTOR
+    # labelled a peptide and co-folded with no MSA. [bd-dre-yt8kx]
+    any_explicit_flag = any(
+        is_peptide_chain(d) or str(d.get("kind") or "").strip().lower() in ("receptor", "peptide")
+        for d in normalized_chains
+    )
     out: list[dict[str, Any]] = []
-    for i, c in enumerate(chains):
-        d = _norm_seq(c)  # {sequence, name?, geneName?, chainId?}
+    for i, d in enumerate(normalized_chains):
         seq = str(d.get("sequence") or "").strip()
         if not seq:
             raise ValueError(f"chains[{i}] has no sequence")
         cid = d.get("chainId") or d.get("id") or chr(ord("A") + i)
         kind = str(d.get("kind") or "").strip().lower()
         if kind not in ("receptor", "peptide"):
-            # Default: last chain in a multi-chain complex is the peptide.
-            kind = "peptide" if (n >= 2 and i == n - 1) else "receptor"
+            # An explicit peptide/binder flag beats position. A caller who
+            # flagged the design but listed it first would otherwise have it
+            # co-folded as the receptor. [bd-dre-yt8kx]
+            if is_peptide_chain(d):
+                kind = "peptide"
+            elif any_explicit_flag:
+                # Some chain was named explicitly; an unnamed one is the receptor.
+                kind = "receptor"
+            else:
+                # Default: last chain in a multi-chain complex is the peptide.
+                kind = "peptide" if (n >= 2 and i == n - 1) else "receptor"
         # Drop any MSA key a caller put on the chain dict — MSA is shared.
         out.append({"id": str(cid), "sequence": seq, "kind": kind})
     return out
@@ -4727,6 +4834,29 @@ class Peptides(Resource):
                 reproducing current behavior. May improve physical validity of the
                 predicted complex at a modest speed cost. Boltz-2 path only —
                 ignored by ESMFold approaches.
+
+        ⛔ FLAG YOUR DESIGNED CHAINS. A ``protein`` chain with no peptide flag is
+        folded as a RECEPTOR, and a receptor is entitled to a multiple-sequence
+        alignment. A LigandForge design — or any de novo binder — has no
+        homologs, so that MSA search can only come back degenerate, and when the
+        MSA service cannot answer the fold is REFUSED for an alignment that
+        cannot exist. Mark every designed chain with ``is_peptide=True`` (or
+        ``use_msa=False``, or ``role="peptide"`` — any one is enough); the
+        receptor chain keeps its MSA::
+
+            job = client.peptides.fold(
+                sequences=[
+                    {"chainId": "A", "sequence": BRD4_ET_DOMAIN, "geneName": "BRD4"},
+                    {"chainId": "B", "sequence": DESIGNED_BINDER, "is_peptide": True},
+                ],
+                target_gene="BRD4",
+                diffusion_samples=4,
+            )
+
+        Chains may be plain strings, dicts as above, or
+        :class:`~ligandai.types.Sequence` objects
+        (``Sequence(sequence=..., is_peptide=True)``). For the common two-chain
+        case ``client.fold(receptor_seq, binder_seq)`` flags chain B for you.
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")
@@ -7364,6 +7494,29 @@ class AsyncPeptides(AsyncResource):
         """Async sibling of :meth:`Peptides.fold`. See :meth:`Peptides.fold` for
         ``n_parallel_gpus`` semantics and the GPU / dedupe / credit pre-flight
         hardening (gpu='b200_plus' only, 24h local dedupe).
+
+        ⛔ FLAG YOUR DESIGNED CHAINS. A ``protein`` chain with no peptide flag is
+        folded as a RECEPTOR, and a receptor is entitled to a multiple-sequence
+        alignment. A LigandForge design — or any de novo binder — has no
+        homologs, so that MSA search can only come back degenerate, and when the
+        MSA service cannot answer the fold is REFUSED for an alignment that
+        cannot exist. Mark every designed chain with ``is_peptide=True`` (or
+        ``use_msa=False``, or ``role="peptide"`` — any one is enough); the
+        receptor chain keeps its MSA::
+
+            job = client.peptides.fold(
+                sequences=[
+                    {"chainId": "A", "sequence": BRD4_ET_DOMAIN, "geneName": "BRD4"},
+                    {"chainId": "B", "sequence": DESIGNED_BINDER, "is_peptide": True},
+                ],
+                target_gene="BRD4",
+                diffusion_samples=4,
+            )
+
+        Chains may be plain strings, dicts as above, or
+        :class:`~ligandai.types.Sequence` objects
+        (``Sequence(sequence=..., is_peptide=True)``). For the common two-chain
+        case ``client.fold(receptor_seq, binder_seq)`` flags chain B for you.
         """
         if self._client is not None:
             self._client._require_feature("predict_structure")

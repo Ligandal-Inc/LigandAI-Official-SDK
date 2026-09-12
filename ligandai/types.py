@@ -11,12 +11,17 @@ For internal-only types (HTTP machinery, rate limiter state) see
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import hashlib
+import json
+import re
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from types import MappingProxyType
+from typing import Annotated, Any, Literal, TypeAlias, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing_extensions import NotRequired
 
 # -- Base ---------------------------------------------------------------------
 
@@ -844,6 +849,783 @@ class Dataset(_LGModel):
     uploaded_at: datetime | None = Field(default=None, alias="uploadedAt")
 
 
+# -- Signed H-SWAE capability boundary ---------------------------------------
+
+
+HSWAE_CAPABILITY_CONTRACT_VERSION = "1.0.0"
+HSWAE_ANNOTATION_PUBLIC_REFERENCE = "HSWAE-2 cell_type_global_specificity (HPA v25 surfaceome)"
+
+HswaeCapabilityOperation: TypeAlias = Literal[
+    "hswae.v1.semantic_search",
+    "hswae.v1.surface_markers",
+    "hswae.v2.resolve_cell_type",
+    "hswae.v2.compare_cell_types",
+    "hswae.v2.isoform_expression",
+    "hswae.v2.annotate_dataset",
+    "predictive_interactomics.complex_specificity",
+]
+
+# SHA-256 over each reviewed 1.0.0 definition after recursively sorting JSON
+# object keys.  The server does not carry a separate definition-version field,
+# so accepting metadata or schema drift under the same contractVersion would
+# silently change the public SDK contract.
+HSWAE_CAPABILITY_DEFINITION_HASHES: Mapping[HswaeCapabilityOperation, str] = MappingProxyType(
+    {
+        "hswae.v1.semantic_search": (
+            "059b7dabfe64b95df6db302e19c41db4140b21eeb17c1fee1d601942ab1e4530"
+        ),
+        "hswae.v1.surface_markers": (
+            "4f19e07593de43bc4daecf02229c7033e35248cf639b4fb9d96ddc2b6d8dadc9"
+        ),
+        "hswae.v2.resolve_cell_type": (
+            "78ff3122da897fab5d1e49ec2a0f01cd8e90e76e9c0ec8c6ca35d88c03b8ca40"
+        ),
+        "hswae.v2.compare_cell_types": (
+            "cd752bf2c9284510cbabbbcd89f8be4be2cf0817c0f676aa73f12e53f0e90881"
+        ),
+        "hswae.v2.isoform_expression": (
+            "1716acbd629ea944bebd9fc33df97a1f721211e8776bacfec455b38df0164ad2"
+        ),
+        "hswae.v2.annotate_dataset": (
+            "53ba38fff81386bc01c6b98d24e17237c9e7156cf546654efe317acc273b43af"
+        ),
+        "predictive_interactomics.complex_specificity": (
+            "26938db63750694e25c0ba1b6583a3dc90354f24441072e2f5d64ea3a88b0a06"
+        ),
+    }
+)
+
+HswaeJsonSchemaType: TypeAlias = Literal[
+    "object",
+    "array",
+    "string",
+    "integer",
+    "number",
+    "boolean",
+    "null",
+]
+HswaeJsonSchemaScalar: TypeAlias = str | int | float | bool | None
+
+_HswaePublicString: TypeAlias = Annotated[str, Field(min_length=1, max_length=2_000)]
+_HswaeNullablePublicString: TypeAlias = Annotated[str, Field(max_length=2_000)] | None
+_HswaeGene: TypeAlias = Annotated[str, Field(min_length=1, max_length=100)]
+
+_HSWAE_COMPLEX_SUBUNIT_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._-]*$")
+_HSWAE_COMPLEX_URI_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_HSWAE_COMPLEX_INTERNAL_LABELS = (
+    "cell_context_expression",
+    "cell_type_expression_agg",
+    "gene_context_expression",
+    "transcript_context_expression",
+    "sqlite_master",
+    "source_dataset",
+    "internal_db_path",
+    "database_url",
+    ".sqlite",
+    ".sqlite3",
+    ".db",
+)
+
+
+def _validate_hswae_complex_public_label(value: str, *, allow_empty: bool = False) -> str:
+    normalized = value.strip()
+    lowered = normalized.lower()
+    if (
+        value != normalized
+        or (not allow_empty and not normalized)
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+        or "/" in normalized
+        or "\\" in normalized
+        or ".." in normalized
+        or normalized.startswith("~")
+        or _HSWAE_COMPLEX_URI_SCHEME_PATTERN.match(normalized) is not None
+        or any(encoded in lowered for encoded in ("%25", "%2e", "%2f", "%5c"))
+        or any(identifier in lowered for identifier in _HSWAE_COMPLEX_INTERNAL_LABELS)
+    ):
+        raise ValueError("complex public label is invalid")
+    return value
+
+
+class _HswaeClosedModel(BaseModel):
+    """Strict model used only for the signed external capability contract.
+
+    The SDK's general response models deliberately allow additive fields. The
+    signed capability surface is different: every object is closed and must
+    fail rather than silently accept contract drift.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        allow_inf_nan=False,
+        frozen=True,
+    )
+
+
+class HswaeJsonSchemaNode(_HswaeClosedModel):
+    """Closed recursive JSON-schema subset returned by capability discovery."""
+
+    type: HswaeJsonSchemaType | list[HswaeJsonSchemaType]
+    additional_properties: bool | None = Field(default=None, alias="additionalProperties")
+    properties: dict[str, HswaeJsonSchemaNode] | None = Field(default=None, max_length=100)
+    required: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(
+        default=None,
+        max_length=100,
+    )
+    any_of: list[HswaeJsonSchemaNode] | None = Field(
+        default=None,
+        alias="anyOf",
+        max_length=20,
+    )
+    items: HswaeJsonSchemaNode | None = None
+    enum: list[HswaeJsonSchemaScalar] | None = Field(default=None, max_length=100)
+    default: HswaeJsonSchemaScalar = None
+    minimum: float | None = None
+    maximum: float | None = None
+    min_length: int | None = Field(default=None, alias="minLength", ge=0, le=1_000_000)
+    max_length: int | None = Field(default=None, alias="maxLength", ge=0, le=1_000_000)
+    min_items: int | None = Field(default=None, alias="minItems", ge=0, le=1_000_000)
+    max_items: int | None = Field(default=None, alias="maxItems", ge=0, le=1_000_000)
+    unique_items: bool | None = Field(default=None, alias="uniqueItems")
+    pattern: Annotated[str, Field(max_length=2_000)] | None = None
+    description: Annotated[str, Field(max_length=10_000)] | None = None
+
+    @field_validator("type")
+    @classmethod
+    def _validate_type_list(
+        cls,
+        value: HswaeJsonSchemaType | list[HswaeJsonSchemaType],
+    ) -> HswaeJsonSchemaType | list[HswaeJsonSchemaType]:
+        if isinstance(value, list) and (
+            not value or len(value) > 7 or len(set(value)) != len(value)
+        ):
+            raise ValueError("schema type list must be non-empty and unique")
+        return value
+
+    @field_validator("properties")
+    @classmethod
+    def _validate_property_names(
+        cls,
+        value: dict[str, HswaeJsonSchemaNode] | None,
+    ) -> dict[str, HswaeJsonSchemaNode] | None:
+        if value is not None and any(not key or len(key) > 200 for key in value):
+            raise ValueError("schema property name is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_ranges(self) -> HswaeJsonSchemaNode:
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("schema numeric bounds are inverted")
+        if (
+            self.min_length is not None
+            and self.max_length is not None
+            and self.min_length > self.max_length
+        ):
+            raise ValueError("schema string bounds are inverted")
+        if (
+            self.min_items is not None
+            and self.max_items is not None
+            and self.min_items > self.max_items
+        ):
+            raise ValueError("schema array bounds are inverted")
+        return self
+
+
+class HswaeJsonObjectSchema(HswaeJsonSchemaNode):
+    """Closed object-schema root required for advertised inputs and outputs."""
+
+    type: Literal["object"]
+    additional_properties: Literal[False] = Field(alias="additionalProperties")
+    properties: dict[str, HswaeJsonSchemaNode] = Field(max_length=100)
+
+
+class HswaeCapabilityDefinition(_HswaeClosedModel):
+    operation: HswaeCapabilityOperation
+    title: Annotated[str, Field(min_length=1, max_length=500)]
+    description: Annotated[str, Field(min_length=1, max_length=10_000)]
+    domain: Literal["transcriptomics", "predictive_interactomics"]
+    effect: Literal["read_local"]
+    execution_mode: Literal["immediate"] = Field(alias="executionMode")
+    required_entitlements: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        alias="requiredEntitlements",
+        min_length=1,
+        max_length=20,
+    )
+    required_approval_scopes: list[
+        Literal[
+            "geo.download",
+            "dataset.ingest",
+            "hswae.finetune",
+            "artifact.register",
+        ]
+    ] = Field(alias="requiredApprovalScopes", max_length=0)
+    input_schema: HswaeJsonObjectSchema = Field(alias="inputSchema")
+    output_schema: HswaeJsonObjectSchema = Field(alias="outputSchema")
+    backend_family: Literal["hswae_v1", "hswae_v2"] = Field(alias="backendFamily")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _pin_reviewed_definition(cls, value: Any) -> Any:
+        if type(value) is not dict:
+            raise ValueError("capability definition must be a plain object")
+        operation = value.get("operation")
+        expected = (
+            HSWAE_CAPABILITY_DEFINITION_HASHES.get(cast(HswaeCapabilityOperation, operation))
+            if isinstance(operation, str)
+            else None
+        )
+        if expected is None:
+            raise ValueError("capability definition operation is unsupported")
+        try:
+            canonical = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("capability definition is not canonical JSON") from exc
+        if hashlib.sha256(canonical).hexdigest() != expected:
+            raise ValueError("capability definition digest mismatch")
+        return value
+
+
+class HswaeCapabilityDiscovery(_HswaeClosedModel):
+    contract_version: Literal["1.0.0"] = Field(alias="contractVersion")
+    capabilities: list[HswaeCapabilityDefinition] = Field(max_length=7)
+
+    @field_validator("capabilities")
+    @classmethod
+    def _unique_operations(
+        cls,
+        value: list[HswaeCapabilityDefinition],
+    ) -> list[HswaeCapabilityDefinition]:
+        operations = [entry.operation for entry in value]
+        if len(operations) != len(set(operations)):
+            raise ValueError("capability operations must be unique")
+        return value
+
+
+class HswaeSemanticSearchInput(TypedDict):
+    query: str
+    k: NotRequired[int]
+
+
+class HswaeSurfaceMarkersInput(TypedDict):
+    context: str
+    top_n: NotRequired[int]
+    exclude_contexts: NotRequired[list[str]]
+
+
+class HswaeResolveCellTypeInput(TypedDict):
+    query: str
+    marker_genes: NotRequired[list[str]]
+    top_k: NotRequired[int]
+
+
+class HswaeCompareCellTypesInput(TypedDict):
+    target_cell_type: str
+    reference_cell_types: NotRequired[list[str]]
+    comparator_scope: NotRequired[
+        Literal[
+            "topical",
+            "tissue_resident",
+            "systemic",
+            "cluster_only",
+        ]
+    ]
+    delivery_context: NotRequired[str]
+    top_n: NotRequired[int]
+
+
+class HswaeIsoformExpressionInput(TypedDict):
+    gene: str
+    top_n_isoforms: NotRequired[int]
+    min_mean_tpm: NotRequired[float]
+
+
+class HswaeAnnotateDatasetInput(TypedDict):
+    dataset_ref: str
+    top_n: NotRequired[int]
+
+
+class HswaeComplexSpecificityInput(TypedDict):
+    subunits: list[str]
+    complex_name: NotRequired[str]
+    min_subunit_tpm: NotRequired[float]
+    limit: NotRequired[int]
+
+
+class _HswaeSemanticSearchInput(_HswaeClosedModel):
+    query: Annotated[str, Field(min_length=1, max_length=2_000)]
+    k: int | None = Field(default=None, ge=1, le=50)
+
+
+class _HswaeSurfaceMarkersInput(_HswaeClosedModel):
+    context: Annotated[str, Field(min_length=1, max_length=2_000)]
+    top_n: int | None = Field(default=None, ge=1, le=500)
+    exclude_contexts: list[Annotated[str, Field(max_length=2_000)]] | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+
+class _HswaeResolveCellTypeInput(_HswaeClosedModel):
+    query: Annotated[str, Field(min_length=1, max_length=2_000)]
+    marker_genes: list[Annotated[str, Field(max_length=100)]] | None = Field(
+        default=None,
+        max_length=500,
+    )
+    top_k: int | None = Field(default=None, ge=1, le=20)
+
+
+class _HswaeCompareCellTypesInput(_HswaeClosedModel):
+    target_cell_type: Annotated[str, Field(min_length=1, max_length=2_000)]
+    reference_cell_types: list[Annotated[str, Field(max_length=2_000)]] | None = Field(
+        default=None,
+        max_length=200,
+    )
+    comparator_scope: (
+        Literal[
+            "topical",
+            "tissue_resident",
+            "systemic",
+            "cluster_only",
+        ]
+        | None
+    ) = None
+    delivery_context: Annotated[str, Field(max_length=500)] | None = None
+    top_n: int | None = Field(default=None, ge=1, le=200)
+
+
+class _HswaeIsoformExpressionInput(_HswaeClosedModel):
+    gene: Annotated[str, Field(min_length=1, max_length=64)]
+    top_n_isoforms: int | None = Field(default=None, ge=1, le=50)
+    min_mean_tpm: float | None = Field(default=None, ge=0)
+
+
+class _HswaeAnnotateDatasetInput(_HswaeClosedModel):
+    dataset_ref: Annotated[str, Field(min_length=1, max_length=2_000)]
+    top_n: int | None = Field(default=None, ge=1, le=10)
+
+
+class _HswaeComplexSpecificityInput(_HswaeClosedModel):
+    subunits: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
+        min_length=2,
+        max_length=32,
+    )
+    complex_name: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    min_subunit_tpm: float | None = Field(default=None, ge=0)
+    limit: int | None = Field(default=None, ge=1, le=200)
+
+    @field_validator("complex_name")
+    @classmethod
+    def _validate_complex_name(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError("complex name is invalid")
+        return value
+
+    @field_validator("subunits")
+    @classmethod
+    def _normalize_unique_subunits(cls, value: list[str]) -> list[str]:
+        normalized = [subunit.strip().upper() for subunit in value]
+        if (
+            any(_HSWAE_COMPLEX_SUBUNIT_PATTERN.fullmatch(subunit) is None for subunit in normalized)
+            or len(normalized) != len(set(normalized))
+        ):
+            raise ValueError("complex subunits must be unique after normalization")
+        return normalized
+
+
+_HSWAE_INPUT_MODELS: dict[HswaeCapabilityOperation, type[_HswaeClosedModel]] = {
+    "hswae.v1.semantic_search": _HswaeSemanticSearchInput,
+    "hswae.v1.surface_markers": _HswaeSurfaceMarkersInput,
+    "hswae.v2.resolve_cell_type": _HswaeResolveCellTypeInput,
+    "hswae.v2.compare_cell_types": _HswaeCompareCellTypesInput,
+    "hswae.v2.isoform_expression": _HswaeIsoformExpressionInput,
+    "hswae.v2.annotate_dataset": _HswaeAnnotateDatasetInput,
+    "predictive_interactomics.complex_specificity": _HswaeComplexSpecificityInput,
+}
+
+
+def validate_hswae_capability_input(
+    operation: HswaeCapabilityOperation,
+    input_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and copy one exact signed capability input before HTTP."""
+
+    model_type = _HSWAE_INPUT_MODELS.get(operation)
+    if model_type is None:
+        raise ValueError("unsupported H-SWAE capability operation")
+    validated = model_type.model_validate(input_data)
+    return cast(dict[str, Any], validated.model_dump(mode="json", exclude_none=True))
+
+
+class HswaeSemanticMatch(_HswaeClosedModel):
+    tissue: _HswaePublicString
+    score: float = Field(ge=-1, le=1)
+    match_type: Literal["exact", "alias", "cell_to_tissue", "fuzzy", "embedding"]
+    source_entity: _HswaePublicString
+    cell_type: _HswaeNullablePublicString
+
+
+class HswaeSemanticSearchResult(_HswaeClosedModel):
+    query: _HswaePublicString
+    matches: list[HswaeSemanticMatch] = Field(max_length=50)
+    count: int = Field(ge=0, le=50)
+
+
+class HswaeSurfaceMarker(_HswaeClosedModel):
+    gene: _HswaeGene
+    target_context: _HswaePublicString = Field(alias="targetContext")
+    method: Annotated[str, Field(min_length=1, max_length=200)]
+    similarity: float | None = Field(ge=-1, le=1)
+    mean_tpm: float | None = Field(alias="meanTpm", ge=0)
+    specificity_index: float | None = Field(alias="specificityIndex", ge=0)
+    rank: int | None = Field(ge=1)
+    ensembl_gene: _HswaeNullablePublicString = Field(alias="ensemblGene")
+    uniprot_id: _HswaeNullablePublicString = Field(alias="uniprotId")
+    protein_name: _HswaeNullablePublicString = Field(alias="proteinName")
+
+
+class HswaeSurfaceMarkersResult(_HswaeClosedModel):
+    query: _HswaePublicString
+    matched_tissues: list[HswaeSemanticMatch] = Field(max_length=5)
+    primary_tissue: _HswaePublicString
+    markers: list[HswaeSurfaceMarker] = Field(max_length=500)
+    timing_ms: float = Field(ge=0)
+    method: Literal["semantic_search_markers"]
+
+
+class HswaeSupportingGeneEvidence(_HswaeClosedModel):
+    gene: _HswaeGene
+    csi: float
+    rank_for_gene: int = Field(alias="rankForGene", ge=1)
+
+
+class HswaeResolveCellTypeCandidate(_HswaeClosedModel):
+    cell_type: _HswaePublicString
+    confidence: float = Field(ge=0, le=1)
+    top_tissue: _HswaeNullablePublicString
+    top_organ_system: _HswaeNullablePublicString
+    source: _HswaePublicString
+    proxy_for: _HswaeNullablePublicString
+    proxy_note: _HswaeNullablePublicString
+    alias_query: _HswaeNullablePublicString
+    alias_marker_genes: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
+        max_length=500,
+    )
+    requires_geo_ingest: list[Annotated[str, Field(min_length=1, max_length=2_000)]] = Field(
+        max_length=50,
+    )
+    supporting_genes: list[HswaeSupportingGeneEvidence] = Field(
+        alias="supportingGenes",
+        max_length=10,
+    )
+    vote_count: int | None = Field(ge=0)
+    marker_score: float | None
+
+
+class HswaeDeliveryContextHint(_HswaeClosedModel):
+    default_scope: Literal["topical", "tissue_resident", "systemic", "cluster_only"]
+    rationale: Annotated[str, Field(min_length=1, max_length=10_000)]
+    alternatives: list[Literal["topical", "tissue_resident", "systemic", "cluster_only"]] = Field(
+        max_length=4
+    )
+
+    @field_validator("alternatives")
+    @classmethod
+    def _unique_alternatives(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("delivery alternatives must be unique")
+        return value
+
+
+class HswaeResolveCellTypeResult(_HswaeClosedModel):
+    query: _HswaePublicString
+    canonical: _HswaeNullablePublicString
+    candidates: list[HswaeResolveCellTypeCandidate] = Field(max_length=20)
+    delivery_context_hint: HswaeDeliveryContextHint | None
+
+
+class HswaeDifferentialCellTypeRow(_HswaeClosedModel):
+    gene_name: _HswaeGene
+    target_cell_type: _HswaePublicString
+    target_csi: float
+    target_rank_global: int | None = Field(ge=1)
+    target_mean_expression: float | None = Field(ge=0)
+    max_reference_csi: float
+    delta_csi: float
+    is_surface_annotated: bool
+    top_tissue: _HswaeNullablePublicString
+    top_organ_system: _HswaeNullablePublicString
+
+
+class HswaeCompareCellTypesResult(_HswaeClosedModel):
+    target_cell_type: _HswaePublicString
+    target_query: _HswaePublicString
+    target_proxy_note: _HswaeNullablePublicString
+    reference_cell_types: list[_HswaePublicString] = Field(max_length=200)
+    differential: list[HswaeDifferentialCellTypeRow] = Field(max_length=200)
+    comparator_scope: (
+        Literal[
+            "topical",
+            "tissue_resident",
+            "systemic",
+            "cluster_only",
+        ]
+        | None
+    )
+    comparator_scope_source: Literal["request", "delivery_context", "none"]
+    delivery_context: _HswaeNullablePublicString
+
+
+class HswaeIsoformExpressionContext(_HswaeClosedModel):
+    tissue: _HswaePublicString
+    cell_type: _HswaeNullablePublicString
+    context_name: _HswaePublicString
+    mean_tpm: float = Field(ge=0)
+    median_tpm: float = Field(ge=0)
+    max_tpm: float = Field(ge=0)
+    prevalence_tpm1: float = Field(ge=0, le=1)
+    sample_count: int = Field(ge=0)
+
+
+class HswaeIsoformSpecificityContext(_HswaeClosedModel):
+    tissue: _HswaePublicString
+    cell_type: _HswaeNullablePublicString
+    transcript_si: float
+    usage_ratio: float
+    isi: float
+    isoform_usage: float
+    target_mean_tpm: float = Field(ge=0)
+    gene_mean_tpm: float = Field(ge=0)
+    rank_expression: int = Field(ge=1)
+    rank_usage: int = Field(ge=1)
+
+
+class HswaeIsoformResultRow(_HswaeClosedModel):
+    transcript_id: Annotated[str, Field(min_length=1, max_length=200)]
+    transcript_id_versioned: Annotated[str, Field(min_length=1, max_length=200)]
+    transcript_name: Annotated[str, Field(min_length=1, max_length=500)]
+    transcript_type: Annotated[str, Field(min_length=1, max_length=200)]
+    expression_by_context: list[HswaeIsoformExpressionContext] = Field(max_length=500)
+    specificity_by_context: list[HswaeIsoformSpecificityContext] = Field(max_length=500)
+
+
+class HswaeIsoformExpressionResult(_HswaeClosedModel):
+    gene: Annotated[str, Field(min_length=1, max_length=64)]
+    isoform_count: int = Field(ge=0, le=50)
+    isoforms: list[HswaeIsoformResultRow] = Field(max_length=50)
+    resolution: Literal["none", "tissue", "cell_type"]
+    note: Annotated[str, Field(min_length=1, max_length=10_000)]
+
+
+class HswaeAnnotationCandidate(_HswaeClosedModel):
+    cell_type: _HswaePublicString = Field(alias="cellType")
+    confidence: float = Field(ge=0, le=1)
+    supporting_genes: list[HswaeSupportingGeneEvidence] = Field(
+        alias="supportingGenes",
+        max_length=10,
+    )
+    vote_count: int = Field(alias="voteCount", ge=0)
+    marker_score: float = Field(alias="markerScore")
+    top_tissue: _HswaeNullablePublicString = Field(alias="topTissue")
+    top_organ_system: _HswaeNullablePublicString = Field(alias="topOrganSystem")
+
+
+class HswaeAnnotationAssignment(_HswaeClosedModel):
+    cluster_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="clusterId")
+    marker_count: int = Field(alias="markerCount", ge=0, le=50)
+    candidates: list[HswaeAnnotationCandidate] = Field(max_length=10)
+    top_assignment: _HswaeNullablePublicString = Field(alias="topAssignment")
+    confidence: float = Field(ge=0, le=1)
+
+
+class HswaeAnnotateDatasetResult(_HswaeClosedModel):
+    dataset_ref: Annotated[str, Field(min_length=1, max_length=2_000)] = Field(alias="datasetRef")
+    cluster_assignments: list[HswaeAnnotationAssignment] = Field(
+        alias="clusterAssignments",
+        max_length=500,
+    )
+    method: Literal["marker_overlap_vote"]
+    reference: Literal["HSWAE-2 cell_type_global_specificity (HPA v25 surfaceome)"]
+    source: Literal["authorized_user_dataset"] | None
+    note: _HswaeNullablePublicString
+
+
+class HswaeComplexSubunitExpression(_HswaeClosedModel):
+    subunit: Annotated[str, Field(min_length=1, max_length=100)]
+    expression: float = Field(ge=0)
+
+    @field_validator("subunit")
+    @classmethod
+    def _canonical_subunit(cls, value: str) -> str:
+        if value != value.strip().upper() or _HSWAE_COMPLEX_SUBUNIT_PATTERN.fullmatch(value) is None:
+            raise ValueError("complex subunit is not canonical")
+        return value
+
+
+class HswaeComplexSpecificityContext(_HswaeClosedModel):
+    tissue: _HswaePublicString
+    cell_type: _HswaePublicString
+    cluster: Annotated[str, Field(max_length=500)]
+    subunit_expression: list[HswaeComplexSubunitExpression] = Field(
+        min_length=2,
+        max_length=32,
+    )
+    expressed_subunits: int = Field(ge=0, le=32)
+    required_subunits: int = Field(ge=2, le=32)
+    limiting_subunit: Annotated[str, Field(max_length=100)] | None
+    limiting_expression: float = Field(ge=0)
+    max_subunit_expression: float = Field(ge=0)
+    geometric_mean_expression: float = Field(ge=0)
+    balance_score: float = Field(ge=0, le=1)
+    complex_signal: float = Field(ge=0)
+    heteromer_si: float = Field(ge=0)
+    heteromer_si_denominator: float = Field(ge=0)
+    competitor_below_floor: bool
+    competitor_tissue: _HswaeNullablePublicString
+    competitor_cell_type: _HswaeNullablePublicString
+    competitor_signal: float = Field(ge=0)
+    rank: int = Field(ge=1)
+    source_dataset: Literal[
+        "single_cell_expression",
+        "hpa_v25_single_cell_cluster",
+        "ligandai_specialized_reference",
+    ]
+
+    @field_validator("tissue", "cell_type")
+    @classmethod
+    def _public_nonempty_labels(cls, value: str) -> str:
+        return _validate_hswae_complex_public_label(value)
+
+    @field_validator("cluster")
+    @classmethod
+    def _public_cluster_label(cls, value: str) -> str:
+        return _validate_hswae_complex_public_label(value, allow_empty=True)
+
+    @field_validator("competitor_tissue", "competitor_cell_type")
+    @classmethod
+    def _public_nullable_labels(cls, value: str | None) -> str | None:
+        if value is not None:
+            _validate_hswae_complex_public_label(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_subunit_counts(self) -> HswaeComplexSpecificityContext:
+        expression_subunits = [entry.subunit for entry in self.subunit_expression]
+        if len(expression_subunits) != len(set(expression_subunits)):
+            raise ValueError("complex context subunit expressions must be unique")
+        if len(expression_subunits) != self.required_subunits:
+            raise ValueError("complex context required-subunit count mismatch")
+        if self.expressed_subunits > self.required_subunits:
+            raise ValueError("complex context expressed-subunit count is invalid")
+        if self.limiting_expression > self.max_subunit_expression:
+            raise ValueError("complex context limiting expression exceeds its maximum")
+        if self.limiting_subunit is not None and self.limiting_subunit not in expression_subunits:
+            raise ValueError("complex context limiting subunit is not required")
+        return self
+
+
+class HswaeComplexSpecificityResult(_HswaeClosedModel):
+    complex_name: Annotated[str, Field(min_length=1, max_length=200)] = Field(alias="complexName")
+    subunits: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
+        min_length=2,
+        max_length=32,
+    )
+    contexts: list[HswaeComplexSpecificityContext] = Field(max_length=200)
+
+    @field_validator("complex_name")
+    @classmethod
+    def _public_complex_name(cls, value: str) -> str:
+        if not value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("complex name is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_result_bindings(self) -> HswaeComplexSpecificityResult:
+        if any(
+            subunit != subunit.strip().upper()
+            or _HSWAE_COMPLEX_SUBUNIT_PATTERN.fullmatch(subunit) is None
+            for subunit in self.subunits
+        ) or len(self.subunits) != len(set(self.subunits)):
+            raise ValueError("complex result subunits are not canonical and unique")
+        for context in self.contexts:
+            expression_subunits = [entry.subunit for entry in context.subunit_expression]
+            if expression_subunits != self.subunits:
+                raise ValueError("complex context subunits do not match the result")
+            if context.required_subunits != len(self.subunits):
+                raise ValueError("complex context required-subunit count mismatch")
+        return self
+
+
+class HswaeCapabilityOwner(_HswaeClosedModel):
+    user_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="userId")
+    org_id: Annotated[str, Field(max_length=500)] | None = Field(alias="orgId")
+
+
+class _HswaeCapabilityReceiptBase(_HswaeClosedModel):
+    receipt_version: Literal["1"] = Field(alias="receiptVersion")
+    contract_version: Literal["1.0.0"] = Field(alias="contractVersion")
+    request_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="requestId")
+    owner: HswaeCapabilityOwner
+    status: Literal["executed"]
+    effect: Literal["read_local"]
+    created_at: Annotated[str, Field(min_length=1, max_length=100)] = Field(alias="createdAt")
+
+
+class HswaeSemanticSearchReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["hswae.v1.semantic_search"]
+    result: HswaeSemanticSearchResult
+
+
+class HswaeSurfaceMarkersReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["hswae.v1.surface_markers"]
+    result: HswaeSurfaceMarkersResult
+
+
+class HswaeResolveCellTypeReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["hswae.v2.resolve_cell_type"]
+    result: HswaeResolveCellTypeResult
+
+
+class HswaeCompareCellTypesReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["hswae.v2.compare_cell_types"]
+    result: HswaeCompareCellTypesResult
+
+
+class HswaeIsoformExpressionReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["hswae.v2.isoform_expression"]
+    result: HswaeIsoformExpressionResult
+
+
+class HswaeAnnotateDatasetReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["hswae.v2.annotate_dataset"]
+    result: HswaeAnnotateDatasetResult
+
+
+class HswaeComplexSpecificityReceipt(_HswaeCapabilityReceiptBase):
+    operation: Literal["predictive_interactomics.complex_specificity"]
+    result: HswaeComplexSpecificityResult
+
+
+HswaeCapabilityReceipt: TypeAlias = Annotated[
+    HswaeSemanticSearchReceipt
+    | HswaeSurfaceMarkersReceipt
+    | HswaeResolveCellTypeReceipt
+    | HswaeCompareCellTypesReceipt
+    | HswaeIsoformExpressionReceipt
+    | HswaeAnnotateDatasetReceipt
+    | HswaeComplexSpecificityReceipt,
+    Field(discriminator="operation"),
+]
+
+
 class BBBReceptor(_LGModel):
     """A BBB transcytosis shuttle receptor returned by
     :meth:`~ligandai.resources.discovery.Discovery.transport_vasculome`.
@@ -1468,13 +2250,68 @@ class PeptideInput(_LGModel):
 
 
 class Sequence(_LGModel):
-    """A peptide sequence + optional receptor pairing for folding."""
+    """A chain to fold: a sequence plus the flags that classify it.
+
+    ⛔ A DE NOVO BINDER MUST BE FLAGGED. [bd-dre-yt8kx]
+
+    ``fold()`` treats an unflagged ``protein`` chain as a RECEPTOR, and a
+    receptor is entitled to a multiple-sequence alignment. A LigandForge design
+    (or any de novo binder) has no homologs — that is the point of designing it
+    — so the platform runs a full mmseqs search that can only come back
+    degenerate, and when the MSA service cannot answer at all the fold is
+    REFUSED for an alignment that cannot exist. Set ``is_peptide=True`` (or
+    ``use_msa=False``, or ``role="peptide"``) on every designed chain; the
+    receptor chain keeps its MSA.
+
+    Any ONE of ``is_peptide`` / ``use_msa=False`` / ``role`` is sufficient — the
+    server's MSA prefetch guard accepts them interchangeably.
+    """
 
     sequence: str
     name: str | None = None
     target_gene: str | None = Field(default=None, alias="targetGene")
     target_chain: str | None = Field(default=None, alias="targetChain")
+    #: Boltz-2 entity type. ``"protein"`` (the default) covers peptides — a
+    #: peptide is a short protein chain, not a separate entity type.
+    type: str | None = None
+    #: Mark this chain a de novo peptide / binder. Emits ``isPeptide`` +
+    #: ``is_peptide`` on the wire and suppresses the MSA search for the chain.
+    is_peptide: bool | None = Field(default=None, alias="isPeptide")
+    #: Explicit MSA opt-out. ``False`` is itself a peptide signal to the guard.
+    use_msa: bool | None = Field(default=None, alias="useMsa")
+    #: ``"peptide"`` | ``"binder"`` | ``"ligand_peptide"`` — a third accepted
+    #: spelling of the same signal, for callers who model chains by role.
+    role: str | None = None
+    #: DEPRECATED alias for :attr:`use_msa`. This field existed for several
+    #: releases and was NEVER READ by the SDK, so ``Sequence(msa=False)``
+    #: silently folded the chain as a receptor. It is now honored as
+    #: ``use_msa``; prefer ``use_msa=`` in new code.
     msa: bool | None = None
+
+    @property
+    def msa_disabled(self) -> bool:
+        """True when this chain has opted out of an MSA by any spelling.
+
+        Precedence, matching the server guard:
+
+        1. ``is_peptide=True`` or a peptide ``role`` is AUTHORITATIVE — a chain
+           declared a design never demands an MSA, even alongside a stray
+           ``use_msa=True``. That direction is the safe one: the cost of
+           skipping an MSA for a real receptor is a worse model, the cost of
+           demanding one for a design is a REFUSED fold.
+        2. Otherwise an explicit ``use_msa`` decides, and only when it is unset
+           does the deprecated ``msa`` alias apply.
+        """
+        if self.is_peptide is True:
+            return True
+        if isinstance(self.role, str) and self.role.strip().lower() in (
+            "peptide",
+            "binder",
+            "ligand_peptide",
+        ):
+            return True
+        effective = self.use_msa if self.use_msa is not None else self.msa
+        return effective is False
 
 
 class GenerationResult(_LGModel):
