@@ -38,8 +38,20 @@ that regressing build. None of them compare against what users already have.
    ```
 
    Treat anything under "Only in `/tmp/pub/...`" as a **release blocker**.
-   (`ligandai/agent_assets` is legitimately absent from built artifacts — it is
-   excluded from the published wheel too.)
+
+   > ⛔ Corrected 2026-09-21 [bd-dre-rp11j.28]. This step used to end with
+   > "`ligandai/agent_assets` is legitimately absent from built artifacts — it is
+   > excluded from the published wheel too." That is no longer true and the
+   > second half was never the reason. `ligandai/agent_assets/` does not exist
+   > in this source tree at all: it is CREATED AT BUILD TIME by
+   > `[tool.hatch.build.targets.wheel.force-include]`, which copies `skills/`
+   > and `.claude/skills/` into it. Since 41ecba3 it **is** in the wheel (that
+   > is the fix for the wheel writing `skills/` into the root of
+   > site-packages), and it is still not in the sdist, which carries those
+   > directories at top level instead. So `agent_assets` appearing on only one
+   > side of this diff is expected; verify it against
+   > `tests/unit/test_packaging_contract.py`, which asserts the wheel's payload
+   > matches `git ls-files`, rather than against this sentence.
 
 2. If the trees diverge, branch from the last commit that genuinely corresponds to
    a published release, commit the downloaded sdist's package tree as the true
