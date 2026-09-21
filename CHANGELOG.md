@@ -1216,9 +1216,16 @@ gene-set hash → recent-by-genes-fallback → create-new`. Every branch logs
 
 ### Note
 
-0.6.9 was published from the wrong source tree and has been yanked. 0.7.0
+0.6.9 was published from the wrong source tree. **Do not install it.** 0.7.0
 restores PROMERA, ensemble auto-fold, fold-calibration, jobs, key-wallet —
 the full 0.6.8 surface — plus the new program / conversation kwargs.
+
+⛔ 0.6.9 is **not** yanked on PyPI. This note previously said it "has been
+yanked"; the PyPI JSON API reports `yanked: false` for both 0.6.9 files, so
+`pip install ligandai==0.6.9` resolves silently with no yank warning and a
+resolver is still free to select it. Yanking requires the PyPI web UI —
+there is no yank endpoint for an API token — so it is a manual step that was
+never completed. Until it is, this note is the only warning a reader gets.
 
 ## [0.6.8] - 2026-06-11
 
