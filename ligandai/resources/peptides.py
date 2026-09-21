@@ -36,6 +36,7 @@ from ligandai._targeting import validate_and_normalize_targeting
 from ligandai.contrastive import AvoidancePolicy, ContrastiveGuidance
 from ligandai.errors import (
     LigandAICreditError,
+    LigandAIDiagnosticWarning,
     LigandAIError,
     LigandAIInvalidConfig,
     LigandAILegalAcceptanceRequired,
@@ -6812,6 +6813,26 @@ class Peptides(Resource):
             acids + ``********``; check the response's ``_tier_redacted``
             metadata (or :class:`~ligandai.errors.LigandAIUpgradeRequired`).
         """
+        # ⛔ `include_unfolded` is ACCEPTED and does nothing — it never reaches
+        # `params` and the endpoint returns folded rows only. A docstring
+        # saying "has no effect" is not a runtime signal: a caller who passes
+        # include_unfolded=True gets a folded-only list that looks exactly
+        # like a complete one, and will read the missing unfolded designs as
+        # "there are none". Say so out loud, naming the parameter.
+        # [bd-dre-rp11j.3]
+        if include_unfolded:
+            warnings.warn(
+                "include_unfolded=True was accepted but has NO EFFECT: the "
+                "/v1/peptides/list endpoint returns FOLDED peptides only, and "
+                "this parameter is never sent. The list you get back excludes "
+                "unfolded designs - do not read its length as a total. To "
+                "count generated-but-unfolded designs, read the generation "
+                "job's own result instead. Pass include_unfolded=False (the "
+                "default) to silence this.",
+                LigandAIDiagnosticWarning,
+                stacklevel=2,
+            )
+
         # Reconcile positional arg with explicit keywords
         if gene_or_program_id is not None:
             if isinstance(gene_or_program_id, str):
@@ -6877,7 +6898,12 @@ class Peptides(Resource):
         """
         return self.list(
             program_id=program_id,
-            conversation_id=conversation_id,
+            # ⛔ `conversation_id=conversation_id` stood here and made BOTH
+            # twins of this public method raise NameError on every call —
+            # the name is not a parameter of list_by_program, is never bound
+            # in this module's scope, and is not a parameter of `list()`
+            # either, so even a bound value would have been a TypeError one
+            # line later. The method could never have run. [bd-dre-rp11j.3]
             gene=gene,
             min_ipsae=min_ipsae,
             min_iptm=min_iptm,
@@ -8820,6 +8846,26 @@ class AsyncPeptides(AsyncResource):
                     f"got {type(gene_or_program_id).__name__}"
                 )
 
+        # ⛔ `include_unfolded` is ACCEPTED and does nothing — it never reaches
+        # `params` and the endpoint returns folded rows only. A docstring
+        # saying "has no effect" is not a runtime signal: a caller who passes
+        # include_unfolded=True gets a folded-only list that looks exactly
+        # like a complete one, and will read the missing unfolded designs as
+        # "there are none". Say so out loud, naming the parameter.
+        # [bd-dre-rp11j.3]
+        if include_unfolded:
+            warnings.warn(
+                "include_unfolded=True was accepted but has NO EFFECT: the "
+                "/v1/peptides/list endpoint returns FOLDED peptides only, and "
+                "this parameter is never sent. The list you get back excludes "
+                "unfolded designs - do not read its length as a total. To "
+                "count generated-but-unfolded designs, read the generation "
+                "job's own result instead. Pass include_unfolded=False (the "
+                "default) to silence this.",
+                LigandAIDiagnosticWarning,
+                stacklevel=2,
+            )
+
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if program_id is not None:
             params["program_id"] = program_id
@@ -8854,7 +8900,12 @@ class AsyncPeptides(AsyncResource):
         """Async variant of :meth:`Peptides.list_by_program`."""
         return await self.list(
             program_id=program_id,
-            conversation_id=conversation_id,
+            # ⛔ `conversation_id=conversation_id` stood here and made BOTH
+            # twins of this public method raise NameError on every call —
+            # the name is not a parameter of list_by_program, is never bound
+            # in this module's scope, and is not a parameter of `list()`
+            # either, so even a bound value would have been a TypeError one
+            # line later. The method could never have run. [bd-dre-rp11j.3]
             gene=gene,
             min_ipsae=min_ipsae,
             min_iptm=min_iptm,

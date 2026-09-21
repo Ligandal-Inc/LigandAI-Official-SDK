@@ -7,7 +7,11 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any, Literal
 
 from ligandai._http import parse_sse_data
-from ligandai.errors import LigandAILegalAcceptanceRequired, LigandAINotFoundError
+from ligandai.errors import (
+    LigandAILegalAcceptanceRequired,
+    LigandAINotFoundError,
+    resolve_mutation_failure,
+)
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import JobEvent, JobInfo, StopAllResult
 
@@ -65,7 +69,13 @@ class Jobs(Resource):
             # refused and keep burning credits, with nothing pointing at the
             # real cause. Raise so `.acceptance_url` reaches the caller.
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="jobs.cancel", target=str(job_id))
             return False
 
     def stop_all(self) -> StopAllResult:
@@ -116,7 +126,13 @@ class AsyncJobs(AsyncResource):
             return True
         except LigandAILegalAcceptanceRequired:
             raise  # see Jobs.cancel — the legal gate must not become `False`
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="jobs.cancel", target=str(job_id))
             return False
 
     async def stop_all(self) -> StopAllResult:

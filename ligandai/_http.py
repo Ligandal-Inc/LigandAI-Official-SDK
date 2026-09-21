@@ -40,6 +40,9 @@ from ligandai.errors import (
     LigandAIError,
     LigandAIRateLimitError,
     LigandAIServerError,
+    LigandAIUnreadableResponse,
+    body_excerpt,
+    detect_edge,
     error_from_response,
 )
 from ligandai.server_compat import note_response_headers
@@ -174,24 +177,220 @@ def _normalize_client_session_id(client_session_id: str | None) -> str | None:
     return session_id
 
 
-def _decode_response(resp: httpx.Response) -> dict[str, Any] | None:
-    """Decode JSON body, returning None if empty or non-JSON.
+# Why a JSON body could not be produced. `None` means it WAS produced.
+# These names are the whole point: a caller (and a log grep) can tell an
+# HTML login page from a truncated payload from a genuinely empty response,
+# where before all three were spelled `None`.
+_DECODE_OK = None
+_DECODE_EMPTY = "empty_body"
+_DECODE_NULL = "null_document"
+_DECODE_NOT_JSON = "non_json_content_type"
+_DECODE_MALFORMED = "malformed_json"
 
-    Server endpoints are documented as JSON, but a few (downloads, SSE start)
-    return non-JSON responses. We only call this when expecting JSON.
+
+def _decode_response_verbose(
+    resp: httpx.Response,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Decode a JSON body, returning ``(payload, failure_cause)``.
+
+    ⛔ THE ORIGINAL SIGNATURE IS THE DEFECT. ``_decode_response`` returned a
+    bare ``None`` for THREE unrelated situations — an empty body, a body that
+    is not JSON at all (an HTML login page, an SPA shell, a CDN challenge),
+    and a declared-JSON body that does not parse — and every resource method
+    in this SDK then wrote ``or {}`` / ``or []`` over the top of it. So "the
+    proxy handed me a web page instead of the API" arrived at the caller as
+    ``designs: []`` and ``proposed: 0``: a clean, plausible, WRONG
+    measurement, with nothing anywhere saying a lookup had failed.
+
+    This returns the cause alongside, so the transport can raise something
+    that names what happened instead of returning a falsy value that reads
+    as data.
     """
     if not resp.content:
-        return None
+        return None, _DECODE_EMPTY
     ctype = resp.headers.get("content-type", "")
     if "application/json" not in ctype:
-        return None
+        return None, _DECODE_NOT_JSON
     try:
-        return resp.json()  # type: ignore[no-any-return]
+        parsed = resp.json()
     except _json.JSONDecodeError:
+        return None, _DECODE_MALFORMED
+    # ⛔ A literal JSON `null` parses SUCCESSFULLY to Python None — the same
+    # value this function returns for "could not decode". Callers then write
+    # `... or {}` over it and get an empty document.
+    #
+    # Observed live on 2026-09-21: GET https://ligandai.com/api/auth/user
+    # answers `200` with the body `null` when the presented credential was not
+    # accepted (verified: a malformed key gives 200+null, while a well-formed
+    # `lgai_` key on the same route returns the full user). `Account.me()`
+    # turned that into `User.model_validate({})` and raised
+    # "Field required: id" — a complaint about our own schema for what is
+    # really "the server did not identify you". Name it instead.
+    if parsed is None:
+        return None, _DECODE_NULL
+    return parsed, _DECODE_OK  # type: ignore[no-any-return]
+
+
+def _decode_response(resp: httpx.Response) -> dict[str, Any] | None:
+    """Back-compat wrapper: payload or None. Prefer
+    :func:`_decode_response_verbose` on any path that reports a measurement.
+    """
+    payload, _cause = _decode_response_verbose(resp)
+    return payload
+
+
+def _raw_text(resp: httpx.Response) -> str | None:
+    """Best-effort decode of the response body to text, for diagnosis only.
+
+    Never raises: this runs on the error path, and an undecodable body must
+    not replace the error the caller is already being told about.
+    """
+    try:
+        if not resp.content:
+            return None
+        return resp.text
+    except Exception:
         return None
 
 
-def _raise_for_status(resp: httpx.Response) -> None:
+def _unreadable_body_error(
+    resp: httpx.Response,
+    cause: str,
+    method: str,
+    url: str,
+    api_key: str | None = None,
+) -> LigandAIUnreadableResponse:
+    """Build the error for a SUCCESS status whose body the SDK cannot read.
+
+    [bd-dre-rp11j.3] This is the guard against the six-week silent no-op: a
+    request that "succeeded" but whose body was unusable used to return
+    ``None``, become ``{}`` or ``[]`` at the call site, and be reported as a
+    measurement of zero.
+    """
+    ctype = resp.headers.get("content-type") or None
+    excerpt = body_excerpt(_raw_text(resp))
+    edge, ray_id = detect_edge(resp.headers, _raw_text(resp), ctype)
+
+    what = {
+        _DECODE_NOT_JSON: (
+            f"the body is {ctype or 'of unknown type'}, not JSON"
+        ),
+        _DECODE_MALFORMED: "the body claims to be JSON but does not parse",
+        _DECODE_EMPTY: "the body is empty",
+        _DECODE_NULL: "the body is the literal JSON document `null`",
+    }.get(cause, cause)
+
+    lines = [
+        f"HTTP {resp.status_code} from {method.upper()} {url}, but {what}.",
+        "This is NOT an empty result — the SDK could not read the response at "
+        "all, and refuses to report that as zero/none/no-data.",
+    ]
+    if edge:
+        lines.append(
+            f"  likely cause   : {edge} answered instead of the API "
+            f"(ray id {ray_id})." if ray_id
+            else f"  likely cause   : {edge} answered instead of the API."
+        )
+        lines.append(
+            "  what to do     : point the client at a non-proxied origin, or "
+            "have it allowlisted for the API paths."
+        )
+    elif cause == _DECODE_NOT_JSON:
+        lines.append(
+            "  likely cause   : base_url points at a web front end or a proxy "
+            "rather than the API, or an intermediary rewrote the response."
+        )
+        lines.append(
+            f"  what to do     : check base_url (currently reaching {url}); "
+            f"set LIGANDAI_BASE_URL or pass base_url= explicitly."
+        )
+    elif cause == _DECODE_MALFORMED:
+        lines.append(
+            "  likely cause   : the response was truncated or rewritten in transit."
+        )
+        lines.append(
+            "  what to do     : retry; if it persists, report the request id below."
+        )
+    elif cause == _DECODE_NULL:
+        lines.append(
+            "  likely cause   : the route answered 200 with `null`, which on this "
+            "platform means it did not identify the caller. The usual reason is a "
+            "credential that was rejected — commonly a malformed API key, which "
+            "is refused on SHAPE before validity is ever checked."
+        )
+        # The three causes (absent / malformed / well-formed-but-invalid) are
+        # indistinguishable in the RESPONSE — all three yield 200 + `null`.
+        # They are distinguishable in the REQUEST, so say which one we sent.
+        _g = _auth_guidance_for(api_key)
+        lines.append(
+            "  what to do     : `null` here is NOT an empty account — the server "
+            "could not tell who you are."
+        )
+        if _g:
+            for _l in _g.splitlines():
+                lines.append(f"  {_l}" if _l.startswith("  ") else f"  {_l}")
+    else:
+        lines.append(
+            "  likely cause   : the route returned no document — it may not exist "
+            "on this server build."
+        )
+        lines.append(
+            "  what to do     : verify the endpoint path and the server version."
+        )
+    lines.append(f"  content-type   : {ctype or '<none>'}")
+    lines.append(f"  body served    : {excerpt or '<empty>'}")
+    rid = resp.headers.get("x-request-id")
+    if rid:
+        lines.append(f"  request id     : {rid}")
+
+    return LigandAIUnreadableResponse(
+        "\n".join(lines),
+        cause=cause,
+        method=method.upper(),
+        url=url,
+        content_type=ctype,
+        body_excerpt=excerpt,
+        status_code=resp.status_code,
+        request_id=rid,
+    )
+
+
+def _decode_or_raise(
+    resp: httpx.Response, method: str, url: str, api_key: str | None = None
+) -> Any:
+    """Decode a SUCCESS response, raising when the body cannot be read.
+
+    An empty body is tolerated for COMMANDS (POST/PUT/PATCH/DELETE), whose
+    callers discard the document and only need the status — a bare 200 ack is
+    a normal, correct answer there. It is NOT tolerated for a GET: a GET is a
+    measurement, and a measurement that came back with no document is exactly
+    the "empty vs could-not-look" conflation this guard exists to break. A
+    non-empty body that cannot be parsed always raises, whatever the method.
+    """
+    payload, cause = _decode_response_verbose(resp)
+    if cause is _DECODE_OK:
+        return payload
+    if cause in (_DECODE_EMPTY, _DECODE_NULL) and method.upper() not in ("GET", "HEAD"):
+        return None
+    raise _unreadable_body_error(resp, cause, method, url, api_key)
+
+
+def _auth_guidance_for(api_key: str | None) -> str:
+    """Key-shape-specific guidance, imported lazily to avoid a cycle."""
+    try:
+        from ligandai.client import auth_guidance
+        return auth_guidance(api_key)
+    except Exception:  # pragma: no cover - guidance must never break a request
+        return ""
+
+
+def _raise_for_status(
+    resp: httpx.Response,
+    *,
+    method: str | None = None,
+    url: str | None = None,
+    api_key: str | None = None,
+) -> None:
     """Raise the appropriate :class:`LigandAIError` subclass for a bad status.
 
     Also the SDK's single response funnel. EVERY response — 2xx, 4xx, 5xx, and
@@ -208,11 +407,24 @@ def _raise_for_status(resp: httpx.Response) -> None:
     payload = _decode_response(resp) or {}
     request_id = resp.headers.get("x-request-id")
     retry_after = _parse_retry_after(resp.headers)
+    # ⛔ [bd-dre-2d7za.9] The raw body used to stop here. `_decode_response`
+    # answers None for a non-JSON body, `or {}` turned that into an empty
+    # payload, and `error_from_response` had nothing left to describe but the
+    # status code — so a proxy-rewritten 403 (and a CDN bot-filter block,
+    # bd-dre-3fduj) both became the string "HTTP 403". Hand the mapper the
+    # undecoded response so it can name WHO answered and surface whatever
+    # explanation the body still carries.
     err = error_from_response(
         resp.status_code,
         payload,
         request_id=request_id,
         retry_after=retry_after,
+        raw_body=_raw_text(resp),
+        content_type=resp.headers.get("content-type"),
+        headers=resp.headers,
+        method=method,
+        url=url,
+        auth_guidance=_auth_guidance_for(api_key) if resp.status_code in (401, 403) else None,
     )
     raise err
 
@@ -273,7 +485,7 @@ def _wrap_transport_error(exc: httpx.TransportError, method: str, url: str) -> L
         try:
             from urllib.parse import urlsplit
             _host = (urlsplit(url).hostname or "").lower()
-        except Exception:                                          # noqa: BLE001
+        except Exception:
             _host = ""
         _pub = (DEFAULT_BASE_URL.split("//", 1)[-1].split("/", 1)[0] or "").lower()
         # ⛔ NO SUBDOMAIN EXEMPTION. The first version of this check exempted
@@ -433,10 +645,10 @@ class HTTPTransport:
                         resp.status_code,
                         elapsed_ms,
                     )
-                _raise_for_status(resp)
+                _raise_for_status(resp, method=method, url=url, api_key=self._api_key)
                 if not expect_json:
                     return resp
-                return _decode_response(resp)
+                return _decode_or_raise(resp, method, url, self._api_key)
         # Unreachable — Retrying.reraise=True ensures we either return or raise.
         raise LigandAIError("retry loop exited without result")  # pragma: no cover
 
@@ -486,7 +698,7 @@ class HTTPTransport:
                     # mapper ever saw it. Pull the body in first so the mapper can
                     # do its job; error bodies are small and already terminal.
                     resp.read()
-                _raise_for_status(resp)
+                _raise_for_status(resp, method=method, url=url, api_key=self._api_key)
                 for line in resp.iter_lines():
                     if line:
                         yield line
@@ -625,10 +837,10 @@ class AsyncHTTPTransport:
                         resp.status_code,
                         elapsed_ms,
                     )
-                _raise_for_status(resp)
+                _raise_for_status(resp, method=method, url=url, api_key=self._api_key)
                 if not expect_json:
                     return resp
-                return _decode_response(resp)
+                return _decode_or_raise(resp, method, url, self._api_key)
         raise LigandAIError("retry loop exited without result")  # pragma: no cover
 
     async def stream_lines(
@@ -663,7 +875,7 @@ class AsyncHTTPTransport:
                     # `_raise_for_status` raise `httpx.ResponseNotRead` instead of
                     # the mapped error, discarding the acceptance URL.
                     await resp.aread()
-                _raise_for_status(resp)
+                _raise_for_status(resp, method=method, url=url, api_key=self._api_key)
                 async for line in resp.aiter_lines():
                     if line:
                         yield line

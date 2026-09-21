@@ -7,6 +7,7 @@ include a `code` (e.g. ``"E004"``), `message`, and `request_id` from the respons
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -245,6 +246,162 @@ class LigandAIForbidden(LigandAIError):
     ) -> None:
         super().__init__(message, **kwargs)
         self.reason = reason
+
+
+class LigandAIEdgeBlocked(LigandAIForbidden):
+    """403/503 produced by a CDN / WAF / bot-filter IN FRONT OF the API — the
+    request never reached LigandAI at all. [bd-dre-3fduj, bd-dre-2d7za.9]
+
+    Cloudflare Bot Fight Mode answers a non-browser client on a proxied
+    hostname with an HTML challenge page carrying HTTP 403. Before this class
+    existed the SDK decoded that body as "not JSON", discarded it, and raised
+    ``LigandAIForbidden("HTTP 403")`` — byte-identical to a real
+    authorization refusal from our own server. Three genuinely different
+    causes were therefore indistinguishable at the call site:
+
+    ==========================  =========================================
+    cause                       what the caller must actually do
+    ==========================  =========================================
+    edge block (this class)     call a non-proxied origin, or allowlist
+                                the client — the API key is irrelevant
+    auth 403 (Forbidden)        fix the key's permissions / ownership
+    wrong base_url              point the client at the real API host
+    ==========================  =========================================
+
+    Attributes
+    ----------
+    edge : str | None
+        Which intermediary answered (e.g. ``"cloudflare"``), from the
+        ``Server`` header or a signature in the body.
+    ray_id : str | None
+        The edge's own request identifier (``CF-RAY``) — the only id that
+        identifies this request to the CDN. Our ``request_id`` is absent
+        because our server never saw the request.
+    content_type : str | None
+        Content type of the challenge body.
+    body_excerpt : str | None
+        First bytes of the body that was served instead of our JSON. Kept
+        verbatim: it is the evidence that an intermediary, not LigandAI,
+        produced this response.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        edge: str | None = None,
+        ray_id: str | None = None,
+        content_type: str | None = None,
+        body_excerpt: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.edge = edge
+        self.ray_id = ray_id
+        self.content_type = content_type
+        self.body_excerpt = body_excerpt
+
+
+class LigandAIUnreadableResponse(LigandAIError):
+    """The server answered with a status the SDK accepts but a BODY it cannot
+    read — and the SDK refuses to report that as "no data".
+
+    ⛔ THIS IS THE DEFECT CLASS THIS EXCEPTION EXISTS TO MAKE IMPOSSIBLE.
+    ``_decode_response`` returns ``None`` for an unparseable body. Every
+    resource method in this SDK is written as
+    ``... transport.request(...) or {}`` / ``or []``, so a ``None`` became an
+    empty dict or an empty list — a measurement of ZERO. A 200 carrying an
+    HTML login page, an SPA shell served by a misconfigured proxy, a
+    truncated JSON body, or an empty 200 from a route that no longer exists
+    ALL produced a clean, plausible, wrong answer: ``proposed: 0``,
+    ``designs: []``, ``credits: 0``. A zero from a broken lookup is
+    indistinguishable from a zero from an honest measurement, which is how
+    a no-op survives unnoticed for weeks.
+
+    Raising is the whole point: "I could not look" must never be spelled the
+    same way as "I looked and there was nothing".
+
+    Attributes
+    ----------
+    cause : str
+        Named, machine-checkable reason. One of:
+
+        ``"non_json_content_type"``
+            The body is not ``application/json`` — usually an HTML error or
+            login page from a proxy, or a ``base_url`` pointing at a web
+            front end rather than the API.
+        ``"malformed_json"``
+            Declared as JSON and is not parseable — truncated or rewritten
+            in transit.
+        ``"empty_body"``
+            Zero-length body where a JSON document was required.
+    method : str | None
+        HTTP method attempted.
+    url : str | None
+        Absolute URL attempted.
+    content_type : str | None
+        The ``Content-Type`` the server actually sent.
+    body_excerpt : str | None
+        First bytes of the body, verbatim, for diagnosis.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: str,
+        method: str | None = None,
+        url: str | None = None,
+        content_type: str | None = None,
+        body_excerpt: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.cause = cause
+        self.method = method
+        self.url = url
+        self.content_type = content_type
+        self.body_excerpt = body_excerpt
+
+
+class LigandAIMutationUnconfirmed(LigandAIError):
+    """A ``-> bool`` mutation (cancel / archive / delete) could not be
+    confirmed either way, so the SDK refuses to answer ``False``.
+
+    These methods return a plain bool, and ``False`` is read by every caller
+    as "the server was asked and it declined". It used to ALSO be what you
+    got from a dropped connection, an expired key, a CDN block and a 500 —
+    four situations in which the mutation's outcome is simply UNKNOWN and may
+    well have been applied. ``job.cancel()`` answering ``False`` after a
+    network blip told the user their GPU job was still running when it had in
+    fact been cancelled, or vice versa; either way they acted on a fact the
+    SDK had invented.
+
+    ``False`` now means exactly one thing: the server was reached, understood
+    the request, and declined it. Everything else raises — this class when
+    the underlying cause carries no better type, otherwise the original
+    typed error (``LigandAIAuthError``, ``LigandAIConnectionError``,
+    ``LigandAIServerError``, ``LigandAIEdgeBlocked``, …) straight through.
+
+    Attributes
+    ----------
+    operation : str | None
+        Dotted name of the mutation attempted (e.g. ``"jobs.cancel"``).
+    target : str | None
+        The id it was attempted against.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str | None = None,
+        target: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.operation = operation
+        self.target = target
 
 
 class LigandAILegalAcceptanceRequired(LigandAIForbidden):
@@ -1114,22 +1271,143 @@ def _message_already_surfaces_url(message: str, url: str) -> bool:
     return not url or url in message
 
 
+BODY_EXCERPT_LIMIT = 600
+"""How much of an unreadable body to keep on the exception.
+
+Long enough that an HTML ``<title>`` and a CDN ray id survive (they are the
+two things that identify WHO answered), short enough that a 200 KB challenge
+page does not land in a log line.
+"""
+
+
+def body_excerpt(raw_body: str | None, limit: int = BODY_EXCERPT_LIMIT) -> str | None:
+    """Collapse a raw body to a single-line excerpt, verbatim apart from
+    whitespace folding. Never normalises content — see
+    :func:`_message_already_surfaces_url` on why normalising bodies is unsafe.
+    """
+    if raw_body is None:
+        return None
+    text = " ".join(raw_body.split())
+    if not text:
+        return None
+    if len(text) > limit:
+        return text[:limit] + f"… [{len(raw_body)} bytes total]"
+    return text
+
+
+# Signatures that identify a response as authored by an intermediary rather
+# than by our own server. [bd-dre-3fduj] Cloudflare Bot Fight Mode is the one
+# actually in the path today; the others are listed because the *class* of
+# failure (an HTML page where JSON was promised) is what must be named, and
+# guessing "cloudflare" for an nginx page would be its own fabrication.
+_EDGE_SERVER_HEADERS: dict[str, str] = {
+    "cloudflare": "cloudflare",
+    "cloudfront": "cloudfront",
+    "akamaighost": "akamai",
+    "awselb": "aws-elb",
+    "nginx": "nginx",
+    "envoy": "envoy",
+}
+
+_EDGE_BODY_MARKERS: tuple[tuple[str, str], ...] = (
+    ("cf-ray", "cloudflare"),
+    ("cloudflare ray id", "cloudflare"),
+    ("attention required! | cloudflare", "cloudflare"),
+    ("just a moment", "cloudflare"),
+    ("checking your browser", "cloudflare"),
+    ("enable javascript and cookies to continue", "cloudflare"),
+    ("you have been blocked", "cloudflare"),
+    ("generated by cloudfront", "cloudfront"),
+    ("<center>nginx</center>", "nginx"),
+    ("403 forbidden</title>", "proxy"),
+)
+
+
+def detect_edge(
+    headers: Mapping[str, str] | None,
+    raw_body: str | None,
+    content_type: str | None,
+) -> tuple[str | None, str | None]:
+    """Identify the intermediary that produced a response, if any.
+
+    Returns ``(edge_name, ray_id)``. ``edge_name`` is None when nothing
+    indicates an intermediary — we do NOT guess. Detection requires a
+    non-JSON body, because our own server always answers JSON: an edge
+    signature on a JSON body means the CDN merely PROXIED our real response,
+    which must not be reclassified as a block.
+    """
+    if content_type and "application/json" in content_type.lower():
+        return None, None
+
+    h: dict[str, str] = {}
+    if headers:
+        try:
+            h = {str(k).lower(): str(v) for k, v in headers.items()}
+        except Exception:
+            h = {}
+
+    ray_id = h.get("cf-ray") or h.get("x-amz-cf-id") or h.get("x-akamai-request-id")
+
+    edge: str | None = None
+    server = (h.get("server") or "").strip().lower()
+    for token, name in _EDGE_SERVER_HEADERS.items():
+        if token in server:
+            edge = name
+            break
+
+    if edge is None and ray_id and h.get("cf-ray"):
+        edge = "cloudflare"
+
+    if edge is None and raw_body:
+        lowered = raw_body[:4000].lower()
+        for marker, name in _EDGE_BODY_MARKERS:
+            if marker in lowered:
+                edge = name
+                break
+
+    if edge is None:
+        return None, ray_id
+    return edge, ray_id
+
+
 def error_from_response(
     status_code: int,
     payload: dict[str, Any] | None,
     request_id: str | None = None,
     *,
     retry_after: float | None = None,
+    raw_body: str | None = None,
+    content_type: str | None = None,
+    headers: Mapping[str, str] | None = None,
+    method: str | None = None,
+    url: str | None = None,
+    auth_guidance: str | None = None,
 ) -> LigandAIError:
     """Build the right error subclass for an HTTP response.
 
     The server's error codes (``E001``-``E013``) map to specific subclasses.
     Falls back to status-code-based dispatch when no code is present.
+
+    ``raw_body`` / ``content_type`` / ``headers`` are the UNDECODED response.
+    They are what makes "our server refused you" distinguishable from "a
+    CDN refused you before our server saw the request" [bd-dre-3fduj] and
+    stop a non-JSON error body from being discarded [bd-dre-2d7za.9]. All
+    are optional and defaulted so existing two-argument callers (and the
+    tests pinning them) are unaffected.
     """
     payload = payload or {}
+    excerpt = body_excerpt(raw_body)
+    # ⛔ [bd-dre-2d7za.9] A non-JSON error body used to be DISCARDED, so a
+    # legal 403 rewritten by a proxy — or any text/plain refusal that still
+    # carried its acceptance URL in plain text — degraded to the string
+    # "HTTP 403" with the one actionable thing in it thrown away. When the
+    # server gave us no parseable fields, the raw body IS the message: it is
+    # strictly more informative than a status restatement, and it is the only
+    # place a rewritten-but-readable explanation can survive.
     message = (
         payload.get("message")
         or payload.get("error")
+        or excerpt
         or f"HTTP {status_code}"
     )
     code = payload.get("code")
@@ -1141,8 +1419,43 @@ def error_from_response(
         "response": payload,
     }
 
+    # ⛔ [bd-dre-3fduj] Was the responder ours at all? A Cloudflare Bot Fight
+    # Mode challenge is an HTTP 403 with an HTML body; our own authorization
+    # refusal is an HTTP 403 with a JSON body. Answering both with
+    # LigandAIForbidden("HTTP 403") told a user to fix their API key when the
+    # key was never read by anything. Checked BEFORE the status dispatch so
+    # it also covers the 503 / 429 that bot-filters and load balancers emit.
+    edge, ray_id = detect_edge(headers, raw_body, content_type)
+    if edge is not None and not payload and status_code in (401, 403, 429, 503, 502, 520, 521, 522):
+        where = f" {method.upper()} {url}" if method and url else ""
+        ray = f"\n  {edge} ray id : {ray_id}" if ray_id else ""
+        return LigandAIEdgeBlocked(
+            f"Blocked by {edge} before reaching the LigandAI API "
+            f"(HTTP {status_code} with a {content_type or 'non-JSON'} body on{where or ' this request'}).\n"
+            f"Your API key was NOT the problem — our server never saw this request."
+            f"{ray}\n"
+            f"  what happened  : an intermediary answered instead of the API. "
+            f"Bot-filtering on a proxied hostname 403s non-browser clients.\n"
+            f"  what to do     : reach a non-proxied origin, or have the client "
+            f"allowlisted for the API paths; retrying and rotating keys will not help.\n"
+            f"  body served    : {excerpt or '<empty>'}",
+            edge=edge,
+            ray_id=ray_id,
+            content_type=content_type,
+            body_excerpt=excerpt,
+            reason=f"{edge}_edge_block",
+            **common,
+        )
+
     if status_code == 401:
-        return LigandAIAuthError(message, **common)
+        # ⛔ A bare "Unauthorized" does not say WHICH auth problem this is, and
+        # the caller cannot tell an absent key from a malformed one from a
+        # revoked one. `auth_guidance` is computed from the key we actually
+        # SENT, which is the only place that distinction survives.
+        return LigandAIAuthError(
+            f"{message}\n  {auth_guidance}" if auth_guidance else message,
+            **common,
+        )
     if status_code == 402:
         # Two flavors of 402:
         #   - upgrade_required (paid-tier gate on /api/v1/*) → LigandAIPaidTierRequired
@@ -1350,3 +1663,145 @@ def error_from_response(
     if 500 <= status_code < 600:
         return LigandAIServerError(message, **common)
     return LigandAIError(message, **common)
+
+
+# ── mutation outcome policy ──────────────────────────────────────────────────
+
+# Statuses that mean: the server was REACHED, it UNDERSTOOD the request, and it
+# DECLINED (or the thing was already gone). Only these may be reported as a
+# plain `False` by a `-> bool` mutation, because only these are an answer.
+#
+# Everything else — 401/403 (we never proved who we are), 429 (never processed),
+# 5xx (it broke mid-flight), a dropped connection, a CDN block, an unreadable
+# body — leaves the outcome UNKNOWN. The mutation may well have been applied.
+SERVER_DECLINED_STATUSES: frozenset[int] = frozenset({
+    400,  # malformed request — the server parsed it and said no
+    404,  # no such resource — already gone, or never existed
+    405,  # method not allowed on this resource
+    409,  # conflict, e.g. "already finished" — the canonical honest False
+    410,  # gone
+    422,  # unprocessable — validated and rejected
+})
+
+
+def resolve_mutation_failure(
+    exc: BaseException,
+    *,
+    operation: str,
+    target: str | None = None,
+) -> None:
+    """Decide whether a failed ``-> bool`` mutation may answer ``False``.
+
+    Returns normally when ``False`` is an HONEST answer — the server was
+    reached and declined. RAISES otherwise, so an unknown outcome can never
+    be spelled the same way as a refusal.
+
+    ⛔ THE DEFECT THIS REPLACES. Ten mutation methods (``jobs.cancel``,
+    ``programs.archive``, ``proteins.delete_variant``, ``memory.delete``,
+    ``discovery.delete_dataset``, and their async twins) each ended in
+    ``except Exception: return False``. A caller reading ``False`` concludes
+    "the server refused". It was also what they got from a dropped
+    connection, an expired key, a Cloudflare block and a 500 — four cases
+    where the mutation's outcome is genuinely UNKNOWN and may have been
+    applied. ``job.cancel()`` answering ``False`` after a network blip told
+    a user their GPU job was still running when it had been cancelled; the
+    user then acted on a fact the SDK invented. A previous pass recognised
+    exactly this hazard and carved out ONE cause
+    (:class:`LigandAILegalAcceptanceRequired`) while leaving the rest
+    flattened; this generalises that carve-out to every cause.
+
+    Parameters
+    ----------
+    exc : BaseException
+        The exception the mutation raised.
+    operation : str
+        Dotted name of the mutation, e.g. ``"jobs.cancel"`` — quoted back in
+        the error so the caller knows WHAT was attempted.
+    target : str | None
+        The id it was attempted against.
+    """
+    # Preserved verbatim from the original carve-outs: a legal gate must reach
+    # the caller with its acceptance URL intact, never become `False`.
+    if isinstance(exc, LigandAILegalAcceptanceRequired):
+        raise exc
+
+    status = getattr(exc, "status_code", None)
+    if isinstance(exc, LigandAIError) and status in SERVER_DECLINED_STATUSES:
+        return  # an honest False: asked, understood, declined.
+
+    where = f" {target!r}" if target else ""
+    if isinstance(exc, LigandAIError):
+        raise LigandAIMutationUnconfirmed(
+            f"{operation}{where} could not be confirmed — "
+            f"the SDK will not report this as a refusal.\n"
+            f"  attempted      : {operation}{where}\n"
+            f"  what went wrong: {type(exc).__name__}: {exc}\n"
+            f"  outcome        : UNKNOWN. The request may or may not have been "
+            f"applied server-side; this was not a 'no' from the server.\n"
+            f"  what to do     : resolve the error above, then re-read the "
+            f"resource's state to find out whether it took effect. "
+            f"Do NOT assume it did not.",
+            operation=operation,
+            target=target,
+            status_code=status,
+            request_id=getattr(exc, "request_id", None),
+            code=getattr(exc, "code", None),
+        ) from exc
+
+    raise LigandAIMutationUnconfirmed(
+        f"{operation}{where} failed with a non-SDK error — "
+        f"the SDK will not report this as a refusal.\n"
+        f"  attempted      : {operation}{where}\n"
+        f"  what went wrong: {type(exc).__name__}: {exc}\n"
+        f"  outcome        : UNKNOWN. This is not a 'no' from the server.\n"
+        f"  what to do     : treat the resource's state as unknown and re-read it.",
+        operation=operation,
+        target=target,
+    ) from exc
+
+
+class LigandAISurfaceNotInThisPackage(LigandAIError, AttributeError):
+    """A platform surface that EXISTS server-side has no client in this package.
+
+    ⛔ [bd-dre-rp11j.9] ``client.campaigns`` is the live instance. The platform
+    exposes a campaign/maturation API (``POST /api/campaign/start``,
+    ``/mature``, ``GET /{id}/leaderboard``, ``/status``, ``/stop``,
+    ``/stream``). The published ``ligandai`` package has no client for ANY of
+    it — but it does have a ``campaigns`` namespace, an unrelated local
+    panel-folding helper that happens to share the name.
+
+    So a user who reads about campaigns and reaches for ``client.campaigns``
+    gets a namespace that exists, imports cleanly, and does something else
+    entirely. A plain ``AttributeError`` would be no better: "no attribute
+    'mature'" reads as a typo, leaving "this package cannot do campaigns"
+    indistinguishable from "I called it wrong" — the empty-vs-could-not-look
+    confusion wearing a new costume.
+
+    Subclasses :class:`AttributeError` as well as :class:`LigandAIError` so
+    ``hasattr()`` and duck-typed probes keep behaving, while anything that
+    surfaces the message gets the full explanation.
+
+    Attributes
+    ----------
+    surface : str
+        The attribute that was reached for (e.g. ``"mature"``).
+    namespace : str
+        The namespace it was reached for on (e.g. ``"client.campaigns"``).
+    server_routes : tuple[str, ...]
+        The endpoints that DO exist server-side, so the caller can drive them
+        over plain HTTP in the meantime.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        surface: str,
+        namespace: str,
+        server_routes: tuple[str, ...] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.surface = surface
+        self.namespace = namespace
+        self.server_routes = server_routes

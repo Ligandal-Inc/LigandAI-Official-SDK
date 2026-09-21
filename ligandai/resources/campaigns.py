@@ -60,7 +60,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from ligandai.contrastive import (
     AvoidancePolicy,
@@ -71,6 +71,7 @@ from ligandai.contrastive import (
     model_pocket_feature_dim,
 )
 from ligandai.errors import (
+    LigandAISurfaceNotInThisPackage,
     LigandAIError,
     LigandAINotFoundError,
     LigandAIParameterNotForwarded,
@@ -636,6 +637,59 @@ class Campaigns(Resource):
         rows, partial, summary = panel.deltas(band=band, target_leg_min=0.66)
     """
 
+    # ⛔ [bd-dre-rp11j.9] THE PLATFORM CAMPAIGN API IS NOT IN THIS PACKAGE.
+    #
+    # The server exposes a campaign/maturation surface — POST /api/campaign/start,
+    # POST /api/campaign/mature, GET /api/campaign, GET /{id}/status,
+    # /{id}/maturation, /{id}/leaderboard, /{id}/designs/{id}/structure,
+    # POST /{id}/stop, GET /{id}/stream. The published `ligandai` package ships
+    # NO client for any of it.
+    #
+    # This namespace is an unrelated local panel-folding helper that happens to
+    # answer to the same word. Without this guard, `client.campaigns.mature(...)`
+    # raises a bare AttributeError that reads like a typo, and the user cannot
+    # tell "this package cannot do campaigns" from "I called it wrong" — the
+    # epic's defect class, at the namespace level.
+    _PLATFORM_CAMPAIGN_SURFACE: ClassVar[dict[str, str]] = {
+        "start": "POST /api/campaign/start",
+        "mature": "POST /api/campaign/mature",
+        "maturation": "GET /api/campaign/{campaign_id}/maturation",
+        "list": "GET /api/campaign",
+        "status": "GET /api/campaign/{campaign_id}/status",
+        "leaderboard": "GET /api/campaign/{campaign_id}/leaderboard",
+        "structure": "GET /api/campaign/{campaign_id}/designs/{design_id}/structure",
+        "stop": "POST /api/campaign/{campaign_id}/stop",
+        "stream": "GET /api/campaign/{campaign_id}/stream",
+        "designs": "GET /api/campaign/{campaign_id}/leaderboard",
+    }
+
+    def __getattr__(self, name: str) -> Any:
+        route = self._PLATFORM_CAMPAIGN_SURFACE.get(name)
+        if route is None:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            )
+        raise LigandAISurfaceNotInThisPackage(
+            f"client.campaigns.{name}() does not exist in the `ligandai` package, "
+            f"but the platform endpoint it maps to DOES exist.\n"
+            f"  you reached for : client.campaigns.{name}\n"
+            f"  server endpoint : {route}\n"
+            f"  the situation   : `client.campaigns` here is a LOCAL panel-folding "
+            f"helper (pocket_features, contrastive_references, fold_panel, "
+            f"replicate, recursive). It is NOT a client for the platform "
+            f"campaign/maturation API — the two only share a name.\n"
+            f"  this is not a typo on your part, and it is not a transient "
+            f"failure: no version of this package has ever carried that surface.\n"
+            f"  what to do      : drive the endpoint directly over the SDK's own "
+            f"transport, which carries your auth, retries and error mapping:\n"
+            f"      client.transport.request(\"POST\", \"/api/campaign/start\", json={{...}})\n"
+            f"  tracking        : bd-dre-rp11j.9",
+            surface=name,
+            namespace="client.campaigns",
+            server_routes=tuple(sorted(set(self._PLATFORM_CAMPAIGN_SURFACE.values()))),
+        )
+
+
     # ─── pocket features / contrastive references ───────────────────────────
 
     def pocket_features(
@@ -721,6 +775,44 @@ class Campaigns(Resource):
         if not paralogs:
             raise LigandAIValidationError(
                 "contrastive_references needs at least one paralog / off-target gene"
+            )
+        # ⛔ `target` was DECLARED AND NEVER READ — proven by AST: it appeared
+        # in the signature and in prose, and nowhere in the body. Its sibling
+        # `fold_panel` carries exactly the guard that was missing here, so the
+        # two halves of one selectivity workflow disagreed about whether the
+        # target may appear among its own off-targets.
+        #
+        # The consequence was not cosmetic. `cfg_reference="paralog_mean"`
+        # averages the reference pockets and steers generation AWAY from that
+        # mean. Passing the target's own gene in `paralogs` therefore steers
+        # designs away from the receptor they are being designed against — a
+        # campaign that silently optimises for the opposite of its goal, with
+        # a perfectly well-formed ContrastiveGuidance to show for it.
+        # [bd-dre-rp11j.3]
+        target = str(target).strip()
+        if not target:
+            raise LigandAIValidationError(
+                "contrastive_references needs the target gene. It names the "
+                "receptor the designs are FOR; the panel is what they are "
+                "steered away from, and the two must be distinguishable."
+            )
+        _offs = [str(g).strip() for g in paralogs]
+        _clash = [g for g in _offs if g.upper() == target.upper()]
+        if _clash:
+            raise LigandAIValidationError(
+                f"{target!r} appears in both target and paralogs. "
+                f"cfg_reference='paralog_mean' steers generation AWAY from the "
+                f"mean of the reference pockets, so including the target in its "
+                f"own panel steers designs away from the receptor they are "
+                f"being designed against — the exact opposite of the intent, "
+                f"and silent. Remove {_clash[0]!r} from paralogs."
+            )
+        _dupes = {g.upper() for g in _offs if _offs.count(g) > 1}
+        if _dupes:
+            raise LigandAIValidationError(
+                f"duplicate paralog(s) {sorted(_dupes)} would be double-weighted "
+                f"in the paralog mean, silently biasing the panel toward them. "
+                f"Pass each off-target once."
             )
         pdb_codes = pdb_codes or {}
         refs: list[ContrastiveReference] = []
@@ -973,6 +1065,59 @@ class AsyncCampaigns(AsyncResource):
     Submission helpers stay on the sync resource rather than shipping an async
     façade that quietly blocks.
     """
+
+    # ⛔ [bd-dre-rp11j.9] THE PLATFORM CAMPAIGN API IS NOT IN THIS PACKAGE.
+    #
+    # The server exposes a campaign/maturation surface — POST /api/campaign/start,
+    # POST /api/campaign/mature, GET /api/campaign, GET /{id}/status,
+    # /{id}/maturation, /{id}/leaderboard, /{id}/designs/{id}/structure,
+    # POST /{id}/stop, GET /{id}/stream. The published `ligandai` package ships
+    # NO client for any of it.
+    #
+    # This namespace is an unrelated local panel-folding helper that happens to
+    # answer to the same word. Without this guard, `client.campaigns.mature(...)`
+    # raises a bare AttributeError that reads like a typo, and the user cannot
+    # tell "this package cannot do campaigns" from "I called it wrong" — the
+    # epic's defect class, at the namespace level.
+    _PLATFORM_CAMPAIGN_SURFACE: ClassVar[dict[str, str]] = {
+        "start": "POST /api/campaign/start",
+        "mature": "POST /api/campaign/mature",
+        "maturation": "GET /api/campaign/{campaign_id}/maturation",
+        "list": "GET /api/campaign",
+        "status": "GET /api/campaign/{campaign_id}/status",
+        "leaderboard": "GET /api/campaign/{campaign_id}/leaderboard",
+        "structure": "GET /api/campaign/{campaign_id}/designs/{design_id}/structure",
+        "stop": "POST /api/campaign/{campaign_id}/stop",
+        "stream": "GET /api/campaign/{campaign_id}/stream",
+        "designs": "GET /api/campaign/{campaign_id}/leaderboard",
+    }
+
+    def __getattr__(self, name: str) -> Any:
+        route = self._PLATFORM_CAMPAIGN_SURFACE.get(name)
+        if route is None:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            )
+        raise LigandAISurfaceNotInThisPackage(
+            f"client.campaigns.{name}() does not exist in the `ligandai` package, "
+            f"but the platform endpoint it maps to DOES exist.\n"
+            f"  you reached for : client.campaigns.{name}\n"
+            f"  server endpoint : {route}\n"
+            f"  the situation   : `client.campaigns` here is a LOCAL panel-folding "
+            f"helper (pocket_features, contrastive_references, fold_panel, "
+            f"replicate, recursive). It is NOT a client for the platform "
+            f"campaign/maturation API — the two only share a name.\n"
+            f"  this is not a typo on your part, and it is not a transient "
+            f"failure: no version of this package has ever carried that surface.\n"
+            f"  what to do      : drive the endpoint directly over the SDK's own "
+            f"transport, which carries your auth, retries and error mapping:\n"
+            f"      client.transport.request(\"POST\", \"/api/campaign/start\", json={{...}})\n"
+            f"  tracking        : bd-dre-rp11j.9",
+            surface=name,
+            namespace="client.campaigns",
+            server_routes=tuple(sorted(set(self._PLATFORM_CAMPAIGN_SURFACE.values()))),
+        )
+
 
     async def pocket_features(
         self,

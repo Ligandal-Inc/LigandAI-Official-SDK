@@ -26,7 +26,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import warnings
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -52,7 +54,9 @@ from ligandai._http import AsyncHTTPTransport, HTTPTransport
 from ligandai.diagnostics import Diagnostic
 from ligandai.errors import (
     LigandAIAuthError,
+    LigandAIDiagnosticWarning,
     LigandAIError,
+    LigandAIInvalidConfig,
     LigandAILegalAcceptanceRequired,
     LigandAIPaidTierRequired,
     LigandAITierError,
@@ -64,10 +68,10 @@ from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.campaigns import AsyncCampaigns, Campaigns
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
-from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
 from ligandai.resources.diseases import AsyncDiseases, Diseases
 from ligandai.resources.ensemble import AsyncEnsemble, Ensemble
+from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
 from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
 from ligandai.resources.jobs import AsyncJobs, Jobs
@@ -134,6 +138,139 @@ def _resolve_api_key(api_key: str | None) -> str | None:
         or os.environ.get("LIGANDAL_API_KEY")
         or os.environ.get("LIGANDAI_TEST_API_KEY")
     )
+
+
+def classify_api_key(api_key: str | None) -> str:
+    """Classify a credential by SHAPE alone: ``absent`` | ``malformed`` | ``well_formed``.
+
+    ⛔ [bd-dre-rp11j.3] Three different problems used to produce ONE message.
+    Verified live against https://ligandai.com on 2026-09-21:
+
+    ======================  =====================================  ===============
+    cause                   what the server did                    what you saw
+    ======================  =====================================  ===============
+    no key at all           200 with body ``null``                 identical
+    malformed key           200 with body ``null``                 identical
+    well-formed, invalid    401 ``{"message":"Unauthorized"}``     "Unauthorized"
+    ======================  =====================================  ===============
+
+    The first two were byte-identical, and none of the three named the
+    environment variable to set or the prefix to use. The server rejects a key
+    on SHAPE before it ever checks validity (``server/auth.ts`` gates on
+    ``startsWith('lgai_')``), so a malformed key can be caught here — before a
+    pointless round-trip that comes back as a generic failure.
+    """
+    if api_key is None or not str(api_key).strip():
+        return "absent"
+    return "well_formed" if str(api_key).strip().startswith("lgai_") else "malformed"
+
+
+#: Where a user gets a key, quoted in every auth-shaped error.
+API_KEY_HELP = (
+    "Create one at https://ligandai.com/account/billing?tab=api-keys "
+    "(available on every tier, including free), then "
+    "`export LIGANDAI_API_KEY=lgai_...`"
+)
+
+
+def auth_guidance(api_key: str | None) -> str:
+    """Actionable guidance for an auth failure, specific to the key's shape."""
+    state = classify_api_key(api_key)
+    if state == "absent":
+        return (
+            "No API key was supplied. The SDK reads LIGANDAI_API_KEY (also "
+            "LIGANDAL_API_KEY, LIGANDAI_TEST_API_KEY), or takes api_key= "
+            f"directly.\n  {API_KEY_HELP}"
+        )
+    if state == "malformed":
+        return (
+            "The API key does not have the expected shape: it must begin with "
+            "'lgai_' (e.g. lgai_free_, lgai_basic_, lgai_edu_, lgai_pro_, "
+            "lgai_ent_). The server rejects a key on shape BEFORE checking "
+            f"validity, so this is not a permissions problem.\n  {API_KEY_HELP}"
+        )
+    return (
+        "The API key is well-formed but was not accepted — it may be revoked, "
+        f"expired, or for a different environment.\n  {API_KEY_HELP}"
+    )
+
+
+def _validate_api_key_shape(api_key: str | None) -> None:
+    """WARN — loudly, naming the defect — on a key that cannot authenticate.
+
+    ⛔ THIS WARNS RATHER THAN RAISING, DELIBERATELY. The first version of this
+    check raised, and broke three existing tests that encode a real contract:
+    ``LigandAI(api_key="not_a_valid_prefix").tier is None``. Tier detection
+    deliberately FAILS OPEN on an unrecognised prefix and lets the server —
+    which is authoritative — decide. Raising here would also lock out any
+    future key prefix the platform introduces before this constant is updated.
+    Refusing to construct was a wall this SDK had deliberately not built, and
+    inventing it would have been its own defect.
+
+    So the caller still gets a client, and still gets told. The actionable
+    payoff lives where the failure actually happens: the 401 and the
+    ``200``-with-``null`` both now carry :func:`auth_guidance` computed from
+    the key that was sent, which is the only place absent / malformed /
+    well-formed-but-invalid remain distinguishable.
+
+    An absent key warns about nothing: anonymous clients are legitimate
+    (``health()``, public endpoints). [bd-dre-rp11j.3]
+    """
+    if classify_api_key(api_key) != "malformed":
+        return
+    warnings.warn(
+        "The LigandAI API key does not begin with 'lgai_', so it cannot "
+        "authenticate: the server rejects a key on SHAPE before it checks "
+        "validity, and answers with a generic failure that looks identical to "
+        "supplying no key at all.\n"
+        f"  {auth_guidance(api_key)}",
+        LigandAIDiagnosticWarning,
+        stacklevel=3,
+    )
+
+
+def _resolve_base_url(base_url: str | None) -> str:
+    """Resolve the API base URL from the argument, then ``LIGANDAI_BASE_URL``.
+
+    ⛔ [bd-dre-rp11j.3] ``LIGANDAI_BASE_URL`` used to be read by exactly two
+    CLI sub-commands and by NOTHING in the library. So a user who exported it
+    — as the SDK's own DNS-diagnosis message in ``_http.py`` explicitly
+    instructs them to ("Set LIGANDAI_BASE_URL=... to override") — got a client
+    that silently ignored it and went on calling the public edge. That is the
+    accepted-but-inert class in its purest form: a documented knob that reads
+    ON in the caller's environment and OFF in the request, with nothing
+    saying so. The advice printed on the error path is now true.
+
+    An UNUSABLE value raises instead of falling back. Silently substituting
+    the default for a base URL the caller deliberately set would send the
+    request somewhere other than where they said — the same defect one layer
+    down, and the reason ``_wrap_transport_error`` refuses to rewrite a
+    caller's host even when it knows the host is wrong.
+    """
+    if base_url is not None:
+        candidate, origin = base_url, "base_url argument"
+    else:
+        env = os.environ.get("LIGANDAI_BASE_URL")
+        if env is None or not env.strip():
+            return DEFAULT_BASE_URL
+        candidate, origin = env.strip(), "LIGANDAI_BASE_URL environment variable"
+
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise LigandAIInvalidConfig(
+            f"Unusable API base URL from the {origin}: {candidate!r}.\n"
+            f"  expected     : an absolute http(s) URL, e.g. {DEFAULT_BASE_URL!r}\n"
+            f"  got          : scheme={parsed.scheme or '<none>'!r} "
+            f"host={parsed.netloc or '<none>'!r}\n"
+            f"  what to do   : fix the value, or unset it to use the default. "
+            f"The SDK will NOT fall back to the default on your behalf — "
+            f"sending your request to a host you did not name would be worse "
+            f"than refusing.",
+            field="base_url",
+            value=candidate,
+            allowed=f"absolute http(s) URL (default {DEFAULT_BASE_URL})",
+        )
+    return candidate
 
 
 def _resolve_impersonation() -> str | None:
@@ -474,7 +611,8 @@ class LigandAI(_ClientCommon):
         self,
         api_key: str | None = None,
         *,
-        base_url: str = DEFAULT_BASE_URL,
+        # None = resolve from LIGANDAI_BASE_URL, else DEFAULT_BASE_URL.
+        base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECS,
         # Explicit connect-phase timeout, distinct from (and by default
         # shorter than) `timeout` — a dead TCP handshake fails fast
@@ -488,18 +626,20 @@ class LigandAI(_ClientCommon):
         check_entitlement: bool = True,
     ) -> None:
         resolved_key = _resolve_api_key(api_key)
+        _validate_api_key_shape(resolved_key)
+        resolved_base_url = _resolve_base_url(base_url)
         super().__init__(
             resolved_key,
-            base_url,
+            resolved_base_url,
             default_organism=default_organism,
             check_entitlement=check_entitlement,
         )
         emit_update_notice()
-        _log_client_init("LigandAI", base_url, self._tier, resolved_key)
+        _log_client_init("LigandAI", resolved_base_url, self._tier, resolved_key)
 
         self._transport = HTTPTransport(
             api_key=resolved_key,
-            base_url=base_url,
+            base_url=resolved_base_url,
             timeout=timeout,
             connect_timeout=connect_timeout,
             max_retries=max_retries,
@@ -928,7 +1068,8 @@ class AsyncLigandAI(_ClientCommon):
         self,
         api_key: str | None = None,
         *,
-        base_url: str = DEFAULT_BASE_URL,
+        # None = resolve from LIGANDAI_BASE_URL, else DEFAULT_BASE_URL.
+        base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECS,
         # See LigandAI.__init__ — explicit connect-phase timeout.
         # [bd-LIGANDAI_ALPHA_V2-x4vt8]
@@ -940,18 +1081,20 @@ class AsyncLigandAI(_ClientCommon):
         check_entitlement: bool = True,
     ) -> None:
         resolved_key = _resolve_api_key(api_key)
+        _validate_api_key_shape(resolved_key)
+        resolved_base_url = _resolve_base_url(base_url)
         super().__init__(
             resolved_key,
-            base_url,
+            resolved_base_url,
             default_organism=default_organism,
             check_entitlement=check_entitlement,
         )
         emit_update_notice()
-        _log_client_init("AsyncLigandAI", base_url, self._tier, resolved_key)
+        _log_client_init("AsyncLigandAI", resolved_base_url, self._tier, resolved_key)
 
         self._transport = AsyncHTTPTransport(
             api_key=resolved_key,
-            base_url=base_url,
+            base_url=resolved_base_url,
             timeout=timeout,
             connect_timeout=connect_timeout,
             max_retries=max_retries,

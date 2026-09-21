@@ -5,7 +5,11 @@ from __future__ import annotations
 
 from typing import List
 
-from ligandai.errors import LigandAILegalAcceptanceRequired, LigandAIValidationError
+from ligandai.errors import (
+    LigandAILegalAcceptanceRequired,
+    LigandAIValidationError,
+    resolve_mutation_failure,
+)
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     Program,
@@ -91,7 +95,13 @@ class Programs(Resource):
         except LigandAILegalAcceptanceRequired:
             # ⛔ A legal 403 must not read as "server refused".
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="programs.archive", target=str(program_id))
             return False
 
     def workstreams(self, program_id: int | None = None) -> List[Workstream]:
@@ -378,7 +388,13 @@ class AsyncPrograms(AsyncResource):
         except LigandAILegalAcceptanceRequired:
             # ⛔ A legal 403 must not read as "server refused".
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="programs.archive", target=str(program_id))
             return False
 
     async def workstreams(self, program_id: int | None = None) -> List[Workstream]:

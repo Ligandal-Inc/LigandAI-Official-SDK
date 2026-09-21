@@ -29,6 +29,118 @@ def _print_err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
 
 
+# ── exit codes ───────────────────────────────────────────────────────────────
+# ⛔ Every one of these used to be `1`, and three incomplete sub-commands
+# exited `0`. A script or agent driving this CLI could not tell "your key is
+# wrong" from "the network is down" from "you typed half a command and I did
+# nothing" — and in the last case `$?` actively said SUCCESS. Distinct causes
+# get distinct codes so a caller can branch without parsing prose.
+# [bd-dre-rp11j.3]
+EXIT_OK = 0
+EXIT_FAILED = 1          # the operation ran and failed
+EXIT_USAGE = 2           # bad/incomplete invocation — nothing was attempted
+EXIT_AUTH = 3            # 401/403/tier/legal — identity or permission
+EXIT_INCOMPLETE = 4      # ran, did real work, did not reach the goal
+EXIT_UNREACHABLE = 5     # could not look: connection, CDN block, unreadable body
+EXIT_CREDITS = 6         # 402 — out of credits / payment required
+EXIT_CONFIG = 7          # the caller's configuration is unusable
+
+
+def _fail(action: str, exc: BaseException) -> int:
+    """Print an ACTIONABLE failure and return the exit code for its cause.
+
+    ⛔ The CLI previously wrote `error: {action}: {exc}` and returned 1 for
+    every cause alike. With the transport now raising typed, self-describing
+    errors, the useful thing a CLI can add is (a) not hiding the type, and
+    (b) turning the cause into an exit code a script can branch on. It must
+    never swallow: `str(exc)` on these classes is multi-line and already says
+    what was attempted, what went wrong, and what to do.
+    """
+    from ligandai.errors import (
+        LigandAIAuthError,
+        LigandAIConnectionError,
+        LigandAICreditError,
+        LigandAIEdgeBlocked,
+        LigandAIForbidden,
+        LigandAIInvalidConfig,
+        LigandAILegalAcceptanceRequired,
+        LigandAIPaidTierRequired,
+        LigandAITierError,
+        LigandAIUnreadableResponse,
+    )
+
+    print(f"error: {action} failed.", file=sys.stderr)
+    print(f"  cause: {type(exc).__name__}", file=sys.stderr)
+    for line in str(exc).splitlines() or ["<no message>"]:
+        print(f"  {line}", file=sys.stderr)
+
+    rid = getattr(exc, "request_id", None)
+    if rid:
+        print(f"  request id: {rid}", file=sys.stderr)
+
+    if isinstance(exc, LigandAILegalAcceptanceRequired):
+        print("  next step: run `ligandai legal accept`.", file=sys.stderr)
+        return EXIT_AUTH
+    if isinstance(exc, (LigandAIEdgeBlocked, LigandAIConnectionError, LigandAIUnreadableResponse)):
+        return EXIT_UNREACHABLE
+    if isinstance(exc, LigandAICreditError):
+        return EXIT_CREDITS
+    if isinstance(exc, (LigandAIPaidTierRequired, LigandAITierError)):
+        return EXIT_AUTH
+    if isinstance(exc, (LigandAIAuthError, LigandAIForbidden)):
+        print(
+            "  note: this is an identity/permission failure, not a network one. "
+            "Check LIGANDAI_API_KEY.",
+            file=sys.stderr,
+        )
+        return EXIT_AUTH
+    if isinstance(exc, LigandAIInvalidConfig):
+        return EXIT_CONFIG
+    return EXIT_FAILED
+
+
+class _VersionAction(argparse.Action):
+    """Print the version unwrapped, plus a provenance note when the version
+    could not be determined unambiguously.
+
+    argparse's built-in ``action="version"`` runs the string through
+    :class:`~argparse.HelpFormatter`, which re-wraps it to the terminal width
+    and can split a version token across lines. The provenance note is the
+    part that must stay readable, so it is written directly.
+    """
+
+    def __init__(self, option_strings, dest, help=None):
+        super().__init__(option_strings, dest, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from ligandai._version import __version__, __version_provenance__
+
+        print(f"ligandai {__version__}")
+        if __version_provenance__:
+            # Not a silent pick between two candidate versions: say which one
+            # was reported and why the other was rejected.
+            print(f"  ! version provenance: {__version_provenance__}", file=sys.stderr)
+        parser.exit(0)
+
+
+def _incomplete(parser: argparse.ArgumentParser, command: str) -> int:
+    """An incomplete sub-command did NOTHING — say so and exit non-zero.
+
+    ⛔ The original wrote `parser.parse_args([command, "--help"])` and then
+    `return 1`. argparse's help action calls `sys.exit(0)` internally, so the
+    `return 1` was DEAD CODE and `ligandai keys`, `ligandai campaign` and
+    `ligandai legal` each printed help and exited 0 — a no-op reporting
+    success to any script checking `$?`.
+    """
+    print(
+        f"error: `ligandai {command}` is incomplete — no sub-command given, "
+        f"so nothing was done.",
+        file=sys.stderr,
+    )
+    print(f"  run `ligandai {command} --help` to see the sub-commands.", file=sys.stderr)
+    return EXIT_USAGE
+
+
 def _require_env_key() -> str | None:
     """Read the API key from env without printing it."""
     return (
@@ -52,13 +164,20 @@ def cmd_keys_mint(args: argparse.Namespace) -> int:
 
     api_key = _require_env_key()
     if not api_key:
+        from ligandai.client import API_KEY_HELP
         _print_err(
-            "LIGANDAI_API_KEY environment variable is not set. "
-            "Export your lgai_*_ key before running this command."
+            "LIGANDAI_API_KEY is not set, so there is no credential to mint with.\n"
+            "  the SDK reads : LIGANDAI_API_KEY, LIGANDAL_API_KEY, LIGANDAI_TEST_API_KEY\n"
+            f"  get a key     : {API_KEY_HELP}"
         )
-        return 1
+        return EXIT_AUTH
 
-    base_url = args.base_url or os.environ.get("LIGANDAI_BASE_URL", "https://ligandai.com")
+    # One resolver for the whole CLI. This line, _make_client, and
+    # cmd_legal_accept each used to resolve the base URL their OWN way, so
+    # `ligandai legal accept` could check status against the public edge while
+    # printing an acceptance URL for a local origin. [bd-dre-rp11j.3]
+    from ligandai.client import _resolve_base_url
+    base_url = _resolve_base_url(args.base_url)
     scope = args.scope
     target = args.target
     count = args.count
@@ -69,8 +188,7 @@ def cmd_keys_mint(args: argparse.Namespace) -> int:
         client = LigandAI(api_key=api_key, base_url=base_url)
         wallet = client.mint_wallet(scope=scope, target_seq=target, count=count)
     except Exception as exc:
-        _print_err(f"Failed to mint wallet: {exc}")
-        return 1
+        return _fail("minting a key wallet", exc)
 
     print(f"Wallet saved to {WALLET_PATH}")
     print(f"  scope       : {wallet.scope}")
@@ -139,6 +257,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ligandai",
         description="LIGANDAI SDK command-line interface.",
+    )
+    # ⛔ [bd-dre-rp11j.1] `ligandai --version` exited 2 with an argparse usage
+    # dump — byte-identical to what a genuine typo produces. It is the first
+    # thing anyone types when filing a bug, and the ONLY version affordance a
+    # CLI user has: `pip show ligandai` answers for the environment, not for
+    # the binary actually on PATH, and those differ whenever more than one
+    # venv is in play.
+    parser.add_argument(
+        "--version",
+        action=_VersionAction,
+        help="Print the installed SDK version and exit.",
     )
     parser.add_argument(
         "--base-url",
@@ -421,8 +550,7 @@ def cmd_credits_widget(args: argparse.Namespace) -> int:
         client = _make_client(args)
         widget = client.account.widget()
     except Exception as exc:
-        print(f"ligandai credits: failed to fetch balance: {exc}", file=sys.stderr)
-        return 1
+        return _fail("`ligandai credits` (fetching the balance)", exc)
     if getattr(args, "json", False):
         # Pydantic dumps via .model_dump_json on v2
         try:
@@ -446,8 +574,7 @@ def cmd_credits_topup(args: argparse.Namespace) -> int:
             save_card=bool(getattr(args, "save_card", False)),
         )
     except Exception as exc:
-        print(f"ligandai credits top-up: failed: {exc}", file=sys.stderr)
-        return 1
+        return _fail("`ligandai credits top-up`", exc)
     if getattr(result, "checkout_url", None):
         print(f"Complete the purchase: {result.checkout_url}")
         return 0
@@ -478,8 +605,7 @@ def cmd_credits_auto(args: argparse.Namespace) -> int:
             amount_usd=args.amount or 200,
         )
     except Exception as exc:
-        print(f"ligandai credits auto-reload: failed: {exc}", file=sys.stderr)
-        return 1
+        return _fail("`ligandai credits auto-reload`", exc)
     print(
         f"Auto-reload {'enabled' if cfg.enabled else 'disabled'} "
         f"(threshold={cfg.threshold_credits:,} cr, amount=${cfg.amount_usd})"
@@ -498,8 +624,7 @@ def cmd_legal_status(args: argparse.Namespace) -> int:
         client = _make_client(args)
         status = client.legal.status()
     except Exception as exc:
-        print(f"ligandai legal status: failed: {exc}", file=sys.stderr)
-        return 1
+        return _fail("`ligandai legal status`", exc)
 
     if getattr(args, "json", False):
         print(json.dumps(status, indent=2))
@@ -543,8 +668,7 @@ def cmd_legal_accept(args: argparse.Namespace) -> int:
         client = _make_client(args)
         status = client.legal.status()
     except Exception as exc:
-        print(f"ligandai legal accept: failed to check status: {exc}", file=sys.stderr)
-        return 1
+        return _fail("`ligandai legal accept` (checking acceptance status)", exc)
 
     tos_ok = bool(status.get("tosAccepted"))
     eula_ok = bool(status.get("eulaAccepted"))
@@ -552,11 +676,10 @@ def cmd_legal_accept(args: argparse.Namespace) -> int:
         print("Already accepted — nothing to do.")
         return 0
 
-    base_url = (
-        getattr(args, "base_url", None)
-        or os.environ.get("LIGANDAI_BASE_URL")
-        or "https://ligandai.com"
-    )
+    # Same resolver the client used above — otherwise this prints an
+    # acceptance URL for a different host than the status check just queried.
+    from ligandai.client import _resolve_base_url
+    base_url = _resolve_base_url(getattr(args, "base_url", None))
     acceptance_url = f"{base_url.rstrip('/')}/legal/accept?channel=sdk_redirect"
     err = LigandAILegalAcceptanceRequired(
         "You must accept the Terms of Service and End User License Agreement "
@@ -675,16 +798,20 @@ def cmd_campaign_run(args: argparse.Namespace) -> int:
     else:
         api_key = _require_env_key()
         if not api_key:
+            from ligandai.client import API_KEY_HELP
             _print_err(
-                "LIGANDAI_API_KEY is not set. Export your lgai_* key, or use "
-                "--dry-run to plan the campaign without submitting anything."
+                "LIGANDAI_API_KEY is not set, so nothing can be submitted.\n"
+                "  the SDK reads : LIGANDAI_API_KEY, LIGANDAL_API_KEY, "
+                "LIGANDAI_TEST_API_KEY\n"
+                f"  get a key     : {API_KEY_HELP}\n"
+                "  or            : re-run with --dry-run to plan and cost the "
+                "campaign without submitting anything."
             )
-            return 1
+            return EXIT_AUTH
         try:
             client = _make_client(args)
-        except Exception as exc:  # noqa: BLE001
-            _print_err(f"could not create a client: {exc}")
-            return 1
+        except Exception as exc:
+            return _fail("creating an API client for the campaign run", exc)
         platform = SDKPlatform(client, timeout=args.timeout,
                                poll_interval=args.poll_interval,
                                progress=lambda m: print(f"    {m}", flush=True))
@@ -714,8 +841,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.keys_command == "revoke":
             return cmd_keys_revoke(args)
         else:
-            parser.parse_args(["keys", "--help"])
-            return 1
+            return _incomplete(parser, "keys")
     elif args.command == "credits":
         sub = getattr(args, "credits_command", None)
         if sub in (None, ""):
@@ -725,8 +851,7 @@ def main(argv: list[str] | None = None) -> int:
         elif sub in ("auto-reload", "auto"):
             return cmd_credits_auto(args)
         else:
-            parser.parse_args(["credits", "--help"])
-            return 1
+            return _incomplete(parser, "credits")
     elif args.command == "campaign":
         sub_cmd = getattr(args, "campaign_command", None)
         if sub_cmd == "run":
@@ -736,8 +861,7 @@ def main(argv: list[str] | None = None) -> int:
         elif sub_cmd == "explain":
             return cmd_campaign_explain(args)
         else:
-            parser.parse_args(["campaign", "--help"])
-            return 1
+            return _incomplete(parser, "campaign")
     elif args.command == "legal":
         sub = getattr(args, "legal_command", None)
         if sub == "status":
@@ -745,8 +869,7 @@ def main(argv: list[str] | None = None) -> int:
         elif sub == "accept":
             return cmd_legal_accept(args)
         else:
-            parser.parse_args(["legal", "--help"])
-            return 1
+            return _incomplete(parser, "legal")
     else:
         parser.print_help()
         return 0

@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from typing import List, Literal
 
-from ligandai.errors import LigandAILegalAcceptanceRequired
+from ligandai.errors import (
+    LigandAILegalAcceptanceRequired,
+    resolve_mutation_failure,
+)
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import MemoryItem, RecentActivity
 
@@ -63,7 +66,13 @@ class Memory(Resource):
         except LigandAILegalAcceptanceRequired:
             # ⛔ A legal 403 must not read as "server refused".
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="memory.delete", target=str(memory_id))
             return False
 
     def recent_activity(self, limit: int = 10) -> RecentActivity:
@@ -116,7 +125,13 @@ class AsyncMemory(AsyncResource):
         except LigandAILegalAcceptanceRequired:
             # ⛔ A legal 403 must not read as "server refused".
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="memory.delete", target=str(memory_id))
             return False
 
     async def recent_activity(self, limit: int = 10) -> RecentActivity:

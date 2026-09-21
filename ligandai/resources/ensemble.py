@@ -730,8 +730,27 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         sem = asyncio.Semaphore(max(1, concurrency))
         cofold = self._client.peptides.cofold
 
+        # ⛔ `timeout` was accepted by this signature and never read, while the
+        # sync twin at Ensemble.run enforced it — despite the class comment
+        # promising "the sync and async twins cannot drift". A caller passing
+        # timeout= got an async run that ignored the deadline AND a result
+        # whose `stopped` was hard-coded None, so it could not even report
+        # that it had overrun. Wired up here rather than warned away: the
+        # capability is real and the sync half already has it.
+        # [bd-dre-rp11j.3]
+        stopped: Optional[str] = None
+
+        def _deadline_passed() -> bool:
+            return timeout is not None and (time.time() - t0) > timeout
+
         async def one(pep: str) -> None:
+            nonlocal stopped
             async with sem:
+                # Checked INSIDE the semaphore: a peptide queued behind the
+                # concurrency limit must not start after the budget is spent.
+                if _deadline_passed():
+                    stopped = "timeout"
+                    return
                 chains = [{"id": "A", "sequence": rec, "kind": "receptor"},
                           {"id": "B", "sequence": pep, "kind": "peptide"}]
                 vals: dict[str, Optional[float]] = {e: None for e in engines}
@@ -748,7 +767,12 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
                 per_peptide[pep] = vals
 
         await asyncio.gather(*(one(p) for p in peps))
+        # `stopped` now carries "timeout" when the deadline cut the run short,
+        # so a partial ensemble is distinguishable from a complete one. A
+        # short result that claims stopped=None is a measurement; a short
+        # result that says "timeout" is a truncation. They are not the same
+        # and must not print the same.
         return self._build_result(
             bar, engines, metric, per_peptide, honoured, failures, cofs,
-            credits=None, wall=round(time.time() - t0, 1), stopped=None,
+            credits=None, wall=round(time.time() - t0, 1), stopped=stopped,
         )
