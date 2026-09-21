@@ -5,12 +5,22 @@ from __future__ import annotations
 
 import io
 
-import numpy as np
 import pytest
-from pytest_httpx import HTTPXMock
 
-from ligandai import LigandAI
-from ligandai.errors import LigandAITierError
+# A bare `import numpy` here used to ABORT COLLECTION OF THE ENTIRE SUITE when
+# numpy was absent — pytest reports "Interrupted: 1 error during collection" and
+# the other 55 test files never run, which reads far too much like a passing
+# gate. numpy is now declared in the `dev` extra; importorskip keeps a missing
+# one to THIS file and names what to install. [bd-dre-rp11j.1]
+np = pytest.importorskip(
+    "numpy",
+    reason="numpy is required by tests/unit/test_folds.py — `pip install -e '.[dev]'`",
+)
+
+from pytest_httpx import HTTPXMock  # noqa: E402
+
+from ligandai import LigandAI  # noqa: E402
+from ligandai.errors import LigandAITierError  # noqa: E402
 
 BASE = "http://api.ligandai.test"
 

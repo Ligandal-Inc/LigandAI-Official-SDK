@@ -56,6 +56,11 @@ socks = [
     "httpx[socks]>=0.27",
 ]
 dev = [
+    # tests/unit/test_packaging_contract.py builds a wheel with --no-isolation so
+    # it never needs the network; that requires both of these present locally.
+    # Without them the wheel tests SKIP (loudly) rather than pass. [bd-dre-rp11j.1]
+    "build>=1.0",
+    "hatchling>=1.21",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-httpx>=0.30",
@@ -63,6 +68,16 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.5",
     "respx>=0.21",
+    # ⛔ THE SUITE DOES NOT COLLECT WITHOUT THESE TWO. [bd-dre-rp11j.1]
+    # tests/unit/test_folds.py does a module-level `import numpy` and
+    # tests/unit/test_fold_charts.py imports matplotlib. Neither was declared
+    # here, so `pip install -e '.[dev]' && pytest tests/unit` ended in
+    # "ModuleNotFoundError: No module named 'numpy'" -> "Interrupted: 1 error
+    # during collection". A collection error ABORTS THE WHOLE RUN: the other 55
+    # test files never executed, and the output said "1 error", not "0 of 56
+    # files ran". Verified 2026-09-20.
+    "numpy>=1.24",
+    "matplotlib>=3.7",
 ]
 docs = [
     "sphinx>=7.0",
@@ -81,14 +96,49 @@ Repository = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK"
 Issues = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK/issues"
 Changelog = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK/blob/main/CHANGELOG.md"
 
+# Build hygiene, applied to EVERY target. `force-include` copies a directory
+# from the build machine's disk VERBATIM — hatchling's default source exclusions
+# do not apply to it — so a builder who has ever run or imported anything under
+# `skills/` would ship their own `__pycache__` into the wheel. Published 0.12.2
+# happens to be clean (verified 2026-09-20 by reading the wheel's zip namelist),
+# but nothing was stopping it; this makes that guarantee structural rather than
+# lucky. [bd-dre-rp11j.1]
+[tool.hatch.build]
+exclude = [
+    "**/__pycache__",
+    "**/*.py[cod]",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["ligandai"]
 
+# ⛔ THE DESTINATIONS BELOW MUST STAY UNDER `ligandai/`.
+#
+# These agent-facing docs used to be force-included at the destinations
+# "AGENTS.md", "CLAUDE.md", "skills" and ".claude/skills" — i.e. the ROOT of
+# site-packages. Verified on 2026-09-20 against a clean venv install of PyPI
+# 0.12.2: `pip install ligandai` wrote AGENTS.md, CLAUDE.md, a `.claude/`
+# directory and a `skills/` directory directly into site-packages, and
+# `importlib.util.find_spec("skills")` then resolved to OUR directory as a
+# namespace package. Three concrete consequences:
+#   1. `import skills` in any downstream project silently binds to LigandAI's
+#      docs directory instead of that project's own module.
+#   2. AGENTS.md / CLAUDE.md are generic filenames; a second package shipping
+#      either one overwrites ours (and `pip uninstall ligandai` then deletes
+#      THEIRS, because both are listed in our RECORD).
+#   3. An SDK has no business writing a dotfile directory into the environment
+#      root.
+# Shipping them inside the package keeps the payload discoverable
+# (`site-packages/ligandai/AGENTS.md`) while owning only our own namespace.
+# [bd-dre-rp11j.1]
 [tool.hatch.build.targets.wheel.force-include]
-"AGENTS.md" = "AGENTS.md"
-"CLAUDE.md" = "CLAUDE.md"
-"skills" = "skills"
-".claude/skills" = ".claude/skills"
+"AGENTS.md" = "ligandai/AGENTS.md"
+"CLAUDE.md" = "ligandai/CLAUDE.md"
+"skills" = "ligandai/agent_assets/skills"
+".claude/skills" = "ligandai/agent_assets/claude_skills"
 
 [tool.hatch.build.targets.sdist]
 include = [

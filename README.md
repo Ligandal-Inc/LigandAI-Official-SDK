@@ -24,19 +24,19 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.11.0** — the legal-acceptance gate now reaches **every** authenticated
-> call. SSE streams (`job.stream()`, `batch.stream()`, goal campaigns) raise the
-> same typed errors as any other request instead of `httpx.ResponseNotRead`, and
-> the boolean helpers (`jobs.cancel()`, `memory.delete()`, `programs.archive()`,
-> …) no longer swallow the gate by returning `False`.
+> **v0.13.0** — the campaign runner reaches customers. `client.campaigns` runs a
+> declarative `CampaignSpec` to its stop metrics with eight structural guards and
+> a hard credit cap; `client.ensemble` co-folds N peptides x M engines, priced
+> first, with cofactors declared rather than dropped; contrastive / avoidance
+> design is a first-class argument rather than a hand-rolled loop. A receptor-MSA
+> refusal now arrives as an actionable object instead of a generic 5xx, and the
+> de-novo-peptide flag is honoured on every fold path.
 >
-> Upgrading from 0.8.3 also delivers **0.10.0** — actionable legal-acceptance
-> 403 via `LigandAILegalAcceptanceRequired`, headless-safe
-> `client.legal.resolve_interactively()`, and the `ligandai legal` CLI — and
-> **0.9.0** — PDE (predicted distance error) callable on every fold-score
-> surface through `fold.pde`, plus `pde_max` / `pde_engine` / `sort="pde"`
-> filters on `peptides.search()`. 0.9.0 and 0.10.0 were never published to
-> PyPI, so a 0.8.3 user receives all three releases at once.
+> Upgrading from 0.12.2 also picks up the fixes in between: `client.charts` could
+> not previously complete a single call, an unmounted API route no longer
+> masquerades as a 404, and a non-resolving `base_url` now names its own cause
+> (the stale `~/.ligandai/credentials.json` `server_url`) instead of surfacing a
+> bare `Name or service not known`.
 >
 > See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
