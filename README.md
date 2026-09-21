@@ -24,7 +24,7 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.13.0** — the campaign runner reaches customers. `client.campaigns` runs a
+> **v0.14.0** — the campaign runner reaches customers. `client.campaigns` runs a
 > declarative `CampaignSpec` to its stop metrics with eight structural guards and
 > a hard credit cap; `client.ensemble` co-folds N peptides x M engines, priced
 > first, with cofactors declared rather than dropped; contrastive / avoidance
