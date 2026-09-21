@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-09-21
+
+### Fixed
+- **`pip install ligandai` no longer writes files into the site-packages root.**
+  From 0.7.3 through 0.12.2 the wheel shipped `AGENTS.md`, `CLAUDE.md`, `.claude/`
+  and `skills/` as top-level entries, so `import skills` in any consuming project
+  resolved to this package's documentation as a namespace package. 15 releases over
+  ~51 days were affected; 0.7.0 and earlier were clean. The wheel now contains only
+  `ligandai` and its `.dist-info`.
+- **`analyze()` no longer manufactures a result.** Its response model declared every
+  field `Optional=None`, so an all-null body validated cleanly and the method
+  returned a well-formed object describing an answer nothing had computed. It now
+  raises.
+- **The test suite can report that it ran nothing.** Collection failed with
+  `Interrupted: 1 error during collection` and 0 of 56 files executed, while the
+  only number on screen was `1` — indistinguishable from one ordinary failure.
+
+### Added
+- `pyyaml` as a runtime dependency. It was declared nowhere — not as a dependency,
+  not as an extra — while `ligandai campaign validate <spec>.yaml` is a headline
+  feature, so a clean install raised `SpecError: PyYAML is required for YAML specs`.
+
+### Changed
+- A CLI exit code changed where a failure previously exited 0.
+
+
 
 ## [0.12.2] — 2026-08-12
 
