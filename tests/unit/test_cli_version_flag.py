@@ -92,3 +92,44 @@ def test_cli_rejects_an_unknown_subcommand_distinguishably() -> None:
     assert "definitely-not-a-command" in combined, (
         f"error did not echo back what the user typed: {combined!r}"
     )
+
+
+def test_bare_invocation_does_not_report_success() -> None:
+    """`ligandai` with no command did nothing and exited 0. [bd-dre-rp11j.28]
+
+    MEASURED 2026-09-21 through the INSTALLED console script (`<venv>/bin/ligandai`,
+    not `python -m`, because an entry point never runs `if __name__ ==
+    "__main__"` and the Node twin's inertness hid behind exactly that
+    distinction):
+
+        argv=[--version]    rc=0  stdout=15B   stderr=0B
+        argv=[--help]       rc=0  stdout=796B  stderr=0B
+        argv=[]             rc=0  stdout=796B  stderr=0B   <-- this one
+        argv=[frobnicate]   rc=2  stdout=0B    stderr=217B
+
+    `ligandai $CMD` with an unset CMD printed usage and told the calling script
+    the work succeeded. It also contradicted this same file's `_incomplete()`,
+    which already exits 2 for `ligandai keys` / `campaign` / `legal`. The Node
+    SDK settled on the same contract under bd-dre-rp11j.29.
+    """
+    proc = _run_cli()
+    assert proc.returncode == 2, (
+        f"`ligandai` with no arguments exited {proc.returncode}. A bare invocation "
+        f"does nothing, so it must not report success — a shell doing "
+        f"`ligandai $CMD` with an unset CMD would read 0 as 'done'.\n"
+        f"stdout: {proc.stdout[:400]!r}\nstderr: {proc.stderr[:400]!r}"
+    )
+    assert proc.stderr, "a bare invocation must say something on stderr"
+    assert "no command given" in proc.stderr
+    assert "nothing was done" in proc.stderr
+    assert "--help" in proc.stderr, "the error must name how to discover the commands"
+
+
+def test_help_still_exits_zero_after_the_bare_invocation_change() -> None:
+    """The fix above must not catch `--help` / `-h`, which are requests that
+    argparse satisfies before dispatch."""
+    for flag in ("--help", "-h"):
+        proc = _run_cli(flag)
+        assert proc.returncode == 0, f"`ligandai {flag}` exited {proc.returncode}"
+        assert "usage: " in proc.stdout
+        assert proc.stdout, f"`ligandai {flag}` produced no stdout"

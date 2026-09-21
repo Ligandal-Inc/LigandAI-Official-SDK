@@ -132,6 +132,34 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "remediation": "Targeting had NO EFFECT: generation fell back to the unfiltered pocket instead of conditioning on the site you asked for. Re-run with residue numbers taken from the structure's own author numbering.",
         "doc_anchor": "sdk/python/allosteric-targeting#event-target",
     },
+    "hotspot_residues_none_resolved": {
+        "severity": "error",
+        "stage": "generate",
+        "title": "None of your hotspot residues were found",
+        "remediation": "Hotspot steering had NO EFFECT: none of the residue numbers you sent matched the receptor's pocket metadata, so generation fell back to the unfiltered pocket. Check that the numbers are in the structure's own author numbering and that the chain is one of the active chains, then re-run.",
+        "doc_anchor": "sdk/python/allosteric-targeting#event-target",
+    },
+    "hotspot_residues_unresolved": {
+        "severity": "warning",
+        "stage": "generate",
+        "title": "Some hotspot residues were not found",
+        "remediation": "Only the hotspot residues that exist in the targeted structure could be applied; the rest were dropped before generation. Residue numbers must be in the structure's own author numbering, and hotspotChain must name the chain they belong to when the receptor has more than one. The run proceeded conditioned on the residues that resolved - check the resolved_count in this diagnostic's details against what you asked for before treating the run as fully targeted.",
+        "doc_anchor": "sdk/python/allosteric-targeting#event-target",
+    },
+    "pocket_residues_unresolved": {
+        "severity": "warning",
+        "stage": "generate",
+        "title": "Some pocket residues were not found",
+        "remediation": "Only the pocket context residues that exist in the targeted structure could be applied. Residue numbers must be in the structure's own author numbering. A pocket smaller than you specified conditions generation on less context than you intended, which is not itself an error but does change what the generator saw.",
+        "doc_anchor": "sdk/python/allosteric-targeting#event-target",
+    },
+    "pocket_residues_none_resolved": {
+        "severity": "error",
+        "stage": "generate",
+        "title": "None of your pocket residues were found",
+        "remediation": "Every pocket residue number you supplied is absent from the targeted structure, so the pocket you specified was discarded and generation conditioned on the unfiltered pocket instead - almost always a numbering mismatch (author numbering vs sequence index) or the wrong chain. Re-run with residue numbers taken from the structure itself, and set hotspotChain on a multi-chain receptor.",
+        "doc_anchor": "sdk/python/allosteric-targeting#event-target",
+    },
     "degenerate_pocket_after_avoid": {
         "severity": "error",
         "stage": "generate",
@@ -839,6 +867,22 @@ _TARGETING_CODE_PREFIXES = (
     "target_",
     "targeting_",
     "degenerate_",
+    # `hotspot_residues_*` and `pocket_residues_*` are the same
+    # residues-did-not-resolve story as `target_residues_*` — the platform
+    # registered them under bd-dre-rp11j.32 — and one of them
+    # (hotspot_residues_none_resolved) is severity=error meaning hotspot
+    # steering had NO EFFECT. Without these prefixes they arrived as the
+    # broader LigandAIDiagnosticWarning, so a caller who had narrowed their
+    # filter to LigandAITargetingWarning (the documented category for
+    # "my residues did not resolve") never saw them. [bd-dre-rp11j.28]
+    "hotspot_",
+    # Deliberately `pocket_residues_` and not a bare `pocket_`: the registry
+    # already carries `pocket_auto_selected` and
+    # `pocket_outside_functional_domain`, which have shipped as
+    # LigandAIDiagnosticWarning. Reclassifying those would change the category
+    # of a code callers already handle, which is a different decision from
+    # adding the new ones to the family they belong to.
+    "pocket_residues_",
 )
 
 

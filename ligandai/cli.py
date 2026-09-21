@@ -871,8 +871,27 @@ def main(argv: list[str] | None = None) -> int:
         else:
             return _incomplete(parser, "legal")
     else:
-        parser.print_help()
-        return 0
+        # ⛔ NO SUB-COMMAND AT ALL. This used to print help and `return 0`.
+        #
+        # `ligandai $CMD` with an unset or empty CMD then printed usage and
+        # reported SUCCESS, so a script that branches on `$?` was told the work
+        # was done. It is also inconsistent with this same file's own
+        # `_incomplete()`, which already exits EXIT_USAGE for `ligandai keys`,
+        # `ligandai campaign` and `ligandai legal` — an invocation with no
+        # sub-command is the same class of no-op as one with no sub-sub-command.
+        # The Node SDK settled on the same contract for @ligandal/sdk under
+        # bd-dre-rp11j.29, so the two CLIs now agree.
+        #
+        # `--help` / `-h` are untouched: argparse handles those before this
+        # point and exits 0, which is what a caller asking for help wants.
+        # [bd-dre-rp11j.28]
+        print(
+            "error: no command given, so nothing was done.",
+            file=sys.stderr,
+        )
+        print("  run `ligandai --help` to see the commands.", file=sys.stderr)
+        parser.print_help(sys.stderr)
+        return EXIT_USAGE
 
 
 if __name__ == "__main__":

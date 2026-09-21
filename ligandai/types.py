@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, TypeAlias, TypedDict, cast
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias, TypedDict, cast
 
 from pydantic import (
     AliasChoices,
@@ -29,6 +29,8 @@ from pydantic import (
     model_validator,
 )
 from typing_extensions import NotRequired
+
+from ligandai.errors import LigandAIAnalysisNotComputed
 
 # -- Base ---------------------------------------------------------------------
 
@@ -658,13 +660,168 @@ class ResidueRange(_LGModel):
         return ranges
 
 
+class StructureSuitability(_LGModel):
+    """The target-suitability verdict ``POST /api/structure/analyze`` produces.
+
+    This is the block the endpoint actually computes. The legacy
+    ``pocket*`` / ``vacancy*`` / ``surface*`` fields on
+    :class:`StructureAnalysis` are NOT produced here and are null on every
+    correct response — the route performs suitability analysis, not pocket
+    detection, and says so in its own ``pocket_analysis`` block. Read this
+    instead. [bd-dre-rp11j.28, server side bd-dre-rp11j.31]
+    """
+
+    is_good_target: bool | None = Field(default=None, alias="isGoodTarget")
+    suitability_score: float | None = Field(default=None, alias="suitabilityScore")
+    target_type: str | None = Field(default=None, alias="targetType")
+    suggested_configuration: str | None = Field(default=None, alias="suggestedConfiguration")
+    binding_study_compatibility: dict[str, Any] | None = Field(
+        default=None, alias="bindingStudyCompatibility"
+    )
+    warnings: list[Any] | None = None
+    recommendations: list[Any] | None = None
+    suggested_actions: list[Any] | None = Field(default=None, alias="suggestedActions")
+
+
+def _carries_a_value(value: Any) -> bool:
+    """Whether ``value`` is evidence that something was COMPUTED.
+
+    ``None`` is absence. An empty list / dict / string is absence too — an
+    empty ``warnings`` array is not evidence of an analysis. ``False`` is
+    absence *for a flag*, because the only bool in this contract is
+    ``computed``, and ``computed=False`` is the server saying it did not.
+    But a numeric ``0`` IS a value: ``pocket_count=0`` is a measurement that
+    found no pockets, which is an honest empty result and must survive.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (list, tuple, dict, set, str)):
+        return len(value) > 0
+    return True
+
+
 class StructureAnalysis(_LGModel):
+    """Result of ``POST /api/structure/analyze``.
+
+    ⛔ AN ALL-NULL BODY IS REJECTED, BY DESIGN. See
+    :class:`~ligandai.errors.LigandAIAnalysisNotComputed` for the defect that
+    makes this necessary: this endpoint was a no-op for its entire life and
+    every layer — status, transport, schema, call site — agreed on the
+    non-answer it produced, because every field here except ``gene`` is
+    optional and the call site manufactured ``gene`` from its own argument.
+
+    An honest empty result still validates and is still returned: a body
+    saying ``pocket_count=0`` / ``pockets=[]``, or carrying a ``suitability``
+    verdict, is a measurement. Only a body carrying no evidence that anything
+    was computed raises.
+    """
+
     gene: str
+
+    # ---- what the route returns today (bd-dre-rp11j.31) -------------------
+    canonical_gene: str | None = Field(default=None, alias="canonicalGene")
+    uniprot_id: str | None = Field(default=None, alias="uniprotId")
+    analysis_depth: str | None = Field(
+        default=None, validation_alias=AliasChoices("analysis_depth", "analysisDepth")
+    )
+    #: Server-side proof that the two not-computed guards ran and passed. A
+    #: caller can assert on this instead of trusting the 200.
+    computed: bool | None = None
+    computed_fields: list[str] | None = Field(
+        default=None, validation_alias=AliasChoices("computed_fields", "computedFields")
+    )
+    #: Proof the ``analysis_depth`` knob reached the thing that acts on it:
+    #: True only when depth="full" AND coordinates were actually obtained.
+    structure_used: bool | None = Field(
+        default=None, validation_alias=AliasChoices("structure_used", "structureUsed")
+    )
+    structure_source: str | None = Field(
+        default=None, validation_alias=AliasChoices("structure_source", "structureSource")
+    )
+    structure_note: str | None = Field(
+        default=None, validation_alias=AliasChoices("structure_note", "structureNote")
+    )
+    suitability: StructureSuitability | None = None
+
+    # ---- legacy pocket keys: null on every correct response ---------------
+    # Retained because removing them would break older callers, and because
+    # `pocket_analysis` now explains IN WORDS why they are null rather than
+    # leaving a caller to interpret an unexplained one.
     pocket_count: int | None = Field(default=None, alias="pocketCount")
     recommended_pocket: ResidueRange | None = Field(default=None, alias="recommendedPocket")
     pockets: list[ResidueRange] | None = None
     vacancy_score: float | None = Field(default=None, alias="vacancyScore")
     surface_features: dict[str, Any] | None = Field(default=None, alias="surfaceFeatures")
+    pocket_analysis: dict[str, Any] | None = Field(
+        default=None, validation_alias=AliasChoices("pocket_analysis", "pocketAnalysis")
+    )
+
+    #: Every field inspected for evidence that the platform computed an answer.
+    #: `gene` is deliberately NOT in this set: it is echoed from the request,
+    #: so it proves only that a request was made.
+    EVIDENCE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "computed",
+        "computed_fields",
+        "suitability",
+        "pocket_count",
+        "recommended_pocket",
+        "pockets",
+        "vacancy_score",
+        "surface_features",
+    )
+
+    def evidence_of_computation(self) -> list[str]:
+        """Which :attr:`EVIDENCE_FIELDS` carry a value. Empty means nothing ran."""
+        found: list[str] = []
+        for name in self.EVIDENCE_FIELDS:
+            value = getattr(self, name, None)
+            if name == "suitability":
+                if value is not None and any(
+                    _carries_a_value(v) for v in value.model_dump().values()
+                ):
+                    found.append(name)
+                continue
+            if _carries_a_value(value):
+                found.append(name)
+        return found
+
+    @model_validator(mode="after")
+    def _refuse_an_uncomputed_analysis(self) -> StructureAnalysis:
+        """Raise a NAMED error rather than return an object that means nothing.
+
+        Raising from a validator (instead of returning the object and letting
+        the caller check) is deliberate: the previous shape was reachable by
+        ``StructureAnalysis.model_validate(anything_with_a_gene)``, and a check
+        a caller has to remember to perform is a check that does not happen.
+        """
+        found = self.evidence_of_computation()
+        if found:
+            return self
+        raise LigandAIAnalysisNotComputed(
+            f"POST /api/structure/analyze answered for {self.gene!r} with a body that "
+            f"carries no computed analysis: every one of "
+            f"{', '.join(self.EVIDENCE_FIELDS)} was absent or empty.\n"
+            f"  attempted      : analysing {self.gene!r} for peptide-binder suitability\n"
+            f"  what happened  : the platform returned a readable body containing no "
+            f"result. This is NOT a finding that {self.gene!r} is unsuitable and NOT an "
+            f"empty pocket list — no verdict was reached. The SDK refuses to return it "
+            f"as an analysis because an all-null StructureAnalysis is "
+            f"indistinguishable from a real one.\n"
+            f"  what to do     : retry — the platform's suitability analyser falls back "
+            f"per-request, so a retry frequently succeeds. If it persists, the server is "
+            f"older than the fix for this endpoint (it returned 200 + all-null for its "
+            f"entire life); upgrade the server or report the gene to support@ligandal.com. "
+            f"For pockets/druggability/vacancy use "
+            f"/api/receptor-intelligence/profile/{{gene}} — this endpoint has never "
+            f"performed pocket detection.",
+            subject=self.gene,
+            endpoint="POST /api/structure/analyze",
+            checked_fields=list(self.EVIDENCE_FIELDS),
+            populated_fields=found,
+            body=self.model_dump(by_alias=True),
+        )
 
 
 class GeneResolution(_LGModel):

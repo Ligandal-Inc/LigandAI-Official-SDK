@@ -364,6 +364,70 @@ class LigandAIUnreadableResponse(LigandAIError):
         self.body_excerpt = body_excerpt
 
 
+class LigandAIAnalysisNotComputed(LigandAIError):
+    """A readable 2xx body arrived and it contained NO COMPUTED ANALYSIS, so the
+    SDK refuses to hand back a model object that reads like a result.
+
+    ⛔ THE DEFECT THIS EXISTS TO MAKE IMPOSSIBLE, measured 2026-09-21.
+    ``POST /api/structure/analyze`` was a total no-op for its entire life: it
+    posted field names the upstream never destructured, so every field of the
+    answer came back null. Four layers then agreed on that non-answer:
+
+      * the STATUS was 200,
+      * the TRANSPORT read the body fine — so
+        :class:`LigandAIUnreadableResponse` does not and must not fire,
+      * the SCHEMA validated, because every field except ``gene`` is
+        ``Optional[...] = None``, and
+      * the CALL SITE wrote ``... or {"gene": gene}`` over a falsy response,
+        manufacturing the one field that WOULD have failed validation out of
+        the caller's own argument.
+
+    So ``client.structures.analyze("EGFR")`` returned
+    ``StructureAnalysis(gene='EGFR', pocket_count=None, pockets=None, ...)``
+    whether the platform had analysed EGFR or had never been reached at all.
+    Nothing distinguished the two, and no layer was in a position to notice:
+    each one individually behaved correctly.
+
+    This error is NOT "the analysis found nothing". An honest empty result is a
+    populated body that says so — ``pocket_count=0``, ``pockets=[]``, a
+    ``suitability`` block with a verdict in it. That still validates and is
+    still returned. This fires only when the body carries no evidence that
+    anything was computed.
+
+    Attributes
+    ----------
+    endpoint : str | None
+        The route that answered.
+    subject : str | None
+        What was being analysed (the gene / accession), so the message names
+        the target rather than just the route.
+    checked_fields : list[str]
+        Every field inspected for evidence of computation.
+    populated_fields : list[str]
+        Those that carried a value. Empty is the whole reason this raised.
+    body : dict | None
+        The body verbatim, so a caller can see exactly what arrived.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        endpoint: str | None = None,
+        subject: str | None = None,
+        checked_fields: list[str] | None = None,
+        populated_fields: list[str] | None = None,
+        body: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.endpoint = endpoint
+        self.subject = subject
+        self.checked_fields = list(checked_fields or [])
+        self.populated_fields = list(populated_fields or [])
+        self.body = body
+
+
 class LigandAIMutationUnconfirmed(LigandAIError):
     """A ``-> bool`` mutation (cancel / archive / delete) could not be
     confirmed either way, so the SDK refuses to answer ``False``.

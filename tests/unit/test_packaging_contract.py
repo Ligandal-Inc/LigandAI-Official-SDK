@@ -170,21 +170,98 @@ def test_wheel_installs_nothing_outside_the_package(built_wheel: pathlib.Path) -
     with zipfile.ZipFile(built_wheel) as z:
         names = z.namelist()
 
-    offenders = sorted(
-        {
-            n.split("/")[0]
-            for n in names
-            if not n.startswith("ligandai/")
-            and not re.match(r"^ligandai-[^/]+\.dist-info/", n)
-            and not re.match(r"^ligandai-[^/]+\.data/", n)
-        }
+    # ⛔ EVERY path, not just the top-level names, and `.data/` is NOT exempt.
+    # An earlier revision of this test allowed `ligandai-<ver>.data/` through,
+    # which is a hole wide enough for the original defect to walk back in: a
+    # wheel's `.data/purelib/` is unpacked into site-packages ROOT and
+    # `.data/data/` into sys.prefix, so `.data/purelib/skills/` reintroduces
+    # exactly the `import skills` capture this test exists to prevent. Nothing
+    # in this project needs a `.data/` tree; if something ever does, it must
+    # be added here deliberately and scoped to `.data/scripts/`.
+    permitted = re.compile(r"^(ligandai/|ligandai-[^/]+\.dist-info/)")
+    stray = sorted(n for n in names if not permitted.match(n))
+    assert not stray, (
+        f"{len(stray)} wheel path(s) live outside `ligandai/` and the `.dist-info/`, "
+        f"so `pip install ligandai` writes them into the environment root: {stray}. "
+        f"Measured on published 0.12.2, whose top-level was ['.claude', 'AGENTS.md', "
+        f"'CLAUDE.md', 'ligandai', '<dist-info>', 'skills'] — and `import skills` then "
+        f"resolved to OUR docs directory in any downstream project. Force-include "
+        f"destinations are the usual cause; point them at `ligandai/...`."
     )
-    assert not offenders, (
-        f"wheel writes these into the ROOT of site-packages: {offenders}. "
-        f"Everything must live under `ligandai/`, the `.dist-info/` or the "
-        f"`.data/` directory. Force-include destinations are the usual cause — "
-        f"point them at `ligandai/...`."
+
+    # Stated as an exact set too, so a NEW top-level entry has to be argued for
+    # here rather than slipping in under a pattern.
+    tops = {n.split("/")[0] for n in names}
+    assert tops == {"ligandai", f"ligandai-{_declared_version()}.dist-info"}, (
+        f"wheel top-level is {sorted(tops)}; it must be exactly "
+        f"['ligandai', 'ligandai-{_declared_version()}.dist-info']"
     )
+
+
+def test_wheel_agent_assets_match_the_git_tracked_sources(built_wheel: pathlib.Path) -> None:
+    """`force-include` copies the BUILD MACHINE'S DISK, verbatim and unfiltered.
+
+    Measured 2026-09-21: dropping a file named `SCRATCH_NOTES.txt` into
+    `skills/openai-tool-calling/` and rebuilding put
+    `ligandai/agent_assets/skills/openai-tool-calling/SCRATCH_NOTES.txt` in the
+    wheel. Nothing in `pyproject.toml` prevents that — the `[tool.hatch.build]
+    exclude` patterns only name cache directories — and an untracked file in a
+    force-included tree is invisible to `git status` review of the release
+    commit. So the contents are pinned to what git tracks: an untracked file
+    under `skills/` or `.claude/skills/` cannot ride along into a customer's
+    site-packages. [bd-dre-rp11j.28]
+    """
+    proc = subprocess.run(
+        ["git", "ls-files", "skills", ".claude/skills", "AGENTS.md"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:  # pragma: no cover - not a git checkout
+        pytest.skip(
+            f"not a git checkout, so the tracked set is unknown: {proc.stderr.strip()}. "
+            f"Nothing about the force-included payload has been checked."
+        )
+    tracked = {line for line in proc.stdout.split("\n") if line}
+
+    # destination-in-wheel -> source-on-disk, mirroring
+    # [tool.hatch.build.targets.wheel.force-include]
+    def _source_of(dest: str) -> str | None:
+        for prefix, source_root in (
+            ("ligandai/agent_assets/skills/", "skills/"),
+            ("ligandai/agent_assets/claude_skills/", ".claude/skills/"),
+        ):
+            if dest.startswith(prefix):
+                return source_root + dest[len(prefix):]
+        if dest == "ligandai/AGENTS.md":
+            return "AGENTS.md"
+        return None
+
+    with zipfile.ZipFile(built_wheel) as z:
+        shipped = z.namelist()
+
+    untracked = sorted(
+        f"{dest}  (from {src})"
+        for dest in shipped
+        if (src := _source_of(dest)) is not None and src not in tracked
+    )
+    assert not untracked, (
+        f"{len(untracked)} force-included file(s) in the wheel are NOT tracked by git, "
+        f"so they exist only on the machine that built it and were never reviewed:\n"
+        + "\n".join(f"    {u}" for u in untracked)
+        + "\n\nRemove them from the source tree before building, or commit them."
+    )
+
+    # And the converse: a tracked asset silently dropped from the wheel is a
+    # payload the docs promise and the package does not carry.
+    expected_dests = set()
+    for t in tracked:
+        if t.startswith("skills/"):
+            expected_dests.add("ligandai/agent_assets/skills/" + t[len("skills/"):])
+        elif t.startswith(".claude/skills/"):
+            expected_dests.add("ligandai/agent_assets/claude_skills/" + t[len(".claude/skills/"):])
+        elif t == "AGENTS.md":
+            expected_dests.add("ligandai/AGENTS.md")
+    absent = sorted(expected_dests - set(shipped))
+    assert not absent, f"tracked agent assets missing from the wheel: {absent}"
 
 
 def test_wheel_ships_no_bytecode(built_wheel: pathlib.Path) -> None:

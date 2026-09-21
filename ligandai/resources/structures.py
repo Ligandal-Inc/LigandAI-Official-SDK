@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from ligandai.errors import LigandAIUnreadableResponse
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     GeneResolution,
@@ -12,6 +13,74 @@ from ligandai.types import (
     StructureAnalysis,
     StructureCandidate,
 )
+
+_ANALYZE_PATH = "/api/structure/analyze"
+
+
+def _analysis_from_payload(payload: object, *, gene: str) -> StructureAnalysis:
+    """Turn the ``POST /api/structure/analyze`` body into a result, or raise.
+
+    ⛔ THE LINE THIS FUNCTION REPLACES WAS THE DEFECT, on both twins:
+
+        StructureAnalysis.model_validate(
+            self._transport.request("POST", _ANALYZE_PATH, json=body)
+            or {"gene": gene}                      # <-- here
+        )
+
+    ``gene`` is the ONLY required field on :class:`StructureAnalysis`, so
+    ``or {"gene": gene}`` manufactured — out of the caller's own argument —
+    precisely the field whose absence would have failed validation. A response
+    the transport could not turn into anything therefore arrived at the caller
+    as a clean, fully-valid ``StructureAnalysis`` with every computed field
+    null. "The platform did not answer" and "the platform answered" were the
+    same Python object. [bd-dre-rp11j.28]
+
+    The three outcomes are now distinct, and each one is named:
+
+    ``LigandAIUnreadableResponse(cause="empty_body")``
+        Nothing usable came back at all. This endpoint is a POST, so the
+        transport's rule ("a POST is a COMMAND, an empty 200 is a legitimate
+        ack" — bd-dre-rp11j.3) lets an empty body through as ``None``. That
+        rule is right for ``cancel``/``archive``; it is wrong here, because
+        ``analyze`` is an RPC-shaped MEASUREMENT wearing a POST. This is the
+        call site that has to say so.
+
+    ``LigandAIAnalysisNotComputed``
+        A readable body arrived carrying no computed analysis. Raised by
+        :class:`StructureAnalysis` itself, so it cannot be bypassed.
+
+    a returned ``StructureAnalysis``
+        Something was computed — including an honest empty result such as
+        ``pocket_count=0``.
+    """
+    if not payload:
+        raise LigandAIUnreadableResponse(
+            f"POST {_ANALYZE_PATH} returned no usable body while analysing {gene!r}, so "
+            f"NOTHING was measured.\n"
+            f"  attempted      : analysing {gene!r} for peptide-binder suitability\n"
+            f"  what happened  : the response carried no JSON document (empty body, or a "
+            f"body the transport could not read). This endpoint is a POST, so an empty "
+            f"200 is normally accepted as a command acknowledgement — but `analyze` is a "
+            f"query, and an ack is not an analysis.\n"
+            f"  what NOT to do : do not read this as 'no pockets' or 'unsuitable target'. "
+            f"Until this bead the SDK substituted {{'gene': {gene!r}}} here and returned a "
+            f"fully-valid StructureAnalysis with every computed field null.\n"
+            f"  what to do     : retry. If it persists, check that base_url reaches the "
+            f"API (not a web front end or proxy) and report to support@ligandal.com.",
+            cause="empty_body",
+            method="POST",
+            url=_ANALYZE_PATH,
+        )
+    if not isinstance(payload, dict):
+        raise LigandAIUnreadableResponse(
+            f"POST {_ANALYZE_PATH} returned a {type(payload).__name__} while analysing "
+            f"{gene!r}; this endpoint returns a JSON object. Nothing was measured — do "
+            f"not read this as an empty result. Report to support@ligandal.com.",
+            cause="malformed_json",
+            method="POST",
+            url=_ANALYZE_PATH,
+        )
+    return StructureAnalysis.model_validate(payload)
 
 
 class Structures(Resource):
@@ -91,8 +160,8 @@ class Structures(Resource):
         body: dict[str, object] = {"gene": gene, "analysis_depth": analysis_depth}
         if pdb_code is not None:
             body["pdb_code"] = pdb_code
-        return StructureAnalysis.model_validate(
-            self._transport.request("POST", "/api/structure/analyze", json=body) or {"gene": gene}
+        return _analysis_from_payload(
+            self._transport.request("POST", _ANALYZE_PATH, json=body), gene=gene
         )
 
     def from_pdb(self, pdb_id: str) -> Structure:
@@ -246,8 +315,8 @@ class AsyncStructures(AsyncResource):
         body: dict[str, object] = {"gene": gene, "analysis_depth": analysis_depth}
         if pdb_code is not None:
             body["pdb_code"] = pdb_code
-        return StructureAnalysis.model_validate(
-            await self._transport.request("POST", "/api/structure/analyze", json=body) or {"gene": gene}
+        return _analysis_from_payload(
+            await self._transport.request("POST", _ANALYZE_PATH, json=body), gene=gene
         )
 
     async def from_pdb(self, pdb_id: str) -> Structure:

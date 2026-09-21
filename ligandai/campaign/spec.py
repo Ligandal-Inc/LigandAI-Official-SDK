@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -523,7 +524,18 @@ class CampaignSpec:
             try:
                 import yaml  # type: ignore
             except ImportError as exc:  # pragma: no cover
-                raise SpecError("PyYAML is required for YAML specs: pip install pyyaml") from exc
+                raise SpecError(
+                    f"{path}: this is a YAML spec and PyYAML is not importable in "
+                    f"this interpreter ({sys.executable}). PyYAML is a declared "
+                    f"runtime dependency of `ligandai`, so a normal "
+                    f"`pip install ligandai` provides it — seeing this means the "
+                    f"environment is incomplete (a partially-installed venv, a "
+                    f"vendored copy of the SDK, or `--no-deps`). Repair it with "
+                    f"`pip install --upgrade ligandai`, or install the parser "
+                    f"alone with `pip install pyyaml`. Converting the spec to "
+                    f"JSON also works: `CampaignSpec.load` reads .json with the "
+                    f"standard library and needs nothing extra."
+                ) from exc
             data = yaml.safe_load(text)
         else:
             data = json.loads(text)

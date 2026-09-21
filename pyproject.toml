@@ -43,6 +43,18 @@ dependencies = [
     "pydantic>=2.0,<3.0",
     "tenacity>=8.0,<10.0",
     "typing-extensions>=4.5",
+    # ⛔ CORE, NOT AN EXTRA. `ligandai campaign {run,validate,explain} <spec>`
+    # takes a YAML file, the CLI's own help says "one YAML/JSON file", the only
+    # shipped example is `examples/campaign/ca12_selective_binders.yaml`, and
+    # that example's README says `pip install ligandai` and then hands the
+    # customer `ligandai campaign validate ca12_selective_binders.yaml`.
+    # PyYAML was declared NOWHERE — not here, not in an extra, not in `dev` —
+    # so the documented quickstart for the headline 0.13.0 feature raised
+    # `SpecError: PyYAML is required for YAML specs` on a clean install, and
+    # the unit test that was supposed to check the CLI's exit codes could not
+    # get past it either (it read exit 2 where it expected 3). Measured
+    # 2026-09-21 in a fresh venv. [bd-dre-rp11j.28]
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -96,13 +108,28 @@ Repository = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK"
 Issues = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK/issues"
 Changelog = "https://github.com/Ligandal-Inc/LigandAI-Official-SDK/blob/main/CHANGELOG.md"
 
-# Build hygiene, applied to EVERY target. `force-include` copies a directory
-# from the build machine's disk VERBATIM — hatchling's default source exclusions
-# do not apply to it — so a builder who has ever run or imported anything under
-# `skills/` would ship their own `__pycache__` into the wheel. Published 0.12.2
-# happens to be clean (verified 2026-09-20 by reading the wheel's zip namelist),
-# but nothing was stopping it; this makes that guarantee structural rather than
-# lucky. [bd-dre-rp11j.1]
+# Build hygiene, applied to EVERY target. Belt-and-braces, and the note that
+# came with it was WRONG, so it is corrected here rather than left to be
+# re-trusted. [bd-dre-rp11j.1, corrected bd-dre-rp11j.28]
+#
+# MEASURED 2026-09-21 on hatchling 1.32.4, by planting
+# `skills/openai-tool-calling/__pycache__/agent_example.cpython-311.pyc` and a
+# `skills/.pytest_cache/` tree and rebuilding: NEITHER appears in the wheel's
+# zip namelist, with these `exclude` patterns present OR absent, and with
+# `__pycache__/` removed from `.gitignore` OR left in it. Hatchling filters
+# cache directories out of `force-include` by itself, so these patterns are not
+# what keeps bytecode out — published 0.12.2 was clean for that reason, not by
+# luck.
+#
+# ⛔ WHAT IS ACTUALLY UNGUARDED HERE, measured in the same experiment:
+# `force-include` ships any NON-cache file sitting in the tree. Dropping
+# `skills/openai-tool-calling/SCRATCH_NOTES.txt` on the build machine put
+# `ligandai/agent_assets/skills/openai-tool-calling/SCRATCH_NOTES.txt` in the
+# wheel, and an untracked file does not show up in a `git status` review of the
+# release commit. That hole is closed by a test, not by a pattern:
+# tests/unit/test_packaging_contract.py::
+# test_wheel_agent_assets_match_the_git_tracked_sources pins the shipped
+# payload to `git ls-files`.
 [tool.hatch.build]
 exclude = [
     "**/__pycache__",
