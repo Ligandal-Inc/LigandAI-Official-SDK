@@ -50,6 +50,12 @@ __all__ = [
     "V6_9_POCKET_FEATURE_DIM",
     "V6_9_22_POCKET_FEATURE_DIM",
     "V6_5_POCKET_FEATURE_DIM",
+    "MAX_AVOID_PARALOGS",
+    "normalize_avoid_paralogs",
+    "avoid_paralogs_to_wire",
+    "require_avoid_paralogs_model",
+    "ParalogReferenceEntry",
+    "CfgReferenceProvenance",
 ]
 
 
@@ -124,6 +130,94 @@ def model_takes_cfg_reference(model_id: str | None) -> bool | None:
     if mid in _MODEL_POCKET_DIM:
         return False
     return None
+
+
+#: Server-side cap on a NAMED ``avoid_paralogs=`` panel
+#: (``cfg_reference_genes``). Mirrors the paralog reference producer's own
+#: limit — enforced here too so an oversized panel fails on your machine
+#: instead of after the request reaches the server.
+MAX_AVOID_PARALOGS = 8
+
+
+def normalize_avoid_paralogs(genes: "Sequence[str] | None") -> tuple[str, ...] | None:
+    """Normalize ``avoid_paralogs=`` into the wire gene list, or None if unset.
+
+    * HGNC-style uppercase normalisation (``"brd3"`` -> ``"BRD3"``), so the same
+      gene named twice with different casing is recognised as one duplicate
+      rather than two distinct panel entries.
+    * Order-preserving de-dupe.
+    * Refuses a blank entry — a blank gene name is not "no restriction", it is
+      a request the server cannot resolve, and failing loudly here is cheaper
+      than a confusing 400 after the request goes out.
+    * Refuses more than :data:`MAX_AVOID_PARALOGS` genes, matching the
+      server-side cap on the paralog reference producer
+      (``paralog_reference_service.py``). The SDK does not silently truncate a
+      panel to the cap — the caller chose every gene in it, and dropping some
+      of them without saying so is exactly the "steered away from something
+      you did not choose" failure this module exists to prevent.
+
+    Returns ``None`` for ``None`` or an empty sequence — both mean "the caller
+    named nothing", which is the same as omitting the argument.
+    """
+    if genes is None:
+        return None
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for g in genes:
+        gene = str(g).strip().upper()
+        if not gene:
+            raise LigandAIValidationError(
+                "avoid_paralogs contains a blank entry. Every gene must be a "
+                "non-empty HGNC symbol (e.g. 'BRD3') — a blank cannot be "
+                "resolved to a paralog reference and is not a way to say "
+                "'no restriction' (omit the argument for that)."
+            )
+        if gene not in seen:
+            seen.add(gene)
+            cleaned.append(gene)
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_AVOID_PARALOGS:
+        raise LigandAIValidationError(
+            f"avoid_paralogs names {len(cleaned)} genes; the platform caps a "
+            f"named panel at {MAX_AVOID_PARALOGS}. Narrow it to the paralogs "
+            f"that matter most for this campaign — omitting the argument lets "
+            f"the platform derive its own panel instead, it is not truncated "
+            f"here for you."
+        )
+    return tuple(cleaned)
+
+
+def avoid_paralogs_to_wire(genes: "Sequence[str]") -> dict[str, Any]:
+    """The exact request keys a named ``avoid_paralogs=`` panel puts on the wire.
+
+    Both the snake and camel spelling, mirroring
+    :meth:`ContrastiveGuidance.to_wire` — the request model accepts either and
+    this SDK does not guess which one a given server build reads.
+    """
+    genes_list = list(genes)
+    return {"cfg_reference_genes": genes_list, "cfgReferenceGenes": genes_list}
+
+
+def require_avoid_paralogs_model(model_id: str | None) -> None:
+    """Fail fast when ``avoid_paralogs=`` is paired with a non-CFG model.
+
+    Mirrors :meth:`ContrastiveGuidance.validate_for_model`: says nothing (and
+    forwards) for a model id this SDK build has never heard of, because a
+    published build cannot know the capabilities of a model released after
+    it — the server's model registry is the authority and answers with
+    ``cfg_references_not_supported`` if the id turns out not to take one.
+    """
+    takes = model_takes_cfg_reference(model_id)
+    if takes is False:
+        raise LigandAIValidationError(
+            f"avoid_paralogs requires a CFG-capable generator model "
+            f"({sorted(_CFG_REFERENCE_MODELS)}); {model_id!r} does not consume "
+            f"a CFG reference pocket, so a named panel would be silently "
+            f"ignored rather than steering anything. The server rejects this "
+            f"combination as cfg_references_not_supported — pass "
+            f"model='v6.9.21' or model='v6.9.22', or drop avoid_paralogs."
+        )
 
 
 def _as_rows(value: Any, label: str) -> list[list[float]]:
@@ -551,10 +645,10 @@ class ContrastiveGuidance:
                 "back.\n"
                 "\n"
                 "To send it anyway, pass allow_unforwarded_contrastive=True to "
-                "client.peptides.generate(), client.campaigns.recursive() or "
-                "client.peptides.generate_and_fold() — or allow_unforwarded=True if "
-                "you are calling ContrastiveGuidance.require_forwardable() "
-                "directly.\n"
+                "client.peptides.generate() (auto_fold=True by default, so this "
+                "already folds) or client.campaigns.recursive() — or "
+                "allow_unforwarded=True if you are calling "
+                "ContrastiveGuidance.require_forwardable() directly.\n"
                 "\n"
                 "⛔ The two names are NOT interchangeable. `generate()` swallows "
                 "unknown kwargs into the request body, so allow_unforwarded=True "
@@ -658,3 +752,126 @@ class AvoidancePolicy:
         if self.avoid_shell_angstrom is not None:
             out["avoid_shell_angstrom"] = self.avoid_shell_angstrom
         return out
+
+
+@dataclass(frozen=True)
+class ParalogReferenceEntry:
+    """One real off-target pocket a CFG-conditioned run actually used.
+
+    Read off :attr:`CfgReferenceProvenance.paralogs` — never constructed
+    directly. Mirrors one element of the ``cfg_references_resolved`` SSE
+    payload (``fastapi_backend/routers/generate.py:6135``).
+    """
+
+    paralog_gene: str
+    source_pdb_id: str | None = None
+    source_chain: str | None = None
+    identity_to_target_domain: float | None = None
+    n_rows: int | None = None
+
+
+@dataclass(frozen=True)
+class CfgReferenceProvenance:
+    """Which real off-target pockets a run's ``paralog_mean`` guidance used.
+
+    Read off ``GenerationResult.cfg_reference_provenance`` once the server
+    relays it (bd-dre-lknrx: Express persists the ``cfg_references_resolved``
+    SSE event as ``cfg_reference_provenance`` on the job record). Every field
+    mirrors that event's shape: ``generator_model_id``, ``expected_dim``,
+    ``paralogs[]``, ``rule_version``.
+
+    ⛔ **ABSENCE IS NOT A NEGATIVE RESULT.** ``GenerationResult.cfg_reference_provenance``
+    is ``None`` exactly when THIS server build did not report provenance at
+    all — that is "not reported", never "no conditioning happened". A run can
+    be genuinely CFG-conditioned (a v6.9-line model always is, whether the
+    panel was named or platform-derived) on a server that predates the relay,
+    and the two facts must never render the same way. Once this object
+    exists, :attr:`caller_requested` distinguishes a caller-NAMED panel
+    (``avoid_paralogs=`` / ``contrastive=``) from one the platform derived on
+    its own — both are real conditioning, and neither implies the other was
+    more selective (see the measured null-band result at bd-dre-atcmd: on
+    BRD4-ET, named and platform-derived panels performed indistinguishably).
+    """
+
+    generator_model_id: str | None = None
+    expected_dim: int | None = None
+    paralogs: tuple[ParalogReferenceEntry, ...] = ()
+    rule_version: str | None = None
+    #: True  -> this request named the panel (``avoid_paralogs=``/``contrastive=``).
+    #: False -> the platform derived the panel itself.
+    #: None  -> this server build did not say which, and it was not derivable
+    #:          from the echoed request parameters either.
+    caller_requested: bool | None = None
+
+    @classmethod
+    def from_wire(
+        cls,
+        node: Any,
+        *,
+        caller_requested_hint: bool | None = None,
+    ) -> "CfgReferenceProvenance | None":
+        """Parse a persisted/relayed provenance payload, or None if absent.
+
+        ``node`` is whatever the response carries at ``cfg_reference_provenance``
+        / ``cfgReferenceProvenance`` — every field is probed under both
+        spellings, because the persisted job record and the live SSE event are
+        not guaranteed to agree on casing.
+
+        Returns ``None`` — not an empty object — when ``node`` itself is
+        absent, so "not reported" and "reported, structurally empty" stay
+        distinguishable to the caller. ``caller_requested_hint`` is used only
+        when the payload itself carries no explicit flag; pass whatever the
+        request body is independently known to have named (e.g. whether
+        ``cfg_reference_genes`` was echoed back in the job's parameters).
+        """
+        if not isinstance(node, dict) or not node:
+            return None
+
+        def pick(*keys: str) -> Any:
+            for k in keys:
+                v = node.get(k)
+                if v is not None:
+                    return v
+            return None
+
+        raw_paralogs = pick("paralogs") or []
+        paralogs: list[ParalogReferenceEntry] = []
+        if isinstance(raw_paralogs, list):
+            for p in raw_paralogs:
+                if not isinstance(p, dict):
+                    continue
+                gene = p.get("paralog_gene") or p.get("paralogGene")
+                if not gene:
+                    continue
+                n_rows_raw = (
+                    p["n_rows"] if p.get("n_rows") is not None else p.get("nRows")
+                )
+                identity_raw = (
+                    p["identity_to_target_domain"]
+                    if p.get("identity_to_target_domain") is not None
+                    else p.get("identityToTargetDomain")
+                )
+                paralogs.append(
+                    ParalogReferenceEntry(
+                        paralog_gene=str(gene),
+                        source_pdb_id=p.get("source_pdb_id") or p.get("sourcePdbId"),
+                        source_chain=p.get("source_chain") or p.get("sourceChain"),
+                        identity_to_target_domain=(
+                            float(identity_raw) if identity_raw is not None else None
+                        ),
+                        n_rows=int(n_rows_raw) if n_rows_raw is not None else None,
+                    )
+                )
+        caller_requested = pick("caller_requested", "callerRequested")
+        if caller_requested is None:
+            caller_requested = caller_requested_hint
+        expected_dim = pick("expected_dim", "expectedDim")
+        return cls(
+            generator_model_id=pick("generator_model_id", "generatorModelId"),
+            expected_dim=int(expected_dim) if expected_dim is not None else None,
+            paralogs=tuple(paralogs),
+            rule_version=pick("rule_version", "ruleVersion"),
+            caller_requested=(
+                bool(caller_requested) if caller_requested is not None else None
+            ),
+        )
