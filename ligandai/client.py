@@ -66,6 +66,7 @@ from ligandai.resources.account import Account, AsyncAccount
 from ligandai.resources.analysis import Analysis, AsyncAnalysis
 from ligandai.resources.bivalent import AsyncBivalent, Bivalent
 from ligandai.resources.campaigns import AsyncCampaigns, Campaigns
+from ligandai.resources.maturation import AsyncMaturation, Maturation
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
@@ -663,6 +664,15 @@ class LigandAI(_ClientCommon):
         # Recursive contrastive design loop: fold a target + off-target panel,
         # rank on delta ipSAE, replicate, feed survivors forward. [bd-dre-if562]
         self.campaigns: Campaigns = Campaigns(self._transport, client=self)
+        # ⛔ A DIFFERENT CAPABILITY THAT SHARES THE WORD "CAMPAIGN".
+        # `client.campaigns` above is a LOCAL panel-folding helper that never
+        # calls /api/campaign/*. `client.maturation` is the client for the
+        # PLATFORM's server-side maturation loop — POST /api/campaign/mature and
+        # the readouts on the campaign it returns. Reaching for
+        # `client.campaigns.mature` raises a message naming this attribute,
+        # because "the SDK cannot do maturation" and "I called it wrong" must not
+        # render identically. [bd-dre-rp11j.9.1]
+        self.maturation: Maturation = Maturation(self._transport, client=self)
         self.charts: Charts = Charts(self._transport)
         self.diseases: Diseases = Diseases(self._transport)
         self.discovery: Discovery = Discovery(self._transport, client=self)
@@ -1122,6 +1132,9 @@ class AsyncLigandAI(_ClientCommon):
             self._transport, client=self,
         )
         self.campaigns: AsyncCampaigns = AsyncCampaigns(self._transport, client=self)
+        # See the sync client: a DIFFERENT capability that shares the word
+        # "campaign". [bd-dre-rp11j.9.1]
+        self.maturation: AsyncMaturation = AsyncMaturation(self._transport, client=self)
         self.charts: AsyncCharts = AsyncCharts(self._transport)
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
