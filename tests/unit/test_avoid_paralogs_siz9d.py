@@ -491,3 +491,96 @@ def test_cfg_reference_provenance_from_wire_is_none_for_empty_or_non_dict():
     assert CfgReferenceProvenance.from_wire(None) is None
     assert CfgReferenceProvenance.from_wire({}) is None
     assert CfgReferenceProvenance.from_wire("not a dict") is None  # type: ignore[arg-type]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE DISCRIMINATOR — caller-named vs platform-derived vs not reported
+#
+# MEASURED 2026-09-23 against the shape the server actually emits: every one of
+# these returned caller_requested=None, so a panel the customer NAMED and a panel
+# the platform CHOSE were indistinguishable through the accessor built to tell
+# them apart. from_wire() probed `caller_requested` / `callerRequested`, which the
+# server has never emitted; the discriminator it does emit is
+# `requested_reference_genes` (bd-dre-siz9d.1 — the caller's genes, or an explicit
+# null when the platform derived its own).
+#
+# Why it matters more than a missing field: Express forwards the named panel, and
+# a gene that fails the paralog criterion is rejected rather than served. So a
+# customer can name BRD2/BRD3, have both rejected, get a platform-derived panel,
+# and — with this collapsed — read a provenance record that looks like
+# confirmation their choice was honoured.
+# ═══════════════════════════════════════════════════════════════════════════
+
+from ligandai.contrastive import CfgReferenceProvenance  # noqa: E402
+
+_WIRE = {
+    "generator_model_id": "v6.9.21",
+    "expected_dim": 107,
+    "paralogs": [
+        {
+            "paralog_gene": "BRD2",
+            "source_pdb_id": "2DVQ",
+            "source_chain": "A",
+            "identity_to_target_domain": 0.71,
+            "n_rows": 13,
+        }
+    ],
+    "rule_version": "paralog_reference/2026.08.24.1",
+}
+
+
+def test_a_caller_named_panel_reads_as_caller_named():
+    p = CfgReferenceProvenance.from_wire(
+        {**_WIRE, "requested_reference_genes": ["BRD2", "BRD3"]}
+    )
+    assert p.caller_requested is True
+    assert p.requested_reference_genes == ("BRD2", "BRD3")
+
+
+def test_a_platform_derived_panel_reads_as_platform_derived():
+    """An explicit null is the server STATING the platform chose."""
+    p = CfgReferenceProvenance.from_wire({**_WIRE, "requested_reference_genes": None})
+    assert p.caller_requested is False
+    assert p.requested_reference_genes is None
+
+
+def test_a_server_predating_the_field_says_nothing_rather_than_guessing():
+    """⛔ Absent key and explicit null are different facts.
+
+    Omitting the key means this build cannot say; `.get()` would collapse that
+    into the platform-derived answer and invent a statement the server never made.
+    """
+    p = CfgReferenceProvenance.from_wire(dict(_WIRE))
+    assert p.caller_requested is None
+    assert p.requested_reference_genes is None
+
+
+def test_the_servers_statement_beats_the_callers_hint():
+    """The caller asked; the server says the platform chose. The server wins.
+
+    This is the case the collapse made invisible: every named gene can be rejected
+    on the paralog criterion, leaving a platform-derived panel. Echoing the
+    caller's own request back would read as confirmation that it was honoured.
+    """
+    p = CfgReferenceProvenance.from_wire(
+        {**_WIRE, "requested_reference_genes": None}, caller_requested_hint=True
+    )
+    assert p.caller_requested is False
+
+
+def test_the_hint_is_used_only_where_the_server_is_silent():
+    p = CfgReferenceProvenance.from_wire(dict(_WIRE), caller_requested_hint=True)
+    assert p.caller_requested is True
+
+
+def test_the_camel_spelling_is_read_too():
+    p = CfgReferenceProvenance.from_wire(
+        {**_WIRE, "requestedReferenceGenes": ["BRD2"]}
+    )
+    assert p.caller_requested is True
+    assert p.requested_reference_genes == ("BRD2",)
+
+
+def test_an_absent_block_stays_none_not_an_empty_object():
+    assert CfgReferenceProvenance.from_wire(None) is None
+    assert CfgReferenceProvenance.from_wire({}) is None

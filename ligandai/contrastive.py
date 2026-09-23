@@ -797,6 +797,10 @@ class CfgReferenceProvenance:
     expected_dim: int | None = None
     paralogs: tuple[ParalogReferenceEntry, ...] = ()
     rule_version: str | None = None
+    #: The genes the REQUEST named, when it named any. ``None`` means either the
+    #: platform chose the panel or this server build did not report the field —
+    #: :attr:`caller_requested` is what tells those two apart.
+    requested_reference_genes: tuple[str, ...] | None = None
     #: True  -> this request named the panel (``avoid_paralogs=``/``contrastive=``).
     #: False -> the platform derived the panel itself.
     #: None  -> this server build did not say which, and it was not derivable
@@ -862,15 +866,50 @@ class CfgReferenceProvenance:
                         n_rows=int(n_rows_raw) if n_rows_raw is not None else None,
                     )
                 )
+        # ⛔ THE DISCRIMINATOR IS `requested_reference_genes`, NOT `caller_requested`.
+        # The server has never emitted a `caller_requested` flag. What the
+        # `cfg_references_resolved` event actually carries is
+        # `requested_reference_genes` (bd-dre-siz9d.1): the caller's gene list when
+        # the panel was named, and an explicit null when the platform derived its
+        # own. Reading only `caller_requested` left this attribute None on BOTH
+        # branches, so a caller-named panel and a platform-derived one were
+        # indistinguishable — which is exactly the collapse the three-state rule
+        # exists to prevent, arriving through the accessor built to prevent it.
+        #
+        # ⛔ ABSENT KEY vs EXPLICIT NULL. A server build predating the field omits
+        # the key entirely and the honest answer is None ("this build did not say").
+        # A build that HAS the field and sets it to null is stating a fact: the
+        # platform chose the panel. `in` is load-bearing here; `.get()` collapses
+        # the two back together.
+        requested_genes: tuple[str, ...] | None = None
+        has_requested_key = False
+        for key in ("requested_reference_genes", "requestedReferenceGenes"):
+            if key in node:
+                has_requested_key = True
+                raw = node[key]
+                if isinstance(raw, (list, tuple)):
+                    named = tuple(str(g) for g in raw if g)
+                    if named:
+                        requested_genes = named
+                break
+
         caller_requested = pick("caller_requested", "callerRequested")
         if caller_requested is None:
-            caller_requested = caller_requested_hint
+            if requested_genes is not None:
+                caller_requested = True
+            elif has_requested_key:
+                # Present and null/empty — the platform picked the panel.
+                caller_requested = False
+            else:
+                caller_requested = caller_requested_hint
+
         expected_dim = pick("expected_dim", "expectedDim")
         return cls(
             generator_model_id=pick("generator_model_id", "generatorModelId"),
             expected_dim=int(expected_dim) if expected_dim is not None else None,
             paralogs=tuple(paralogs),
             rule_version=pick("rule_version", "ruleVersion"),
+            requested_reference_genes=requested_genes,
             caller_requested=(
                 bool(caller_requested) if caller_requested is not None else None
             ),
