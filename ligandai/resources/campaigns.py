@@ -83,8 +83,8 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Literal, TypeGuard
 
 from ligandai.contrastive import (
@@ -133,6 +133,8 @@ __all__ = [
     "ReplicationReport",
     "RecursiveCampaign",
     "CampaignRound",
+    "Lineage",
+    "ParentComparison",
     "ThermoScoreReport",
     # Re-exported so a caller reading a Kd off a panel reaches the rules that
     # govern it without a second import.
@@ -156,6 +158,392 @@ DeltaVerdict = Literal[
     "INDISTINGUISHABLE",
     "OFFTARGET_PREFERRED",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lineage — where a design came from, and whether the comparison is FAIR
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Where one design in a round came from.
+#:
+#: ⛔ FOUR DISTINCT PROVENANCES, NEVER COLLAPSED INTO ONE "parent" STRING. The
+#: served generator takes NO parent or seed sequence — neither the generation
+#: request body nor its response carries one — so the platform cannot tell you
+#: that design X descends from lead Y. Every link below is therefore either
+#: something the CALLER stated or something this loop did itself, and each says
+#: which:
+#:
+#: ``de_novo``
+#:     Drawn with no parent. This is what a round produces when
+#:     :meth:`RecursiveCampaign.run_round` is called without ``derived_from=``
+#:     or ``steered_by=`` — round 2 included. A later round of a recursive
+#:     campaign is an INDEPENDENT draw unless you say otherwise; it is not a
+#:     refinement of round 1 just because it ran second.
+#: ``derived``
+#:     The caller stated this design's parent (``derived_from={child: parent}``)
+#:     — a point mutation, a hand-edited variant, an external optimizer's
+#:     output. The ONLY per-child parent link that exists anywhere.
+#: ``reseeded_pool``
+#:     The caller generated this round's pool while steering on what an earlier
+#:     round measured (``steered_by=[leads]``) — e.g. a hotspot list read off a
+#:     lead's own fold. The parentage is COHORT-level: which individual lead a
+#:     given child came from is unknown, so :attr:`Lineage.parent` stays None
+#:     rather than naming one of them.
+#: ``parent_control``
+#:     An earlier round's design, re-folded in THIS round's panel so its
+#:     children have a same-panel control. Not a new design, and never counted
+#:     as a survivor.
+LineageOrigin = Literal["de_novo", "derived", "reseeded_pool", "parent_control"]
+
+#: Verdict of a child measured against its parent IN THE SAME PANEL.
+#:
+#: ``MIXED`` is a real outcome and not a fudge: the interface Δ and the Kd are
+#: two objectives, and a variant that improves one while losing the other has
+#: not answered "is it better" with a yes.
+ParentVerdict = Literal[
+    "BETTER", "WORSE", "MIXED", "INDISTINGUISHABLE", "NOT_COMPARABLE"
+]
+
+
+@dataclass(frozen=True)
+class Lineage:
+    """Where one design came from. One record per design per round."""
+
+    sequence: str
+    round_index: int
+    """The round this record describes — the round the design was folded in."""
+    origin: LineageOrigin
+    parent: str | None = None
+    """The single named parent, or None.
+
+    ⛔ None is the NORMAL case and means "no per-design parent exists", never
+    "the parent is unknown but there is one". A ``reseeded_pool`` design has a
+    cohort in :attr:`parent_cohort` and no individual parent; a ``de_novo``
+    design has neither.
+    """
+    parent_round: int | None = None
+    """The round :attr:`parent` came from — or, for a ``parent_control``, the
+    round that design itself first appeared in.
+
+    None when the parent was never folded by this campaign (an external lead),
+    which is reported rather than guessed.
+    """
+    parent_cohort: tuple[str, ...] = ()
+    """Cohort-level parentage for a ``reseeded_pool`` design."""
+    note: str | None = None
+
+    @property
+    def is_parent_control(self) -> bool:
+        return self.origin == "parent_control"
+
+    @property
+    def has_parent(self) -> bool:
+        """True only when a SINGLE named parent exists — never for a cohort."""
+        return self.parent is not None and self.origin == "derived"
+
+    def __repr__(self) -> str:  # pragma: no cover - repr only
+        who = (
+            f"← {self.parent[:12]}… (round {self.parent_round})"
+            if self.parent else
+            (f"← cohort of {len(self.parent_cohort)}" if self.parent_cohort else "no parent")
+        )
+        return f"<Lineage {self.sequence[:12]}… r{self.round_index} {self.origin} {who}>"
+
+
+@dataclass(frozen=True)
+class ParentComparison:
+    """Is this variant better than the design it came from?
+
+    ⛔ THE COMPARISON IS FAIR OR IT IS NOT OFFERED. The parent's Δ and Kd must
+    come from the SAME panel as the child's — same submission, same draw count,
+    same fold conditions. A parent's number from an earlier round is NOT a
+    control: fold conditions differ between rounds and the pose-to-pose spread
+    inside one cell is larger than the difference a refinement round is trying
+    to detect. When the parent was not refolded alongside its children, every
+    numeric field here is None, :attr:`verdict` is ``NOT_COMPARABLE`` and
+    :attr:`not_comparable_reason` says so — the cross-round difference is never
+    computed, let alone reported.
+
+    ⛔ AND A DIFFERENCE INSIDE THE BAND IS NOT AN IMPROVEMENT. Both sides carry
+    their own resolvability flag against this panel's own measured band; read
+    :attr:`delta_improvement_resolvable` / :attr:`kd_improvement_resolvable`
+    before reading the numbers they qualify.
+
+    ⛔ The Kd here is DeltaForge's predicted value, gated at
+    :data:`~ligandai.thermo.VALID_IPSAE`. The deployed scorer has no
+    measured-affinity evaluation, so a within-target Kd ordering is a reported
+    number and never a validated affinity claim; the fold-change below is
+    quoted with its band and with both designs' lengths available on the rows.
+    """
+
+    sequence: str
+    child_round: int
+    baseline_kind: Literal["parent", "cohort_best"]
+    """``parent`` — this design's own stated parent. ``cohort_best`` — the best
+    of a declared parent COHORT, because a pool-level steer has no per-child
+    parent to compare against. The two are not the same claim."""
+    parent: str | None
+    parent_round: int | None
+    parent_cohort: tuple[str, ...]
+    same_panel: bool
+    """⛔ False ⇒ every number below is None. There is no "approximate" mode."""
+    not_comparable_reason: str | None
+    verdict: ParentVerdict
+
+    # ─── the interface side ────────────────────────────────────────────────
+    band: float | None = None
+    band_source: str | None = None
+    """``measured`` (this panel's own cross-draw band) or ``declared`` (the
+    campaign's band argument, used only when replicates measured none)."""
+    child_delta: float | None = None
+    parent_delta: float | None = None
+    delta_improvement: float | None = None
+    """child delta minus baseline delta. Positive: the child is more selective."""
+    delta_improvement_resolvable: bool | None = None
+    """None ⇒ no band exists to judge it against, which is not "no change"."""
+    delta_baseline_from: str | None = None
+    delta_baseline_round: int | None = None
+    child_target_ipsae: float | None = None
+    parent_target_ipsae: float | None = None
+    """⛔ ``peptide_ipsae`` — the peptide↔receptor interface, bounded by 1.0.
+    Never whole-complex ``ipsae`` and never the pre-fold predicted column."""
+
+    # ─── the thermodynamic side ────────────────────────────────────────────
+    ipsae_gate: float = VALID_IPSAE
+    child_target_kd_nm: float | None = None
+    parent_target_kd_nm: float | None = None
+    kd_fold_change: float | None = None
+    """parent Kd / child Kd. >1 means the child is tighter."""
+    kd_band_log10: float | None = None
+    kd_improvement_resolvable: bool | None = None
+    kd_baseline_from: str | None = None
+    kd_baseline_round: int | None = None
+    kd_not_compared_reason: str | None = None
+
+    @property
+    def improved(self) -> bool:
+        """⛔ True ONLY for a resolvable improvement with nothing lost."""
+        return self.verdict == "BETTER"
+
+    def describe(self) -> str:
+        if not self.same_panel:
+            return f"{self.sequence[:12]}…: NOT COMPARABLE — {self.not_comparable_reason}"
+        who = self.parent[:12] + "…" if self.parent else f"best of {len(self.parent_cohort)} parent(s)"
+        bits = [f"{self.sequence[:12]}… vs {who} (same panel): {self.verdict}"]
+        if self.delta_improvement is not None:
+            bits.append(
+                f"Δ {self.delta_improvement:+.4f} "
+                f"({'resolvable' if self.delta_improvement_resolvable else 'inside the band'}"
+                f"{'' if self.band is None else f', band {self.band:.4f} {self.band_source}'})"
+            )
+        if self.kd_fold_change is not None:
+            bits.append(
+                f"Kd {self.kd_fold_change:.2f}x "
+                f"({'resolvable' if self.kd_improvement_resolvable else 'inside the band'})"
+            )
+        elif self.kd_not_compared_reason:
+            bits.append(f"Kd not compared — {self.kd_not_compared_reason}")
+        return "; ".join(bits)
+
+    def __repr__(self) -> str:  # pragma: no cover - repr only
+        return f"<ParentComparison {self.sequence[:12]}… {self.verdict}>"
+
+
+def _row_on_target_ipsae(row: Any) -> float | None:
+    """The on-target ``peptide_ipsae`` of either row arity.
+
+    ⛔ ``target_ipsae`` on a single-target row, ``aggregate_ipsae`` on a
+    co-optimization row — and never ``iptm``/``ipsae``, which describe the whole
+    complex rather than the binder.
+    """
+    v = getattr(row, "target_ipsae", None)
+    if v is None:
+        v = getattr(row, "aggregate_ipsae", None)
+    return None if v is None else float(v)
+
+
+def _row_on_target_kd_nm(row: Any) -> tuple[float | None, str | None]:
+    """On-target Kd in nM, or None plus the reason there is none."""
+    if getattr(row, "kd_targets_missing", ()):
+        return None, (
+            "the on-target Kd aggregate is over a SUBSET of the positive targets"
+        )
+    v = getattr(row, "target_kd_nm", None)
+    if v is None:
+        v = getattr(row, "aggregate_kd_nm", None)
+    if v is None:
+        return None, "no persisted DeltaForge Kd on the on-target leg"
+    v = float(v)
+    if v <= 0.0:
+        return None, "a non-positive on-target Kd is a scorer artifact, not an affinity"
+    return v, None
+
+
+def _compare_to_baseline(
+    *,
+    sequence: str,
+    child_round: int,
+    child_row: Any | None,
+    baselines: Sequence[tuple[str, int | None, Any]],
+    baseline_kind: Literal["parent", "cohort_best"],
+    parent: str | None,
+    parent_round: int | None,
+    cohort: tuple[str, ...],
+    band: float | None,
+    band_source: str | None,
+    kd_band_log10: float | None,
+    blocked_reason: str | None = None,
+) -> ParentComparison:
+    """Build the child-vs-parent comparison, or an explicit refusal to make one.
+
+    ``baselines`` are ``(sequence, round_index, row)`` triples read out of THIS
+    round's panel. An empty list is the fair-comparison refusal: the parent was
+    not measured beside its children, so nothing is computed.
+    """
+
+    def _refuse(reason: str) -> ParentComparison:
+        return ParentComparison(
+            sequence=sequence,
+            child_round=child_round,
+            baseline_kind=baseline_kind,
+            parent=parent,
+            parent_round=parent_round,
+            parent_cohort=cohort,
+            same_panel=False,
+            not_comparable_reason=reason,
+            verdict="NOT_COMPARABLE",
+        )
+
+    if blocked_reason:
+        return _refuse(blocked_reason)
+    if child_row is None:
+        return _refuse(
+            "this design has no complete-panel row in this round — an incomplete "
+            "comparator panel or an unmeasured leg, which is indeterminate "
+            "rather than worse than its parent"
+        )
+    if not baselines:
+        who = (
+            f"parent {parent[:12]}…" if parent
+            else f"the {len(cohort)} declared parent(s)"
+        )
+        return _refuse(
+            f"{who} was NOT measured in this round's panel, so there is no fair "
+            f"control. A Δ or Kd carried over from an earlier round is not one: "
+            f"fold conditions differ between rounds and the pose-to-pose spread "
+            f"inside a single cell is larger than the difference a refinement "
+            f"round is trying to detect. Re-run with refold_parents=True (the "
+            f"default) so the parent is folded in the SAME panel as its children."
+        )
+
+    child_ipsae = _row_on_target_ipsae(child_row)
+    base_ipsae = [(_row_on_target_ipsae(r), s) for s, _i, r in baselines]
+    if child_ipsae is None or any(v is None for v, _s in base_ipsae):
+        return _refuse("a row carries no on-target peptide_ipsae to compare")
+    if child_ipsae > 1.0 or any(v > 1.0 for v, _s in base_ipsae if v is not None):
+        # ⛔ peptide_ipsae is bounded by 1.0. Anything above it is the PRE-FOLD
+        # predicted column, which was never measured and is not this metric.
+        return _refuse(
+            "an on-target peptide_ipsae above 1.0 is not peptide_ipsae — that is "
+            "the pre-fold predicted column, which was never measured"
+        )
+
+    # ─── interface Δ ───────────────────────────────────────────────────────
+    d_cands = [
+        (s, i, float(r.delta))
+        for s, i, r in baselines
+        if getattr(r, "delta", None) is not None
+    ]
+    child_delta = (
+        None if getattr(child_row, "delta", None) is None else float(child_row.delta)
+    )
+    d_best = max(d_cands, key=lambda t: t[2]) if d_cands else None
+    delta_improvement: float | None = None
+    delta_resolvable: bool | None = None
+    if child_delta is not None and d_best is not None:
+        delta_improvement = child_delta - d_best[2]
+        delta_resolvable = (
+            None if band is None else bool(abs(delta_improvement) > band)
+        )
+
+    # ─── Kd, gated ─────────────────────────────────────────────────────────
+    gate = getattr(child_row, "kd_ipsae_gate", None)
+    gate = VALID_IPSAE if gate is None else float(gate)
+    child_kd, child_kd_why = _row_on_target_kd_nm(child_row)
+    kd_why: str | None = None
+    k_cands: list[tuple[str, int | None, float]] = []
+    for s, i, r in baselines:
+        v, _w = _row_on_target_kd_nm(r)
+        bi = _row_on_target_ipsae(r)
+        if v is not None and bi is not None and bi >= gate:
+            k_cands.append((s, i, v))
+    k_best = min(k_cands, key=lambda t: t[2]) if k_cands else None
+    kd_fold_change: float | None = None
+    kd_resolvable: bool | None = None
+    if child_kd is None:
+        kd_why = child_kd_why or "no on-target Kd on the child"
+    elif child_ipsae < gate:
+        kd_why = (
+            f"the child's on-target peptide_ipsae {child_ipsae:.3f} is below the "
+            f"{gate:.2f} gate — DeltaForge scores an interface and there is none"
+        )
+    elif k_best is None:
+        kd_why = (
+            f"no baseline in this panel carries a gated on-target Kd "
+            f"(peptide_ipsae ≥ {gate:.2f} with a persisted DeltaForge score)"
+        )
+    else:
+        kd_fold_change = k_best[2] / child_kd
+        if kd_band_log10 is not None and kd_fold_change > 0.0:
+            kd_resolvable = bool(abs(math.log10(kd_fold_change)) > kd_band_log10)
+
+    # ─── verdict ───────────────────────────────────────────────────────────
+    d_up = delta_resolvable is True and (delta_improvement or 0.0) > 0
+    d_dn = delta_resolvable is True and (delta_improvement or 0.0) < 0
+    k_up = kd_resolvable is True and (kd_fold_change or 0.0) > 1.0
+    k_dn = kd_resolvable is True and (kd_fold_change or 0.0) < 1.0
+    if (d_up or k_up) and (d_dn or k_dn):
+        verdict: ParentVerdict = "MIXED"
+    elif d_up or k_up:
+        verdict = "BETTER"
+    elif d_dn or k_dn:
+        verdict = "WORSE"
+    else:
+        verdict = "INDISTINGUISHABLE"
+
+    return ParentComparison(
+        sequence=sequence,
+        child_round=child_round,
+        baseline_kind=baseline_kind,
+        parent=parent,
+        parent_round=parent_round,
+        parent_cohort=cohort,
+        same_panel=True,
+        not_comparable_reason=None,
+        verdict=verdict,
+        band=band,
+        band_source=band_source,
+        child_delta=child_delta,
+        parent_delta=None if d_best is None else d_best[2],
+        delta_improvement=delta_improvement,
+        delta_improvement_resolvable=delta_resolvable,
+        delta_baseline_from=None if d_best is None else d_best[0],
+        delta_baseline_round=None if d_best is None else d_best[1],
+        child_target_ipsae=child_ipsae,
+        parent_target_ipsae=(
+            None if d_best is None
+            else next((v for v, s in base_ipsae if s == d_best[0]), None)
+        ),
+        ipsae_gate=gate,
+        child_target_kd_nm=child_kd,
+        parent_target_kd_nm=None if k_best is None else k_best[2],
+        kd_fold_change=kd_fold_change,
+        kd_band_log10=kd_band_log10,
+        kd_improvement_resolvable=kd_resolvable,
+        kd_baseline_from=None if k_best is None else k_best[0],
+        kd_baseline_round=None if k_best is None else k_best[1],
+        kd_not_compared_reason=kd_why,
+    )
 
 
 def _aggregate(values: Sequence[float], statistic: LegStatistic) -> float:
@@ -694,6 +1082,25 @@ class SelectivityDelta(_KdReadouts):
     kd_ipsae_gate: float | None = None
     """The gate the platform applied below which it returns no Kd at all."""
 
+    # ─── lineage [bd-dre-umd3l] ────────────────────────────────────────────
+    parent: str | None = None
+    """The design this one was STATED to descend from, or None.
+
+    ⛔ None means no per-design parent exists — the generator takes no parent
+    sequence, so a design is parentless unless the caller said otherwise via
+    ``run_round(derived_from=...)``. It never means "unknown but present".
+    """
+    parent_round: int | None = None
+    """The round :attr:`parent` came from. Named beside the parent because
+    "better than its parent" is only readable against a specific measurement."""
+    lineage_origin: LineageOrigin | None = None
+    parent_in_panel: bool = False
+    """⛔ True only when the parent was folded in THIS row's own panel. False ⇒
+    :attr:`vs_parent` carries a refusal, not a comparison."""
+    vs_parent: ParentComparison | None = None
+    """The same-panel child-vs-parent result, or an explicit refusal to make
+    one. Read ``vs_parent.same_panel`` before any number on it."""
+
     @property
     def resolvable(self) -> bool:
         """False when |delta| sits inside the measured band.
@@ -821,6 +1228,25 @@ class MultiTargetDelta(_KdReadouts):
     kd_scorer: str | None = None
     kd_scorer_version: str | None = None
     kd_ipsae_gate: float | None = None
+
+    # ─── lineage [bd-dre-umd3l] ────────────────────────────────────────────
+    parent: str | None = None
+    """The design this one was STATED to descend from, or None.
+
+    ⛔ None means no per-design parent exists — the generator takes no parent
+    sequence, so a design is parentless unless the caller said otherwise via
+    ``run_round(derived_from=...)``. It never means "unknown but present".
+    """
+    parent_round: int | None = None
+    """The round :attr:`parent` came from. Named beside the parent because
+    "better than its parent" is only readable against a specific measurement."""
+    lineage_origin: LineageOrigin | None = None
+    parent_in_panel: bool = False
+    """⛔ True only when the parent was folded in THIS row's own panel. False ⇒
+    :attr:`vs_parent` carries a refusal, not a comparison."""
+    vs_parent: ParentComparison | None = None
+    """The same-panel child-vs-parent result, or an explicit refusal to make
+    one. Read ``vs_parent.same_panel`` before any number on it."""
 
     @property
     def all_targets_pass_kd(self) -> bool:
@@ -3401,6 +3827,27 @@ class AsyncCampaigns(AsyncResource):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _origin_counts(rnd: CampaignRound) -> dict[str, int]:
+    """How many designs in a round came from each provenance."""
+    out: dict[str, int] = {}
+    for lin in rnd.lineage.values():
+        out[lin.origin] = out.get(lin.origin, 0) + 1
+    return out
+
+
+def _comparison_counts(rnd: CampaignRound) -> dict[str, int]:
+    """Child-vs-parent verdict counts. ⛔ ``NOT_COMPARABLE`` is reported beside
+    the rest and never folded into ``INDISTINGUISHABLE`` — "we could not look"
+    and "we looked and saw no difference" are different facts."""
+    out = {
+        "BETTER": 0, "WORSE": 0, "MIXED": 0,
+        "INDISTINGUISHABLE": 0, "NOT_COMPARABLE": 0,
+    }
+    for c in rnd.vs_parent:
+        out[c.verdict] = out.get(c.verdict, 0) + 1
+    return out
+
+
 @dataclass
 class CampaignRound:
     """What one round produced, and what it hands to the next one."""
@@ -3426,6 +3873,79 @@ class CampaignRound:
     """
     kd_lost_at_replication: list[str] = field(default_factory=list)
     """Held on ipSAE and MOVED on Kd. The thing a single objective cannot see."""
+    # ─── lineage [bd-dre-umd3l] ────────────────────────────────────────────
+    lineage: dict[str, Lineage] = field(default_factory=dict)
+    """One :class:`Lineage` per design folded this round, keyed by sequence.
+
+    ⛔ Covers the parent CONTROLS too, so a row in this dict is not necessarily
+    a new design — read ``origin``.
+    """
+    parent_controls: list[str] = field(default_factory=list)
+    """Earlier-round designs refolded in THIS round's panel as same-panel
+    controls. Excluded from :attr:`survivors`: they are the baseline, and the
+    round that produced them already carries them."""
+    vs_parent: list[ParentComparison] = field(default_factory=list)
+    """One entry per design with declared lineage — a comparison against a
+    parent measured in this same panel, or an explicit refusal to make one."""
+
+    @property
+    def improved_over_parent(self) -> list[str]:
+        """Designs that beat their parent RESOLVABLY, with nothing lost."""
+        return [c.sequence for c in self.vs_parent if c.verdict == "BETTER"]
+
+    @property
+    def not_comparable_to_parent(self) -> list[ParentComparison]:
+        """⛔ The half a "n improved" headline hides. Each names its reason."""
+        return [c for c in self.vs_parent if c.verdict == "NOT_COMPARABLE"]
+
+    def parent_of(self, sequence: str) -> Lineage | None:
+        """This round's lineage record for one design."""
+        return self.lineage.get(_norm_seq(sequence))
+
+    def comparison_for(self, sequence: str) -> ParentComparison | None:
+        s = _norm_seq(sequence)
+        return next((c for c in self.vs_parent if c.sequence == s), None)
+
+    def lineage_rows(self) -> list[dict[str, Any]]:
+        """Flat per-design lineage rows for a DataFrame or a CSV."""
+        cmp_by_seq = {c.sequence: c for c in self.vs_parent}
+        out: list[dict[str, Any]] = []
+        for seq, lin in sorted(self.lineage.items()):
+            c = cmp_by_seq.get(seq)
+            out.append({
+                "sequence": seq,
+                "round": lin.round_index,
+                "origin": lin.origin,
+                "parent": lin.parent,
+                "parent_round": lin.parent_round,
+                "parent_cohort": list(lin.parent_cohort),
+                "is_parent_control": lin.is_parent_control,
+                "lineage_note": lin.note,
+                # ⛔ Every comparison column is None unless the parent was
+                # folded in this same panel.
+                "parent_in_panel": bool(c is not None and c.same_panel),
+                "vs_parent_verdict": None if c is None else c.verdict,
+                "not_comparable_reason": None if c is None else c.not_comparable_reason,
+                "baseline_kind": None if c is None else c.baseline_kind,
+                "band": None if c is None else c.band,
+                "band_source": None if c is None else c.band_source,
+                "child_delta": None if c is None else c.child_delta,
+                "parent_delta": None if c is None else c.parent_delta,
+                "delta_improvement": None if c is None else c.delta_improvement,
+                "delta_improvement_resolvable": (
+                    None if c is None else c.delta_improvement_resolvable
+                ),
+                "child_peptide_ipsae": None if c is None else c.child_target_ipsae,
+                "parent_peptide_ipsae": None if c is None else c.parent_target_ipsae,
+                "child_kd_nm": None if c is None else c.child_target_kd_nm,
+                "parent_kd_nm": None if c is None else c.parent_target_kd_nm,
+                "kd_fold_change": None if c is None else c.kd_fold_change,
+                "kd_improvement_resolvable": (
+                    None if c is None else c.kd_improvement_resolvable
+                ),
+                "kd_not_compared_reason": None if c is None else c.kd_not_compared_reason,
+            })
+        return out
 
     def __repr__(self) -> str:  # pragma: no cover - repr only
         return (
@@ -3586,12 +4106,74 @@ class RecursiveCampaign:
             )
         return list(dict.fromkeys(neg))
 
+    # ─── lineage across rounds [bd-dre-umd3l] ───────────────────────────────
+
+    def _round_of(self, sequence: str) -> int | None:
+        """The FIRST round of THIS campaign that folded a design.
+
+        None when the design never appeared in a round — an external lead the
+        caller brought in. Reported as None rather than guessed at, because
+        "which round did this come from" is half of what makes a parent link
+        readable.
+        """
+        s = _norm_seq(sequence)
+        for rnd in self.rounds:
+            if s in rnd.generated or s in rnd.parent_controls:
+                return rnd.index
+        return None
+
+    @property
+    def lineage(self) -> dict[str, Lineage]:
+        """Every design this campaign folded, mapped to where it came from.
+
+        Keyed by sequence, earliest record wins — a design refolded later as a
+        parent control keeps the record from the round that produced it.
+        """
+        out: dict[str, Lineage] = {}
+        for rnd in self.rounds:
+            for seq, lin in rnd.lineage.items():
+                if lin.origin == "parent_control" and seq in out:
+                    continue
+                out.setdefault(seq, lin)
+        return out
+
+    def ancestry(self, sequence: str) -> list[Lineage]:
+        """The chain from one design back to its earliest NAMED ancestor.
+
+        ⛔ Stops at the first design with no stated per-design parent, which is
+        where a chain honestly ends: a ``de_novo`` or ``reseeded_pool`` design
+        has no individual parent to walk to. An empty list means this campaign
+        never folded the sequence.
+        """
+        lin_by_seq = self.lineage
+        s = _norm_seq(sequence)
+        chain: list[Lineage] = []
+        seen: set[str] = set()
+        while s in lin_by_seq and s not in seen:
+            seen.add(s)
+            lin = lin_by_seq[s]
+            chain.append(lin)
+            if not lin.has_parent or lin.parent is None:
+                break
+            s = lin.parent
+        return chain
+
+    def comparisons(self) -> list[ParentComparison]:
+        """Every child-vs-parent comparison this campaign made, in round order."""
+        out: list[ParentComparison] = []
+        for rnd in self.rounds:
+            out.extend(rnd.vs_parent)
+        return out
+
     # ─── one round ──────────────────────────────────────────────────────────
 
     def run_round(
         self,
         *,
         sequences: Sequence[str] | None = None,
+        derived_from: Mapping[str, str] | None = None,
+        steered_by: Sequence[str] | None = None,
+        refold_parents: bool = True,
         replicates: int = 1,
         confirm_replicates: int = 1,
         confirm: bool = True,
@@ -3602,15 +4184,77 @@ class RecursiveCampaign:
         ``sequences`` skips generation and folds a set you already have — which
         is how the loop stays usable while contrastive generation is still
         server-blocked.
+
+        ⛔ LINEAGE IS DECLARED, NEVER INFERRED. The served generator takes no
+        parent or seed sequence, so a round this loop generates is a set of
+        DE NOVO draws — running second does not make it a refinement of round 1.
+        Two arguments state a real link, and they say different things:
+
+        ``derived_from={child: parent}``
+            Per-child parentage you produced yourself — a point mutation, a
+            hand-edited variant, an external optimizer's output. Every key must
+            appear in ``sequences``.
+        ``steered_by=[lead, ...]``
+            You generated this round's pool while steering on what earlier
+            rounds measured (a hotspot list read off a lead's own fold, say).
+            The parentage is COHORT-level: which individual lead a given child
+            came from is unknown, so no per-child parent is invented and each
+            child is compared against the BEST of the cohort instead.
+
+        ⛔ AND THE PARENTS ARE REFOLDED IN THIS ROUND'S PANEL. ``refold_parents``
+        (default True) appends every declared parent to this round's fold list
+        so each child is compared against a parent measured in the SAME panel,
+        at the same draw count, under the same fold conditions. A parent's Kd or
+        Δ from an earlier round is not a control — pose-to-pose spread inside a
+        single cell is larger than the difference a refinement round is trying
+        to detect. With ``refold_parents=False`` nothing is compared at all and
+        every :class:`ParentComparison` says why, rather than quoting a
+        cross-round difference as a result.
+
+        Parent controls are folded, measured and reported, but never counted as
+        this round's survivors: the round that produced them already carries
+        them, and counting a re-measurement as a new hit double-counts it.
         """
         index = len(self.rounds) + 1
         notes: list[str] = []
         panel_kwargs = dict(panel_kwargs or {})
 
+        # ─── lineage, resolved BEFORE anything is folded ────────────────────
+        derived: dict[str, str] = {
+            _norm_seq(k): _norm_seq(v) for k, v in dict(derived_from or {}).items()
+        }
+        steered: list[str] = list(
+            dict.fromkeys(_norm_seq(s) for s in (steered_by or []))
+        )
+        if (derived or steered) and sequences is None:
+            raise LigandAIValidationError(
+                "derived_from=/steered_by= describe where THIS round's designs "
+                "came from, so they need the designs: pass sequences=. The "
+                "platform's generator takes no parent or seed sequence, so a "
+                "round this loop generates cannot be given a parent after the "
+                "fact — generate the variants yourself and hand them in."
+            )
+        for _child, _parent in derived.items():
+            if _child == _parent:
+                raise LigandAIValidationError(
+                    f"derived_from maps {_child[:12]}… to itself. A design is "
+                    f"not its own parent; pass it in sequences= alone, or name "
+                    f"the lead it actually came from."
+                )
+
         if sequences is None:
             generated = self._generate(notes)
         else:
             generated = [_norm_seq(s) for s in sequences]
+
+        _unknown = [c for c in derived if c not in set(generated)]
+        if _unknown:
+            raise LigandAIValidationError(
+                f"derived_from names {len(_unknown)} child design(s) that are "
+                f"not in sequences=: {[u[:12] for u in _unknown[:5]]}. A parent "
+                f"link pointing at a design this round never folds is a link to "
+                f"nothing, and it would be reported as lineage."
+            )
 
         kept, rejected = self.avoidance.filter_sequences(generated)
         if rejected:
@@ -3629,12 +4273,69 @@ class RecursiveCampaign:
                 index=index, generated=generated, filtered_as_hard_negative=rejected,
                 panel=None, complete=[], partial=[], summary={}, survivors=[],
                 notes=notes + ["no designs left to fold after hard-negative filtering"],
+                lineage={
+                    s: Lineage(sequence=s, round_index=index, origin="de_novo",
+                               note="never folded — removed by hard-negative filtering")
+                    for s in generated
+                },
             )
             self.rounds.append(rnd)
             return rnd
 
+        # ─── the parents, and the panel that makes them a fair control ──────
+        parents_all = list(dict.fromkeys(list(derived.values()) + steered))
+        parent_round_of: dict[str, int | None] = {
+            p: self._round_of(p) for p in parents_all
+        }
+        parent_block_reason: dict[str, str] = {}
+        for p in parents_all:
+            if p in blocked or p in set(self.avoidance.hard_negatives):
+                parent_block_reason[p] = (
+                    "this parent was measured to prefer an off-target and is a "
+                    "hard negative; it is not refolded as a control, and nothing "
+                    "is compared against it — refining a design with no "
+                    "on-target preference is refining noise"
+                )
+        live_parents = [p for p in parents_all if p not in parent_block_reason]
+        if parent_block_reason:
+            notes.append(
+                f"⛔ {len(parent_block_reason)} declared parent(s) are hard "
+                f"negatives and were not refolded as controls; their children "
+                f"are reported NOT_COMPARABLE rather than compared to nothing"
+            )
+        controls = (
+            [p for p in live_parents if p not in set(kept)] if refold_parents else []
+        )
+        if controls:
+            notes.append(
+                f"{len(controls)} parent(s) refolded IN THIS PANEL as same-round "
+                f"controls, at the same draw count as their children — a Δ or Kd "
+                f"carried over from an earlier round is not a control, because "
+                f"the pose set differs between rounds"
+            )
+        elif live_parents and not refold_parents:
+            notes.append(
+                "⛔ refold_parents=False — the declared parents were NOT measured "
+                "in this panel, so NO child/parent comparison is offered. The "
+                "cross-round difference is not computed and is not a result."
+            )
+        to_fold = list(dict.fromkeys(list(kept) + controls))
+        if controls and "force_fresh" not in panel_kwargs:
+            # ⛔ A CONTROL SERVED FROM CACHE IS NOT A CONTROL. The 24h dedupe can
+            # hand back the parent's EARLIER fold, which is exactly the
+            # cross-round comparison this argument exists to prevent — and it
+            # would arrive looking like a same-panel one. Force a fresh
+            # submission so the parent is measured beside its children or not at
+            # all. Pass panel_kwargs={"force_fresh": False} to override.
+            panel_kwargs["force_fresh"] = True
+            notes.append(
+                "force_fresh=True for this round: a parent served from the 24h "
+                "dedupe would carry an earlier round's pose set while reading as "
+                "a same-panel control"
+            )
+
         panel = self._campaigns.fold_panel(
-            kept,
+            to_fold,
             targets=self.co_optimization,
             off_targets=self.off_target_specs,
             replicates=replicates,
@@ -3661,6 +4362,112 @@ class RecursiveCampaign:
             band=self.band, target_leg_min=self.target_leg_min,
             kd_ceiling_nm=self.max_target_kd_nm,
         )
+
+        # ─── lineage: what each design in this panel came from ──────────────
+        lineage: dict[str, Lineage] = {}
+        for s in generated:
+            if s in derived:
+                _p = derived[s]
+                _pr = parent_round_of.get(_p)
+                lineage[s] = Lineage(
+                    sequence=s, round_index=index, origin="derived",
+                    parent=_p, parent_round=_pr,
+                    parent_cohort=(_p,),
+                    note=(
+                        None if _pr is not None else
+                        "this parent was not folded by this campaign, so no "
+                        "round index names it; it is still compared, because it "
+                        "is refolded in this round's own panel"
+                    ),
+                )
+            elif steered:
+                lineage[s] = Lineage(
+                    sequence=s, round_index=index, origin="reseeded_pool",
+                    parent=None, parent_cohort=tuple(steered),
+                    note=(
+                        "pool-level steer: the generator takes no per-design "
+                        "parent, so which lead this design came from is unknown "
+                        "and is not guessed. It is compared against the BEST of "
+                        "the declared cohort, measured in this same panel."
+                    ),
+                )
+            else:
+                lineage[s] = Lineage(
+                    sequence=s, round_index=index, origin="de_novo",
+                    note=(
+                        "generated de novo — the platform's generator takes no "
+                        "parent or seed sequence"
+                        if sequences is None else
+                        "caller-supplied with no stated parent"
+                    ),
+                )
+        for p in controls:
+            lineage[p] = Lineage(
+                sequence=p, round_index=index, origin="parent_control",
+                parent=None, parent_round=parent_round_of.get(p),
+                note=(
+                    f"an earlier design (round {parent_round_of.get(p)}), "
+                    f"refolded here so its children have a same-panel control; "
+                    f"not a new design and not a new survivor"
+                ),
+            )
+
+        rows_by_seq: dict[str, Any] = {r.sequence: r for r in complete}
+        _measured_band = panel.cross_draw_band()
+        _band = self.band if _measured_band is None else _measured_band
+        _band_src = "declared" if _measured_band is None else "measured"
+        _kd_band = panel.cross_draw_kd_band_log10()
+
+        vs_parent: list[ParentComparison] = []
+        for s in generated:
+            lin = lineage.get(s)
+            if lin is None or lin.origin not in ("derived", "reseeded_pool"):
+                continue
+            if lin.origin == "derived":
+                p = lin.parent or ""
+                _blocked = parent_block_reason.get(p)
+                _base = (
+                    []
+                    if (_blocked or p not in rows_by_seq)
+                    else [(p, parent_round_of.get(p), rows_by_seq[p])]
+                )
+                vs_parent.append(_compare_to_baseline(
+                    sequence=s, child_round=index, child_row=rows_by_seq.get(s),
+                    baselines=_base, baseline_kind="parent",
+                    parent=p, parent_round=parent_round_of.get(p),
+                    cohort=(p,), band=_band, band_source=_band_src,
+                    kd_band_log10=_kd_band, blocked_reason=_blocked,
+                ))
+            else:
+                _base = [
+                    (p, parent_round_of.get(p), rows_by_seq[p])
+                    for p in steered
+                    if p not in parent_block_reason and p in rows_by_seq
+                ]
+                vs_parent.append(_compare_to_baseline(
+                    sequence=s, child_round=index, child_row=rows_by_seq.get(s),
+                    baselines=_base, baseline_kind="cohort_best",
+                    parent=None, parent_round=None, cohort=tuple(steered),
+                    band=_band, band_source=_band_src, kd_band_log10=_kd_band,
+                ))
+
+        _cmp_by_seq = {c.sequence: c for c in vs_parent}
+
+        def _annotate(row: Any) -> Any:
+            lin = lineage.get(row.sequence)
+            if lin is None:
+                return row
+            c = _cmp_by_seq.get(row.sequence)
+            return replace(
+                row,
+                parent=lin.parent,
+                parent_round=lin.parent_round,
+                lineage_origin=lin.origin,
+                parent_in_panel=bool(c is not None and c.same_panel),
+                vs_parent=c,
+            )
+
+        complete = [_annotate(r) for r in complete]
         if self.co_optimization.is_multi:
             notes.append(
                 f"co-optimization: {self.co_optimization.describe()}; frames "
@@ -3687,6 +4494,18 @@ class RecursiveCampaign:
             if r.verdict == "PASS_BOTH"
             and (not self.require_all_targets or getattr(r, "all_targets_pass", True))
         ]
+        if controls:
+            # ⛔ A parent control that clears the panel again is a RE-measurement
+            # of a design an earlier round already carries. Counting it here
+            # would inflate this round's yield with designs it did not produce.
+            _n_before = len(survivors)
+            survivors = [s for s in survivors if s not in set(controls)]
+            if len(survivors) != _n_before:
+                notes.append(
+                    f"{_n_before - len(survivors)} parent control(s) cleared the "
+                    f"panel again; they are the baseline and are NOT counted as "
+                    f"this round's survivors"
+                )
         if self.co_optimization.is_multi:
             # ⛔ "n survived" over several targets is meaningless without saying
             # WHICH target held the rest back. Under aggregate='mean' this is
@@ -3811,6 +4630,46 @@ class RecursiveCampaign:
                 )
             del fresh
 
+        if vs_parent:
+            _counts = dict.fromkeys(
+                ("BETTER", "WORSE", "MIXED", "INDISTINGUISHABLE",
+                 "NOT_COMPARABLE"), 0)
+            for c in vs_parent:
+                _counts[c.verdict] += 1
+            notes.append(
+                f"vs parent (same-panel controls, band {_band:.4f} {_band_src}): "
+                f"{_counts['BETTER']} better, {_counts['WORSE']} worse, "
+                f"{_counts['MIXED']} mixed, {_counts['INDISTINGUISHABLE']} "
+                f"indistinguishable at the band, {_counts['NOT_COMPARABLE']} not "
+                f"comparable"
+            )
+            if _counts["NOT_COMPARABLE"]:
+                _why = sorted({
+                    (c.not_comparable_reason or "")[:80]
+                    for c in vs_parent if c.verdict == "NOT_COMPARABLE"
+                })
+                notes.append(
+                    f"⛔ {_counts['NOT_COMPARABLE']} design(s) have NO fair "
+                    f"parent comparison — they are indeterminate against their "
+                    f"parent, not equal to it: {_why[:3]}"
+                )
+            if _kd_band is None:
+                notes.append(
+                    "Kd improvements are unresolvable this round: replicates "
+                    "measured no draw-to-draw Kd spread, so there is no band to "
+                    "judge a fold-change against. Run replicates>=2."
+                )
+        elif index > 1:
+            notes.append(
+                f"no lineage declared for round {index}: the platform's "
+                f"generator takes no parent or seed sequence, so these designs "
+                f"are DE NOVO draws and NOT refinements of round {index - 1}'s "
+                f"leads. Pass derived_from={{child: parent}} for variants you "
+                f"made from a lead, or steered_by=[leads] when you generated "
+                f"this pool from what an earlier round measured — either way the "
+                f"parents are refolded in this panel as controls."
+            )
+
         rnd = CampaignRound(
             index=index,
             generated=generated,
@@ -3825,6 +4684,9 @@ class RecursiveCampaign:
             kd_confirmed=kd_confirmed,
             kd_lost_at_replication=kd_lost,
             notes=notes,
+            lineage=lineage,
+            parent_controls=list(controls),
+            vs_parent=vs_parent,
         )
         self.rounds.append(rnd)
         return rnd
@@ -3954,10 +4816,80 @@ class RecursiveCampaign:
                     "thermo_criterion": (
                         None if r.replication is None else r.replication.thermo_criterion
                     ),
+                    # ─── lineage [bd-dre-umd3l] ──────────────────────────────
+                    # ⛔ Which designs in this round have a stated parent at all,
+                    # and — separately — for how many of them the parent was
+                    # measured in this same panel. The second number is the one
+                    # a "better than its parent" claim rests on.
+                    "lineage_origins": _origin_counts(r),
+                    "n_parent_controls": len(r.parent_controls),
+                    "parent_controls_refolded_in_this_panel": list(r.parent_controls),
+                    "vs_parent": _comparison_counts(r),
+                    "parent_comparisons": [
+                        {
+                            "sequence": c.sequence,
+                            "baseline_kind": c.baseline_kind,
+                            "parent": c.parent,
+                            "parent_round": c.parent_round,
+                            "parent_cohort": list(c.parent_cohort),
+                            "same_panel": c.same_panel,
+                            "not_comparable_reason": c.not_comparable_reason,
+                            "verdict": c.verdict,
+                            "band": c.band,
+                            "band_source": c.band_source,
+                            "child_delta": c.child_delta,
+                            "parent_delta": c.parent_delta,
+                            "delta_improvement": c.delta_improvement,
+                            "delta_improvement_resolvable": c.delta_improvement_resolvable,
+                            "child_peptide_ipsae": c.child_target_ipsae,
+                            "parent_peptide_ipsae": c.parent_target_ipsae,
+                            "peptide_ipsae_gate": c.ipsae_gate,
+                            "child_kd_nm": c.child_target_kd_nm,
+                            "parent_kd_nm": c.parent_target_kd_nm,
+                            "kd_fold_change": c.kd_fold_change,
+                            "kd_band_log10": c.kd_band_log10,
+                            "kd_improvement_resolvable": c.kd_improvement_resolvable,
+                            "kd_not_compared_reason": c.kd_not_compared_reason,
+                        }
+                        for c in r.vs_parent
+                    ],
                     "notes": r.notes,
                 }
                 for r in self.rounds
             ],
+            # ⛔ THE LINEAGE STATEMENT, ALWAYS PRESENT. A recursive campaign
+            # whose rounds carry no declared lineage produced INDEPENDENT draws,
+            # not refinements — and the report says that rather than letting the
+            # round numbering imply descent.
+            "lineage": {
+                "generator_accepts_a_parent_sequence": False,
+                "rounds_with_declared_lineage": [
+                    r.index for r in self.rounds
+                    if any(
+                        lin.origin in ("derived", "reseeded_pool")
+                        for lin in r.lineage.values()
+                    )
+                ],
+                "n_designs_with_a_named_parent": sum(
+                    1 for lin in self.lineage.values() if lin.has_parent
+                ),
+                "n_comparisons_against_a_same_panel_parent": sum(
+                    1 for c in self.comparisons() if c.same_panel
+                ),
+                "n_comparisons_refused_as_unfair": sum(
+                    1 for c in self.comparisons() if not c.same_panel
+                ),
+                "note": (
+                    "The served generator takes no parent or seed sequence, so a "
+                    "design has a parent only where the caller stated one "
+                    "(run_round(derived_from=...) per child, or steered_by=[...] "
+                    "for a pool-level steer). A later round is an independent "
+                    "draw unless it was declared otherwise. Every comparison "
+                    "requires the parent to have been refolded in the SAME panel "
+                    "as its children; where it was not, the comparison is "
+                    "refused rather than computed across rounds."
+                ),
+            },
         }
 
     def __repr__(self) -> str:  # pragma: no cover - repr only

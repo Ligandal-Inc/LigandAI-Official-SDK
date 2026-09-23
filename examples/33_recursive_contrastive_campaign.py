@@ -169,6 +169,44 @@ def main() -> None:
                 f"{'' if row.resolvable else '  ⚠ Δ inside the band — not a measurement'}"
             )
 
+    # ── A REFINEMENT ROUND, with the parents refolded as controls ────────────
+    #
+    # ⛔ A LATER ROUND IS NOT A REFINEMENT UNLESS YOU SAY SO. The served
+    # generator takes no parent or seed sequence, so every round above is a set
+    # of DE NOVO draws and nothing above descends from anything. To make a real
+    # refinement round, produce the variants yourself and DECLARE where each one
+    # came from:
+    #
+    #   derived_from={child: parent}  per-child parentage — a point mutation, a
+    #                                 hand-edited variant, an external optimizer
+    #   steered_by=[leads]            a pool-level steer (e.g. you generated the
+    #                                 pool against a hotspot list read off a
+    #                                 lead's own fold). No per-child parent
+    #                                 exists and none is invented; each child is
+    #                                 compared against the BEST of the cohort.
+    #
+    # ⛔ AND THE PARENTS ARE REFOLDED IN THE SAME PANEL. `refold_parents=True`
+    # (the default) appends every declared parent to this round's fold list, so
+    # each child is measured beside its parent at the same draw count under the
+    # same fold conditions. A parent's Kd or Δ from an earlier round is NOT a
+    # control: pose-to-pose spread inside one cell is larger than the difference
+    # a refinement round is trying to detect. Where the parent was not folded
+    # here, the comparison is refused rather than computed across rounds.
+    #
+    #     children = {mutate(lead): lead for lead in campaign.confirmed[:5]}
+    #     rnd = campaign.run_round(
+    #         sequences=list(children),
+    #         derived_from=children,
+    #         replicates=2,          # ⛔ 2+ draws, or there is no band to judge
+    #         confirm=False,         #   an improvement against
+    #     )
+    #     for cmp_ in rnd.vs_parent:
+    #         print(cmp_.describe())
+    #     # BETTER / WORSE / MIXED / INDISTINGUISHABLE / NOT_COMPARABLE —
+    #     # NOT_COMPARABLE is reported separately and never read as "no change".
+    #     rnd.lineage_rows()          # one flat row per design, for a CSV
+    #     campaign.ancestry(child)    # the chain back to the earliest ancestor
+
     # ── What survived ────────────────────────────────────────────────────────
     print("\n" + "=" * 66)
     print("CONFIRMED — passed a complete panel AND held at an independent draw")

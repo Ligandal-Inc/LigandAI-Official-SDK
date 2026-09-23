@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Lineage on the recursive campaign — a round-N design can name the round-(N-1)
+  design it came from, and the comparison is fair or it is not offered.**
+  `run_round(derived_from={child: parent})` states per-child parentage;
+  `run_round(steered_by=[leads])` states a pool-level steer, which has no
+  per-child parent and says so rather than inventing one. Every declared parent
+  is refolded IN THE SAME PANEL as its children (`refold_parents=True`, and
+  `force_fresh` is forced so the 24h dedupe cannot serve an earlier round's
+  poses as a control). `SelectivityDelta` / `MultiTargetDelta` carry `parent`,
+  `parent_round`, `lineage_origin`, `parent_in_panel` and `vs_parent`;
+  `CampaignRound` carries `lineage`, `parent_controls`, `vs_parent` and
+  `lineage_rows()`; `RecursiveCampaign` carries `lineage`, `ancestry()` and
+  `comparisons()`; `report()` carries a `lineage` block and per-round
+  `parent_comparisons`. New exports: `Lineage`, `ParentComparison`.
 - **`client.folds.deepen(job_id, diffusion_samples=N, seed=None)` — add trajectories
   to an existing per-isoform panel leg.** Selectivity is `paralog Kd / on-target Kd`
   over poses clearing `peptide_ipsae >= 0.67`, and the SD of log10(Kd) WITHIN one
@@ -32,6 +45,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   measured targets exactly: 3x → 15, 2x → 36, 1.5x → 104 poses per leg.
 
 ### Notes
+- Lineage is DECLARED, never inferred. The served generator takes no parent or
+  seed sequence, so a round this loop generates is a set of de novo draws —
+  running second does not make it a refinement of round 1, and a round with no
+  declared lineage now says exactly that in its notes and in `report()`.
+- A parent's Kd or Δ from an earlier round is not a control: fold conditions and
+  the pose set differ between rounds, and pose-to-pose spread inside a single
+  cell is larger than the difference a refinement round is trying to detect. When
+  the parent was not measured in the child's own panel, every number on the
+  `ParentComparison` is `None`, the verdict is `NOT_COMPARABLE`, and
+  `not_comparable_reason` says why — the cross-round difference is never
+  computed. `NOT_COMPARABLE` is reported beside the other verdicts and never
+  folded into `INDISTINGUISHABLE`.
+- An improvement inside the panel's own measured band is `INDISTINGUISHABLE`, not
+  a gain. Both objectives carry their own resolvability flag: the interface Δ
+  against `cross_draw_band()`, the Kd fold-change against
+  `cross_draw_kd_band_log10()`. A variant that gains on one and loses the other
+  reads `MIXED`.
+- The Kd side is gated at `peptide_ipsae >= 0.67` on BOTH designs before any
+  fold-change is quoted — below the gate DeltaForge scores an interface that is
+  not there. `peptide_ipsae` is the binder metric throughout; an on-target value
+  above 1.0 is the pre-fold predicted column and refuses the comparison outright.
+- A parent control that clears the panel again is a re-measurement, not a new
+  hit: it is excluded from `survivors` so a round's yield is not inflated with
+  designs it did not produce.
 - `on_target` is never inferred. `ptf_fold_results` carries no on-target flag, so
   calling the tightest-binding leg "the on-target" would make every panel selective
   by construction. Without it, per-leg depth is still returned and every design

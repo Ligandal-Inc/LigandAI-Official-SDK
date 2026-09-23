@@ -171,10 +171,12 @@ from ligandai.thermo import (
 )
 from ligandai.resources.campaigns import (
     CampaignRound,
+    Lineage,
     MultiTargetDelta,
     MultiTargetPartial,
     PanelLeg,
     PanelResult,
+    ParentComparison,
     PartialDelta,
     RecursiveCampaign,
     ReplicationReport,
@@ -296,6 +298,10 @@ __all__ = [
     "BiotinLinker",
     "BivalentTarget",
     "CampaignRound",
+    # Lineage: where a round-N design came from, and whether the parent was
+    # measured beside it. bd-dre-umd3l.
+    "Lineage",
+    "ParentComparison",
     "ClientSessionUsage",
     "ClientSessionUsageSummary",
     "ContrastiveGuidance",
