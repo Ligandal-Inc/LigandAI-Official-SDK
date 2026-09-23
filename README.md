@@ -24,19 +24,21 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.14.0** — the campaign runner reaches customers. `client.campaigns` runs a
-> declarative `CampaignSpec` to its stop metrics with eight structural guards and
-> a hard credit cap; `client.ensemble` co-folds N peptides x M engines, priced
-> first, with cofactors declared rather than dropped; contrastive / avoidance
-> design is a first-class argument rather than a hand-rolled loop. A receptor-MSA
-> refusal now arrives as an actionable object instead of a generic 5xx, and the
-> de-novo-peptide flag is honoured on every fold path.
+> **v0.15.0** — binder maturation reaches customers. `client.maturation` drives the
+> platform's server-side maturation loop: hand it sequences you already have and it
+> folds them, gates on the peptide-interface ipSAE, scores the in-domain poses,
+> mutates the interface, and re-folds the variants **and their parents in the same
+> cycle**, so a variant-vs-parent delta means something. Every withheld number says
+> which of six reasons withheld it — and only one of the six is a verdict about the
+> design. ⛔ `client.campaigns` is a DIFFERENT capability that merely shares the
+> word: a local panel-folding helper that never calls `/api/campaign/*`. Reaching
+> for `client.campaigns.mature` now names the real surface instead of raising
+> something that reads like a typo.
 >
-> Upgrading from 0.12.2 also picks up the fixes in between: `client.charts` could
-> not previously complete a single call, an unmounted API route no longer
-> masquerades as a 404, and a non-resolving `base_url` now names its own cause
-> (the stale `~/.ligandai/credentials.json` `server_url`) instead of surfacing a
-> bare `Name or service not known`.
+> Upgrading from 0.14.0 keeps everything it introduced: the declarative campaign
+> runner with its stop metrics and hard credit cap, `client.ensemble` co-folding N
+> peptides x M engines priced first, contrastive / avoidance design as a first-class
+> argument, and round-to-round lineage on the recursive campaign.
 >
 > See [CHANGELOG.md](CHANGELOG.md) for the full history.
 

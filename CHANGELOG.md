@@ -89,6 +89,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (some rows 0-1, some 0-100) and the platform normalises each row before averaging.
 
 
+## [0.15.0] - 2026-09-23
+
+### Added
+- **`client.maturation` — the platform's binder maturation loop finally has a
+  published client.** [bd-dre-rp11j.9, bd-dre-rp11j.9.1] The server has run an
+  affinity/selectivity maturation loop since bd-dre-vd1fk.4.1 — fold, gate on
+  peptide-interface ipSAE, score the in-domain poses, mutate the binder-side
+  interface, re-fold the variants AND their parents as same-cycle controls, keep
+  what beat its own parent, repeat — and no published SDK carried a client for any
+  of it. `ligandai/resources/maturation.py` ships `start / status / readout /
+  leaderboard / iter_designs / structure / stop / stream / wait / list` on both the
+  sync and async clients, with `MaturationSpec` / `Seed` / `Receptor` / `Objective`
+  / `Filters` / `Screening` / `MaturationSettings` on the request side and
+  `MaturedDesign` / `TargetReadout` / `ParentDelta` / `SelectivityReadout` /
+  `CycleRecord` / `MaturationReadout` / `MaturationLeaderboard` /
+  `AffinityRankingCaveat` on the response side.
+
+  The measurement discipline is in the types, not in a warning:
+  - **The gate is `peptide_ipsae`**, the A–B peptide–receptor interface, at 0.67 —
+    never whole-complex `ipsae`, and never the pre-fold predicted column. Any ipSAE
+    above 1.0 is REFUSED rather than clamped: a clamped value passes every gate
+    below it.
+  - **Six reasons withhold a Kd and exactly one is a verdict about the design.**
+    `is_negative_result` answers "did it do badly"; `gated` cannot, and reading it
+    that way renders an unread instrument as a failed design.
+  - **The parent comparison is same-cycle or nothing.** With
+    `control_frame="absent"` every paired number is `None` — never `False`, never
+    0 — and `uncomparable_reason` says a bookkeeping gap is not a loss.
+  - **Selectivity is complete-and-matched or `None`.** Never 0, never a partial
+    number; `withheld_reason` and `missing_genes` say which condition failed.
+  - **A win rate divides by ASSESSED pairs.** Unmeasured pairs sit in
+    `pairs_not_comparable`, outside the denominator, because counting them
+    understates the result in the direction that reads as caution.
+  - **`sort="margin"` is refused** and contact counts are reported, never ranked
+    on; **there is no `do_relax`** anywhere on this path, because the production
+    scorer has no such parameter.
+  - **No correlation coefficient for predicted Kd vs measured affinity is quoted,
+    and none is passed through.** The deployed scorer has no measured-affinity
+    evaluation on any row; `AffinityRankingCaveat.dropped_statistics` records what
+    a server sent and this client refused, rather than dropping it silently.
+
+### Fixed
+- **`client.campaigns.mature` now names the surface that exists.** [bd-dre-rp11j.9]
+  It already raised `LigandAISurfaceNotInThisPackage` rather than a bare
+  `AttributeError`, but the message said no version of the package had ever carried
+  that surface and sent the caller to the raw transport. One of those is now false
+  and the other is worse advice than the shipped client. Reaching for `mature`,
+  `maturation`, `status`, `leaderboard`, `structure`, `stop`, `stream`, `list` or
+  `designs` on `client.campaigns` now names the `client.maturation` method that
+  does the job, and still explains that the two capabilities merely share a word.
+  ⛔ They are deliberately NOT aliased: the other four methods on that namespace
+  are local, and making one of the five secretly drive a server-side campaign would
+  give one namespace two unrelated behaviours.
+
+### Known limitation
+- `/api/campaign/*` is **not yet proxied through ligandai.com** — a call against
+  the public base URL returns 404, not 401. The metered proxy is in flight
+  (bd-dre-xfs48 / bd-LIGANDAI_ALPHA_V2-6qfgh). `start()` already accepts the
+  `quote=` that route will require and omits it from the wire when absent, so no
+  caller code changes when it lands.
+
 ## [0.14.0] - 2026-09-21
 
 ### Fixed
