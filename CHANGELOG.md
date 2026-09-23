@@ -48,6 +48,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Refs: bd-LIGANDAI_ALPHA_V2-etbo3
 
+### Documentation — paralog-conditioned generation and the campaigns loop now have pages
+
+- **New: [docs/contrastive.md](docs/contrastive.md).** `client.peptides.generate(...,
+  avoid_paralogs=["BRD2", "BRD3", "BRDT"])` — and its `generate_multi` /
+  `client.campaigns.recursive` twins — send named genes as `cfg_reference_genes`
+  and need no pocket-feature matrix at all; the server resolves the panel,
+  qualifies every named gene against the platform's seven-point paralog
+  criterion, and refuses (`missing_nonzero_cfg_references`,
+  `cfg_references_not_supported`) rather than substitute or fabricate a
+  reference. The page leads with the measured result, not a footnote: a
+  controlled BRD4-ET head-to-head (330 resolved designs, three arms) found
+  paralog-conditioned generation no more selective than plain
+  generate-and-filter — 0.437x vs 0.414x vs an unrelated-pocket control at
+  0.381x, all three inside a within-design min-of-3 permutation null of
+  0.423x [0.370, 0.486] (p=0.77) — and documents why the min-of-k null sits
+  below 1x and does not transfer between populations. Was previously
+  documented only in `ligandai/contrastive.py` docstrings and two example
+  scripts.
+- **New: [docs/campaigns.md](docs/campaigns.md).** The local `client.campaigns`
+  loop (`pocket_features`, `contrastive_references`, `fold_panel`, `replicate`,
+  `recursive` → `run_round`) end to end, including the full lineage contract
+  (`Lineage`, its four `LineageOrigin` values, `ParentComparison`, its five
+  `ParentVerdict` values, and why `NOT_COMPARABLE` is never folded into
+  `INDISTINGUISHABLE` — "we could not look" and "we looked and saw no
+  difference" are different facts) and the disambiguation between the three
+  things called "campaign" in this SDK (`client.campaigns`, `client.maturation`,
+  `ligandai campaign run`). States plainly that the generator takes no parent
+  sequence, so round numbering never implies descent, and that a parent's Kd
+  from an earlier round on a different pose set is not a control.
+- `docs/api_reference.md` gained a contrastive-guidance wire reference for
+  `POST /api/ptf/parallel/generate` (`cfg_reference_genes` / `avoid_paralogs`,
+  the `cfg_references_resolved` provenance event, and the three refusal codes),
+  and `docs/resources.md` now points `client.peptides` / `client.campaigns` at
+  the two new pages instead of leaving them undiscoverable.
+- New example: [examples/35_paralog_conditioned_generation.py](examples/35_paralog_conditioned_generation.py)
+  — generates with `avoid_paralogs=`, folds the full panel, gates on
+  `peptide_ipsae >= 0.67` before any Kd, and reports the selectivity
+  DISTRIBUTION against a min-of-k null rebuilt by permutation on that run's
+  own rows (never the number from docs/contrastive.md, which does not
+  transfer). Deliberately does not end by printing a single best design.
+
+Refs: bd-dre-siz9d.4, bd-dre-siz9d, bd-dre-atcmd
+
+## [0.15.1] - 2026-09-23
+
+### Fixed — 0.15.0 could not be imported at all
+
+```
+>>> import ligandai
+ImportError: cannot import name 'normalize_avoid_paralogs' from 'ligandai.contrastive'
+```
+
+`ligandai/resources/campaigns.py` imported a symbol that `ligandai/contrastive.py`
+did not yet define, so **every `pip install ligandai==0.15.0` was unimportable**.
+The missing module is now committed and the package imports cleanly.
+
+⛔ **0.15.0 is yanked on PyPI.** `pip` will not resolve to it; if you pinned it
+explicitly, move to `0.15.1`. Nothing else differs between the two — 0.15.1 is
+0.15.0 plus the module that makes it import.
+
+How it escaped: `twine check`, the 1528-test suite and the published-superset
+gate all passed, because none of them **import the built artifact**. The clean-venv
+install-from-the-registry step in `RELEASING.md` is the only check that does, and
+it is the one that caught this — after upload. That ordering is the real defect
+and is tracked separately.
+
+---
+
 ## [0.15.0] - 2026-09-23
 
 ### Added — folds, lineage, panel depth
