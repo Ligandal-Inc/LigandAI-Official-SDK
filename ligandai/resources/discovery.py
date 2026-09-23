@@ -3,10 +3,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast, overload
 
-from ligandai.errors import LigandAILegalAcceptanceRequired
+from pydantic import TypeAdapter
+
+from ligandai.errors import (
+    LigandAILegalAcceptanceRequired,
+    resolve_mutation_failure,
+)
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     BBBReceptor,
@@ -16,10 +22,55 @@ from ligandai.types import (
     ExpressionProfile,
     GeoDataset,
     GeoImportJob,
+    HswaeAnnotateDatasetInput,
+    HswaeAnnotateDatasetReceipt,
+    HswaeCapabilityDiscovery,
+    HswaeCapabilityOperation,
+    HswaeCapabilityReceipt,
+    HswaeCompareCellTypesInput,
+    HswaeCompareCellTypesReceipt,
+    HswaeComplexSpecificityInput,
+    HswaeComplexSpecificityReceipt,
+    HswaeIsoformExpressionInput,
+    HswaeIsoformExpressionReceipt,
+    HswaeResolveCellTypeInput,
+    HswaeResolveCellTypeReceipt,
+    HswaeSemanticSearchInput,
+    HswaeSemanticSearchReceipt,
+    HswaeSurfaceMarkersInput,
+    HswaeSurfaceMarkersReceipt,
     MarkerResponse,
     ReferenceGroup,
     TargetGroup,
+    validate_hswae_capability_input,
 )
+
+_HSWAE_CAPABILITY_DISCOVERY_PATH = "/api/transcriptomics/capabilities"
+_HSWAE_CAPABILITY_INVOKE_PATH = "/api/transcriptomics/capabilities/invoke"
+_HSWAE_RECEIPT_ADAPTER: TypeAdapter[HswaeCapabilityReceipt] = TypeAdapter(HswaeCapabilityReceipt)
+
+
+def _parse_hswae_receipt(
+    payload: Any,
+    expected_operation: HswaeCapabilityOperation,
+    expected_input: Mapping[str, Any],
+) -> HswaeCapabilityReceipt:
+    receipt = cast(HswaeCapabilityReceipt, _HSWAE_RECEIPT_ADAPTER.validate_python(payload))
+    if receipt.operation != expected_operation:
+        raise ValueError("H-SWAE capability receipt operation mismatch")
+    if isinstance(receipt, HswaeComplexSpecificityReceipt):
+        expected_subunits = expected_input.get("subunits")
+        if not isinstance(expected_subunits, list) or receipt.result.subunits != expected_subunits:
+            raise ValueError("H-SWAE capability complex result does not match the request")
+        expected_name = expected_input.get("complex_name")
+        if expected_name is None:
+            expected_name = "/".join(expected_subunits)
+        if receipt.result.complex_name != expected_name:
+            raise ValueError("H-SWAE capability complex result does not match the request")
+        expected_limit = expected_input.get("limit", 50)
+        if not isinstance(expected_limit, int) or len(receipt.result.contexts) > expected_limit:
+            raise ValueError("H-SWAE capability complex result exceeds the request limit")
+    return receipt
 
 
 def _split_shared_differential(markers: list[Any]) -> tuple[list[str], list[str]]:
@@ -99,6 +150,80 @@ class Discovery(Resource):
         if self._client is None:
             return
         self._client._apply_species(body, organism if organism is not None else species)
+
+    def capabilities(self) -> HswaeCapabilityDiscovery:
+        """Return the authenticated, deployment-filtered signed H-SWAE registry."""
+
+        payload = self._transport.request("GET", _HSWAE_CAPABILITY_DISCOVERY_PATH)
+        return HswaeCapabilityDiscovery.model_validate(payload)
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["hswae.v1.semantic_search"],
+        input: HswaeSemanticSearchInput,
+    ) -> HswaeSemanticSearchReceipt: ...
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["hswae.v1.surface_markers"],
+        input: HswaeSurfaceMarkersInput,
+    ) -> HswaeSurfaceMarkersReceipt: ...
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.resolve_cell_type"],
+        input: HswaeResolveCellTypeInput,
+    ) -> HswaeResolveCellTypeReceipt: ...
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.compare_cell_types"],
+        input: HswaeCompareCellTypesInput,
+    ) -> HswaeCompareCellTypesReceipt: ...
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.isoform_expression"],
+        input: HswaeIsoformExpressionInput,
+    ) -> HswaeIsoformExpressionReceipt: ...
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.annotate_dataset"],
+        input: HswaeAnnotateDatasetInput,
+    ) -> HswaeAnnotateDatasetReceipt: ...
+
+    @overload
+    def invoke_capability(
+        self,
+        operation: Literal["predictive_interactomics.complex_specificity"],
+        input: HswaeComplexSpecificityInput,
+    ) -> HswaeComplexSpecificityReceipt: ...
+
+    def invoke_capability(
+        self,
+        operation: HswaeCapabilityOperation,
+        input: Mapping[str, Any],
+    ) -> HswaeCapabilityReceipt:
+        """Invoke one signed immediate head with an exact closed input object.
+
+        Authentication, tenant, entitlement, and request identity come only
+        from the configured SDK transport. Caller input cannot override them.
+        """
+
+        clean_input = validate_hswae_capability_input(operation, input)
+        payload = self._transport.request(
+            "POST",
+            _HSWAE_CAPABILITY_INVOKE_PATH,
+            json={"operation": operation, "input": clean_input},
+        )
+        return _parse_hswae_receipt(payload, operation, clean_input)
 
     def tissue_markers(
         self,
@@ -410,7 +535,13 @@ class Discovery(Resource):
         except LigandAILegalAcceptanceRequired:
             # ⛔ A legal 403 must not read as "server refused".
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="discovery.delete_dataset", target=str(dataset_id))
             return False
 
     def transport_vasculome(
@@ -567,6 +698,76 @@ class AsyncDiscovery(AsyncResource):
             return
         self._client._apply_species(body, organism if organism is not None else species)
 
+    async def capabilities(self) -> HswaeCapabilityDiscovery:
+        """Async counterpart of :meth:`Discovery.capabilities`."""
+
+        payload = await self._transport.request("GET", _HSWAE_CAPABILITY_DISCOVERY_PATH)
+        return HswaeCapabilityDiscovery.model_validate(payload)
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["hswae.v1.semantic_search"],
+        input: HswaeSemanticSearchInput,
+    ) -> HswaeSemanticSearchReceipt: ...
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["hswae.v1.surface_markers"],
+        input: HswaeSurfaceMarkersInput,
+    ) -> HswaeSurfaceMarkersReceipt: ...
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.resolve_cell_type"],
+        input: HswaeResolveCellTypeInput,
+    ) -> HswaeResolveCellTypeReceipt: ...
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.compare_cell_types"],
+        input: HswaeCompareCellTypesInput,
+    ) -> HswaeCompareCellTypesReceipt: ...
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.isoform_expression"],
+        input: HswaeIsoformExpressionInput,
+    ) -> HswaeIsoformExpressionReceipt: ...
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["hswae.v2.annotate_dataset"],
+        input: HswaeAnnotateDatasetInput,
+    ) -> HswaeAnnotateDatasetReceipt: ...
+
+    @overload
+    async def invoke_capability(
+        self,
+        operation: Literal["predictive_interactomics.complex_specificity"],
+        input: HswaeComplexSpecificityInput,
+    ) -> HswaeComplexSpecificityReceipt: ...
+
+    async def invoke_capability(
+        self,
+        operation: HswaeCapabilityOperation,
+        input: Mapping[str, Any],
+    ) -> HswaeCapabilityReceipt:
+        """Async counterpart of :meth:`Discovery.invoke_capability`."""
+
+        clean_input = validate_hswae_capability_input(operation, input)
+        payload = await self._transport.request(
+            "POST",
+            _HSWAE_CAPABILITY_INVOKE_PATH,
+            json={"operation": operation, "input": clean_input},
+        )
+        return _parse_hswae_receipt(payload, operation, clean_input)
+
     async def tissue_markers(
         self,
         target_tissues: list[str] | None = None,
@@ -665,6 +866,25 @@ class AsyncDiscovery(AsyncResource):
         ) or {"gene": gene}
         payload.setdefault("organism", params.get("organism", "human"))
         return ExpressionProfile.model_validate(payload)
+
+    async def isoform_expression(
+        self,
+        gene: str,
+        top_n_isoforms: int = 10,
+        min_mean_tpm: float = 0.5,
+    ) -> dict[str, Any]:
+        """Async parity for :meth:`Discovery.isoform_expression`."""
+
+        body = {
+            "gene": gene,
+            "top_n_isoforms": top_n_isoforms,
+            "min_mean_tpm": min_mean_tpm,
+        }
+        return await self._transport.request(
+            "POST",
+            "/api/transcriptomics/hswae/isoform-expression",
+            json=body,
+        ) or {"gene": gene, "isoforms": [], "resolution": "none"}
 
     async def get_hswae2_cell_type_markers(
         self,
@@ -765,7 +985,13 @@ class AsyncDiscovery(AsyncResource):
         except LigandAILegalAcceptanceRequired:
             # ⛔ A legal 403 must not read as "server refused".
             raise
-        except Exception:
+        except Exception as exc:
+            # ⛔ `False` here must mean ONLY 'the server was reached and
+            # declined'. Every other cause — no connection, bad key, CDN
+            # block, 5xx — leaves the outcome UNKNOWN and now raises,
+            # because a caller acting on a fabricated 'it did not happen'
+            # is worse than one handling an error. [bd-dre-rp11j.3]
+            resolve_mutation_failure(exc, operation="discovery.delete_dataset", target=str(dataset_id))
             return False
 
     async def transport_vasculome(

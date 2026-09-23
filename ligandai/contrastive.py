@@ -420,54 +420,157 @@ class ContrastiveGuidance:
             "referencePocketFeatures": rows,
         }
 
-    def require_forwardable(self, *, allow_unforwarded: bool = False) -> None:
-        """Refuse to send references down a request path that discards them.
+    def check_invariants(self) -> None:
+        """Re-assert every property a servable panel must have.
 
-        ⛔ VERIFIED 2026-08-31 by reading the request path end to end.
+        The constructor already enforces all of these, so on a panel built by
+        :meth:`Campaigns.contrastive_references` this is a no-op. It exists
+        because a frozen dataclass is not tamper-proof (``object.__setattr__``
+        reaches straight past ``__init__``) and because a panel can be rebuilt,
+        re-ordered or widened by a campaign loop between construction and the
+        request that carries it.
 
-        The generation request model DOES accept ``reference_pocket_features``
-        (both spellings) and validates every matrix against the selected
-        model's declared width. What it never sees is a request that arrived
-        through the public generation endpoint: the intermediate hop builds its
-        forward payload from a fixed key list, and that list does not contain
-        the references. Neither hop rejects unknown keys, so the request
-        succeeds, the run proceeds, and nothing anywhere reports that the panel
-        was ignored.
+        Every one of these is a SILENT-CORRUPTION mode, not an error the worker
+        would report:
 
-        What DOES happen on that path is that the platform derives its OWN
-        reference panel for a model that needs one, and refuses the run outright
-        if it cannot. So a v6.9-line run through the public endpoint is
-        genuinely paralog-contrastive — you just do not choose the panel and are
-        not told which paralogs were used. That is fine for a first pass and
-        fatal for a recursive loop, whose whole point is feeding chosen
-        off-targets (and last round's survivors) back in as the references.
-
-        Pass ``allow_unforwarded=True`` only when you have a server where the
-        passthrough exists (a local/staging build, or after the plumbing lands).
+        * no references at all — the server refuses the run
+          (``missing_nonzero_cfg_references``) after the request has been
+          accepted and the credits reserved;
+        * an operator other than ``paralog_mean`` — read by nothing;
+        * an all-zero reference — a fabricated receptor wearing the right shape;
+        * a width that is not ``expected_dim`` — the extra columns are measured
+          descriptors, so a mismatch is a different vector, never a slice;
+        * a repeated gene — double-weighted in the mean, which moves the
+          guidance direction with nothing in the response saying so.
         """
-        if allow_unforwarded:
-            return
-        raise LigandAIParameterNotForwarded(
-            "contrastive references cannot reach the generator through the public "
-            "generation endpoint yet. The request model accepts and validates "
-            "reference_pocket_features, but the hop in front of it forwards a fixed "
-            "key list that omits them — so the request would succeed, the run would "
-            "proceed WITHOUT your panel, and no response field would say so. "
-            "Refusing to send a knob that reads as set and executes as unset.\n"
-            "\n"
-            "What still works today: a v6.9-line model is contrastive regardless — "
-            "the platform derives its own real paralog references and refuses the run "
-            "if it cannot produce them. You just cannot choose the panel, and the "
-            "chosen panel is not reported back.\n"
-            "\n"
-            "To run anyway against a server where the passthrough exists, pass "
-            "allow_unforwarded=True.",
-            parameter="contrastive",
-            reached="generation request model (validated, width-checked)",
-            dropped_at="public generation endpoint forward payload (fixed key list)",
-            tracking="bd-dre-if562",
-            override="allow_unforwarded=True",
-        )
+        refs = tuple(self.references)
+        if not refs:
+            raise LigandAIValidationError(
+                "contrastive panel is empty. cfg_reference='paralog_mean' averages "
+                "REAL off-target receptor pockets; with none supplied there is "
+                "nothing to average and the server refuses the run "
+                "(missing_nonzero_cfg_references)."
+            )
+        if self.cfg_reference != "paralog_mean":
+            raise LigandAIValidationError(
+                f"unsupported cfg_reference {self.cfg_reference!r}. The only operator "
+                f"the platform will execute is 'paralog_mean'."
+            )
+        seen: set[str] = set()
+        for ref in refs:
+            if not isinstance(ref, ContrastiveReference):
+                raise LigandAIValidationError(
+                    "every entry of references must be a ContrastiveReference "
+                    "(use client.campaigns.contrastive_references(...) to build them)"
+                )
+            if ref.features.is_all_zero():
+                raise LigandAIValidationError(
+                    f"contrastive reference {ref.gene!r} is all zeros. The generator "
+                    f"refuses an all-zero reference pocket (it is a fabricated "
+                    f"receptor, not an off-target), and so does this SDK."
+                )
+            ref.features.require_dim(
+                self.expected_dim, label=f"contrastive reference {ref.gene!r}"
+            )
+            key = ref.gene.strip().upper()
+            if key in seen:
+                raise LigandAIValidationError(
+                    f"duplicate contrastive reference for {ref.gene!r}. A gene "
+                    f"repeated in the panel is weighted twice in the mean, which "
+                    f"silently changes the guidance direction."
+                )
+            seen.add(key)
+
+    def require_forwardable(
+        self,
+        *,
+        allow_unforwarded: bool = False,
+        model_id: str | None = None,
+        server_forwards: bool | None = None,
+    ) -> None:
+        """Pre-flight a panel about to be sent, and refuse what cannot execute.
+
+        ⛔ RE-VERIFIED 2026-09-22 by reading the request path end to end again.
+        **The passthrough now exists.** Express forwards
+        ``reference_pocket_features`` (snake, from the camel it persists on the
+        job config) to FastAPI; FastAPI's generation request model declares the
+        field under both spellings, validates every matrix against the selected
+        model's declared width, and refuses a panel sent to a generator that has
+        no CFG reference operator (``cfg_references_not_supported``); the v6.9.21
+        / v6.9.22 Modal runtimes and the delta resident read it. So a supplied
+        panel reaches the generator and the caller CHOOSES the off-targets.
+
+        This method used to raise :class:`LigandAIParameterNotForwarded`
+        unconditionally, because the intermediate hop's forward payload was a
+        fixed key list that omitted the references. That was true when it was
+        written and is false now, and a refusal that outlives its cause is its
+        own defect — it kept a working capability unreachable and pointed the
+        caller at an override kwarg instead of at the panel.
+
+        What it still refuses, because each is a silent-corruption mode rather
+        than an error the run would report:
+
+        * every invariant in :meth:`check_invariants` — empty panel, wrong
+          operator, all-zero reference, width mismatch, duplicate gene;
+        * ``model_id`` naming a generator with no CFG reference pocket (the
+          v6.5 line), which is :meth:`validate_for_model`;
+        * a server known NOT to forward the panel — pass
+          ``server_forwards=False`` when talking to a build that predates the
+          passthrough, and the old refusal comes back.
+
+        Args:
+            allow_unforwarded: suppresses the ``server_forwards=False`` refusal.
+                Accepted for compatibility; it has NO effect on the checks
+                above, and it never did — those are properties of the panel, not
+                of the server.
+            model_id: the generator this panel is about to be sent to. When
+                given, :meth:`validate_for_model` runs as part of the pre-flight
+                so one call covers the whole request.
+            server_forwards: tri-state. ``None`` (the default) means "the
+                platform forwards it", which is what the current request path
+                does. ``True`` is the same, stated. ``False`` restores the
+                pre-passthrough refusal for a pinned old server.
+        """
+        self.check_invariants()
+        if model_id is not None:
+            self.validate_for_model(model_id)
+        if server_forwards is False and not allow_unforwarded:
+            raise LigandAIParameterNotForwarded(
+                "this server build does not forward a caller-supplied contrastive "
+                "panel. The generation request model accepts and width-checks "
+                "reference_pocket_features, but the hop in front of it forwards a "
+                "fixed key list that omits them on builds before the passthrough "
+                "landed — so the request would succeed, the run would proceed "
+                "WITHOUT your panel, and no response field would say so. Refusing "
+                "to send a knob that reads as set and executes as unset.\n"
+                "\n"
+                "What still works on such a server: a v6.9-line model is "
+                "contrastive regardless — the platform derives its own real paralog "
+                "references and refuses the run if it cannot produce them. You just "
+                "cannot choose the panel, and the chosen panel is not reported "
+                "back.\n"
+                "\n"
+                "To send it anyway, pass allow_unforwarded_contrastive=True to "
+                "client.peptides.generate(), client.campaigns.recursive() or "
+                "client.peptides.generate_and_fold() — or allow_unforwarded=True if "
+                "you are calling ContrastiveGuidance.require_forwardable() "
+                "directly.\n"
+                "\n"
+                "⛔ The two names are NOT interchangeable. `generate()` swallows "
+                "unknown kwargs into the request body, so allow_unforwarded=True "
+                "passed THERE is accepted, forwarded as a body field, and does "
+                "nothing — leaving this error in place while looking like it was "
+                "answered.",
+                parameter="contrastive",
+                reached="generation request model (validated, width-checked)",
+                dropped_at="public generation endpoint forward payload (fixed key list)",
+                # ⛔ STAYS bd-dre-if562 — the contrastive bead. The passthrough
+                # work is bd-dre-f4mc9, but this error is about the CAPABILITY,
+                # and a caller who hits it needs the thread that owns contrastive
+                # guidance, not the one that shipped one hop of plumbing.
+                tracking="bd-dre-if562",
+                override="allow_unforwarded_contrastive=True",
+            )
 
     def describe(self) -> str:
         """One-line human summary for logs and run provenance."""

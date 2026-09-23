@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`client.folds.deepen(job_id, diffusion_samples=N, seed=None)` — add trajectories
+  to an existing per-isoform panel leg.** Selectivity is `paralog Kd / on-target Kd`
+  over poses clearing `peptide_ipsae >= 0.67`, and the SD of log10(Kd) WITHIN one
+  (design × isoform) cell is 0.646 against 0.569 BETWEEN designs — an ICC of 0.437,
+  so most of the spread is pose noise that more trajectories average down. A 20-pose
+  comparison therefore resolves only ~3.7x; resolving 2x needs 36 gated poses per
+  leg, and real panels ran 11-28. There was previously no way to add poses to ONE
+  leg: re-submitting the fold either collided with the live uniqueness index
+  (`user_id, gene, sequence, conformation, sample_idx, …`) or landed as an unrelated
+  job whose poses could not be pooled. `deepen` reuses the job's exact spec at a
+  different seed and starts the new poses one past the leg's `sample_idx`
+  high-water mark, so they aggregate instead of replacing.
+- **`client.folds.panel(...)` — per-leg panel depth.** Per (design, receptor,
+  conformation): total poses, gate-passing poses, poses whose binder metric was not
+  computed, the geometric-mean predicted Kd over gated poses, and the count of
+  DISTINCT structures behind them. With `on_target=<GENE>` it also reports the
+  deciding paralog (the tightest off-target), `depth` = min(on-target gated,
+  deciding-paralog gated), the smallest margin that depth can resolve, and
+  `poses_to_add` — the shortfall to feed straight into `deepen`.
+- `poses_needed_per_leg()` / `resolvable_fold_change()` as importable helpers, so a
+  client can size a deepen without a round trip. They reproduce the platform's
+  measured targets exactly: 3x → 15, 2x → 36, 1.5x → 104 poses per leg.
+
+### Notes
+- `on_target` is never inferred. `ptf_fold_results` carries no on-target flag, so
+  calling the tightest-binding leg "the on-target" would make every panel selective
+  by construction. Without it, per-leg depth is still returned and every design
+  carries an explicit `unresolved_reason` rather than a silent null.
+- `deepen` is Boltz-2 only. `diffusion_samples` is a Boltz-2 diffusion control:
+  AlphaFold2 has no equivalent and ESMFold replicates via `num_seeds`, so poses
+  added through either would not be trajectories of the same estimator.
+- A deepen does NOT re-run the generator — the peptide is already fixed. It asserts
+  the design's generator model id and conditioning are carried forward unchanged
+  and refuses otherwise, because the three live pocket-feature widths (48 on the
+  v6.5 line, 107 for v6.9.21, 65 for v6.9.22) are different vectors and poses drawn
+  under them are not replicates of one estimator.
+- `panel` reports `inherited_metric_poses` separately and excludes them from
+  `gated_poses`: on the api-fold path the platform copies the primary trajectory's
+  `peptide_ipsae` onto every trajectory row, so counting those as gated poses would
+  raise the depth number without lowering the standard error it estimates.
+- `mean_plddt_gated` is on the 0-100 scale. `ptf_fold_results.plddt` is dual-scale
+  (some rows 0-1, some 0-100) and the platform normalises each row before averaging.
+
+
 ## [0.14.0] - 2026-09-21
 
 ### Fixed

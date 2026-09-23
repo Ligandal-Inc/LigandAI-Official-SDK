@@ -24,6 +24,7 @@ from ligandai.contrastive import (
 from ligandai.errors import (
     LigandAIInvalidConfig,
     LigandAIParameterNotForwarded,
+    LigandAITimeoutError,
     LigandAIValidationError,
 )
 from ligandai.resources.campaigns import Campaigns, PanelLeg, PanelResult
@@ -109,13 +110,19 @@ def test_wire_emits_only_fields_the_platform_reads():
 
 
 def test_unforwarded_guidance_raises_rather_than_silently_doing_nothing():
+    # The passthrough landed (bd-dre-f4mc9), so the refusal is now opt-in for a
+    # server build that predates it — `server_forwards=False`. A panel sent to a
+    # CURRENT server is forwarded and must NOT be refused.
     g = ContrastiveGuidance([_ref("ENPP1")])
+    g.require_forwardable()
     with pytest.raises(LigandAIParameterNotForwarded) as exc:
-        g.require_forwardable()
-    assert exc.value.override == "allow_unforwarded=True"
+        g.require_forwardable(server_forwards=False)
+    # The override must name the kwarg the CALLING surface has; see
+    # test_the_override_error_names_the_kwarg_the_caller_actually_has.
+    assert exc.value.override == "allow_unforwarded_contrastive=True"
     assert exc.value.tracking == "bd-dre-if562"
-    # The escape exists for a server where the passthrough already landed.
-    g.require_forwardable(allow_unforwarded=True)
+    # The escape suppresses that pinned-old-server refusal.
+    g.require_forwardable(server_forwards=False, allow_unforwarded=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -564,3 +571,336 @@ def test_pocket_feature_width_is_per_model_not_per_line():
     # An id this build has never heard of must answer "ask the server", never
     # a guessed width.
     assert model_pocket_feature_dim("v7.0.0") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The panel's WAIT path — verified against the real BatchFoldJob contract
+#
+# Every test above this line stubs fold_batch with a fake whose `wait()` takes
+# `**_kw`, so it accepted any kwarg the caller invented. `fold_panel` invented
+# one: `raise_on_failure=False`, which `BatchFoldJob.wait` has never had. The
+# published 0.14.0 therefore submitted (and charged for) the whole panel and
+# then died with a bare TypeError on the very first wait — taking `replicate()`
+# and every `RecursiveCampaign.run_round()` with it. A fake that accepts
+# anything cannot catch that; these use the REAL signature.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _StrictBatch(_FakeBatch):
+    """A batch whose ``wait`` has BatchFoldJob's exact parameter list."""
+
+    def wait(self, timeout=7200.0, poll_interval=5.0, on_progress=None):
+        self.waited = True
+        return []
+
+
+class _StrictPeptides(_FakePeptides):
+    def fold_batch(self, *, peptides, target_gene, **kw):
+        self.calls.append({"receptor": target_gene, "n": len(peptides), **kw})
+        draw = sum(1 for c in self.calls if c["receptor"] == target_gene) - 1
+        return _StrictBatch(target_gene, peptides, draw)
+
+
+class _StrictClient(_FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.peptides = _StrictPeptides()
+
+
+def test_fold_panel_only_passes_wait_kwargs_batchfoldjob_actually_accepts():
+    """Signature contract: the panel may not invent parameters on wait()."""
+    import inspect
+
+    from ligandai.resources.peptides import BatchFoldJob
+
+    accepted = set(inspect.signature(BatchFoldJob.wait).parameters) - {"self"}
+    # These are the only kwargs fold_panel forwards to the batch wait.
+    assert {"timeout", "poll_interval"} <= accepted
+    # The kwarg 0.14.0 passed and BatchFoldJob has never had.
+    assert "raise_on_failure" not in accepted
+
+
+def test_fold_panel_waits_without_dying_on_the_real_wait_signature():
+    client = _StrictClient()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel = camp.fold_panel([A, B], target="ENPP3", off_targets=["ENPP6", "ENPP1"])
+    assert len(panel.legs) == 6
+    assert panel.wait_errors == []
+    # And the metrics still landed, i.e. the wait really ran to completion.
+    assert panel.leg(A, "ENPP3").peptide_ipsae_draws == [0.90]
+
+
+def test_one_receptor_timing_out_does_not_discard_the_rest_of_the_panel():
+    """Those folds are submitted and paid for; the surviving legs are real."""
+
+    class _TimeoutOnOne(_StrictPeptides):
+        def fold_batch(self, *, peptides, target_gene, **kw):
+            batch = super().fold_batch(peptides=peptides, target_gene=target_gene, **kw)
+            if target_gene == "ENPP1":
+                def _boom(timeout=7200.0, poll_interval=5.0, on_progress=None):
+                    raise LigandAITimeoutError("ENPP1 batch did not finish")
+                batch.wait = _boom  # type: ignore[method-assign]
+            return batch
+
+    client = _StrictClient()
+    client.peptides = _TimeoutOnOne()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel = camp.fold_panel([A], target="ENPP3", off_targets=["ENPP6", "ENPP1"])
+    # The failure is REPORTED, with the receptor it belongs to...
+    assert [r for r, _e in panel.wait_errors] == ["ENPP1"]
+    assert isinstance(panel.wait_errors[0][1], LigandAITimeoutError)
+    # ...and the rest of the panel is still here rather than lost with it.
+    assert panel.leg(A, "ENPP3").peptide_ipsae_draws == [0.90]
+    assert panel.leg(A, "ENPP6").peptide_ipsae_draws == [0.20]
+    assert len(panel.legs) == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The dedupe is not a measurement
+#
+# `fold_batch` answers a submission inside the local 24h dedupe window with a
+# cached batch handle carrying NO per-sub-job entries. `fold_panel` builds legs
+# by walking `job.jobs`, so such a handle yields ZERO legs — a panel that reads
+# like a measured null. `replicate()` walked straight into it: the shortlist it
+# is handed was, by construction, folded minutes earlier by the panel that
+# selected it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _CachedBatch:
+    """What fold_batch returns on a dedupe hit: a batch id and nothing else."""
+
+    def __init__(self):
+        self.jobs: list[dict[str, object]] = []
+
+    def wait(self, timeout=7200.0, poll_interval=5.0, on_progress=None):
+        return []
+
+
+class _DedupingPeptides(_StrictPeptides):
+    """Returns a cached (empty) handle unless force_resubmit was requested."""
+
+    def fold_batch(self, *, peptides, target_gene, **kw):
+        self.calls.append({"receptor": target_gene, "n": len(peptides), **kw})
+        if not kw.get("force_resubmit"):
+            return _CachedBatch()
+        draw = sum(1 for c in self.calls if c["receptor"] == target_gene) - 1
+        return _StrictBatch(target_gene, peptides, draw)
+
+
+def test_a_cached_batch_handle_is_recorded_not_silently_an_empty_panel():
+    client = _StrictClient()
+    client.peptides = _DedupingPeptides()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel = camp.fold_panel([A], target="ENPP3", off_targets=["ENPP6", "ENPP1"])
+    assert panel.legs == {}
+    # The caller must be able to tell "nothing was measured" from "measured null".
+    assert sorted(panel.unmapped_submissions) == ["ENPP1", "ENPP3", "ENPP6"]
+
+
+def test_replicate_bypasses_the_dedupe_on_every_draw_not_just_the_second():
+    """An echo of the selecting panel is not an independent draw."""
+    client = _StrictClient()
+    client.peptides = _DedupingPeptides()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel, report = camp.replicate(
+        [A], target="ENPP3", off_targets=["ENPP6", "ENPP1"],
+        band=0.05, target_leg_min=0.66,
+    )
+    assert all(c["force_resubmit"] for c in client.peptides.calls)
+    assert panel.unmapped_submissions == []
+    assert len(panel.legs) == 3
+    # A real measurement, so the design is held or lost — never "untested".
+    assert report.untested == ()
+    assert report.held == (A,)
+
+
+def test_force_fresh_is_opt_in_on_fold_panel_and_off_by_default():
+    client = _StrictClient()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    camp.fold_panel([A], target="ENPP3", off_targets=["ENPP6"])
+    assert [c["force_resubmit"] for c in client.peptides.calls] == [False, False]
+
+    client2 = _StrictClient()
+    camp2 = Campaigns(transport=None, client=client2)  # type: ignore[arg-type]
+    camp2.fold_panel([A], target="ENPP3", off_targets=["ENPP6"], force_fresh=True)
+    assert [c["force_resubmit"] for c in client2.peptides.calls] == [True, True]
+
+
+def test_recursive_round_confirm_leg_inherits_the_fresh_draw():
+    """`run_round(confirm=True)` re-folds designs it folded seconds earlier."""
+    client = _StrictClient()
+    client.peptides = _DedupingPeptides()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    run = camp.recursive(
+        target="ENPP3", off_targets=["ENPP6", "ENPP1"],
+        band=0.05, target_leg_min=0.66,
+    )
+    rnd = run.run_round(sequences=[A], confirm=True)
+    # The selecting panel is the non-fresh one and comes back unmeasurable...
+    assert rnd.panel is not None and rnd.panel.unmapped_submissions
+    # ...but the confirm leg must not ALSO be a cached echo. With no survivors
+    # there is nothing to confirm, which is a fact about the panel, not a bug.
+    assert rnd.survivors == []
+    assert rnd.confirmed == []
+
+
+def test_force_resubmit_is_rejected_with_the_right_knob_named():
+    client = _StrictClient()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    with pytest.raises(LigandAIValidationError, match="force_fresh=True, not force_resubmit"):
+        camp.fold_panel(
+            [A], target="ENPP3", off_targets=["ENPP6"], force_resubmit=True,
+        )
+    # Nothing was submitted, so the mistake costs no folds.
+    assert client.peptides.calls == []
+
+
+def test_an_unmeasured_round_says_so_instead_of_reporting_zero_survivors():
+    client = _StrictClient()
+    client.peptides = _DedupingPeptides()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    run = camp.recursive(
+        target="ENPP3", off_targets=["ENPP6"], band=0.05, target_leg_min=0.66,
+    )
+    rnd = run.run_round(sequences=[A], confirm=False)
+    assert rnd.survivors == []
+    assert any("UNMEASURED" in n for n in rnd.notes), rnd.notes
+    assert any("force_fresh" in n for n in rnd.notes), rnd.notes
+
+
+def test_the_override_error_names_the_kwarg_the_caller_actually_has():
+    """`allow_unforwarded=True` on generate() is swallowed and does nothing."""
+    import inspect
+
+    from ligandai.resources.peptides import Peptides
+
+    gen = set(inspect.signature(Peptides.generate).parameters)
+    guidance = ContrastiveGuidance([_ref("ENPP1")])
+    with pytest.raises(LigandAIParameterNotForwarded) as exc:
+        guidance.require_forwardable(server_forwards=False)
+    # The name the error hands the user must exist on the calling surface...
+    assert exc.value.override == "allow_unforwarded_contrastive=True"
+    assert "allow_unforwarded_contrastive" in gen
+    # ...and the name it used to hand them must NOT, which is why it was wrong.
+    assert "allow_unforwarded" not in gen
+    assert "allow_unforwarded_contrastive=True" in str(exc.value)
+
+
+def test_quality_tier_is_read_from_the_shape_filter_folds_actually_returns():
+    """Observed live 2026-09-22: neither "tier" nor "name" is in the payload."""
+
+    class _RealShapeEvaluator:
+        def filter_folds(self, ids, criteria=None):
+            return {"results": [
+                {
+                    "fold_job_id": jid,
+                    "quality_tier": {
+                        "criterion": "great_plus",
+                        "verdict": "indeterminate",
+                        "coValidated": False,
+                        "summary": "Cannot be judged against Great+ "
+                                   "(peptide_ipsae_missing)",
+                    },
+                    "metrics": {
+                        "peptide_ipsae": None,   # NULL — indeterminate, not zero
+                        "iptm": 0.7612702517885668,
+                        "plddt_mean": 0.8180682347731644,
+                        "scaffold_mediated": None,
+                    },
+                }
+                for jid in ids
+            ]}
+
+    client = _StrictClient()
+    client.evaluator = _RealShapeEvaluator()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel = camp.fold_panel([A], target="ENPP3", off_targets=["ENPP6"])
+    leg = panel.leg(A, "ENPP3")
+    assert leg is not None
+    # The platform's judgement reaches the leg instead of silently becoming None.
+    assert leg.quality_tiers == ["indeterminate"]
+    assert panel.to_rows()[0]["quality_tier"] == "indeterminate"
+    # A NULL peptide_ipsae is counted as indeterminate, never averaged as a zero.
+    assert leg.peptide_ipsae_draws == []
+    assert leg.not_computed == 1
+    assert leg.value() is None
+    # ...and iptm/plddt still land, so the row is not empty.
+    assert leg.iptm_draws == [0.7612702517885668]
+    # No complete row can be built without the binder metric.
+    complete, partial, _s = panel.deltas(band=0.05, target_leg_min=0.66)
+    assert complete == []
+
+
+def test_async_campaigns_says_sync_only_instead_of_bare_attributeerror():
+    """The guard one line above it existed; these four fell through it."""
+    from ligandai.errors import LigandAISurfaceNotInThisPackage
+    from ligandai.resources.campaigns import AsyncCampaigns
+
+    a = AsyncCampaigns.__new__(AsyncCampaigns)
+    for name in ("fold_panel", "replicate", "recursive", "contrastive_references"):
+        with pytest.raises(LigandAISurfaceNotInThisPackage) as exc:
+            getattr(a, name)
+        assert "only on the SYNC client" in str(exc.value)
+        assert exc.value.surface == name
+    # The platform-API guard still wins for its own names...
+    with pytest.raises(LigandAISurfaceNotInThisPackage, match="does not exist in the"):
+        a.mature
+    # ...and a real typo is still a plain AttributeError, not a lecture.
+    with pytest.raises(AttributeError):
+        a.fold_pannel
+
+
+def test_the_platforms_reason_for_a_null_binder_metric_is_not_dropped():
+    """Live 2026-09-22: peptide_ipsae null + peptide_ipsae_status "not_computed"."""
+
+    class _NotComputedEvaluator:
+        def filter_folds(self, ids, criteria=None):
+            return {"results": [
+                {
+                    "fold_job_id": jid,
+                    "quality_tier": {"criterion": "great_plus",
+                                     "verdict": "indeterminate",
+                                     "summary": "peptide_ipsae_missing"},
+                    "metrics": {
+                        "peptide_ipsae": None,
+                        "peptide_ipsae_status": "not_computed",
+                        "iptm": 0.18390754262716416,
+                        "plddt_mean": 0.524366280969091,
+                        "scaffold_mediated": None,
+                    },
+                }
+                for jid in ids
+            ]}
+
+    client = _StrictClient()
+    client.evaluator = _NotComputedEvaluator()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel = camp.fold_panel([A], target="ENPP3", off_targets=["ENPP6"])
+    leg = panel.leg(A, "ENPP3")
+    assert leg is not None and leg.not_computed_reasons == ("not_computed",)
+    assert panel.to_rows()[0]["peptide_ipsae_status"] == ["not_computed"]
+    _c, _p, summary = panel.deltas(band=0.05, target_leg_min=0.66)
+    assert summary["peptide_ipsae_not_computed_reasons"] == {"not_computed": 2}
+
+
+def test_a_round_that_scored_nothing_does_not_report_it_as_nothing_binding():
+    class _NotComputedEvaluator:
+        def filter_folds(self, ids, criteria=None):
+            return {"results": [
+                {"fold_job_id": jid,
+                 "metrics": {"peptide_ipsae": None,
+                             "peptide_ipsae_status": "not_computed",
+                             "iptm": 0.2}}
+                for jid in ids
+            ]}
+
+    client = _StrictClient()
+    client.evaluator = _NotComputedEvaluator()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    run = camp.recursive(target="ENPP3", off_targets=["ENPP6"],
+                         band=0.05, target_leg_min=0.66)
+    rnd = run.run_round(sequences=[A], confirm=False)
+    assert rnd.survivors == []
+    assert any("measured NOTHING" in n for n in rnd.notes), rnd.notes
+    assert any("not_computed" in n for n in rnd.notes), rnd.notes

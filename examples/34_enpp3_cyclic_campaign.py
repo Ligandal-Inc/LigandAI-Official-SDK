@@ -136,9 +136,9 @@ target_residues = ResidueRange.from_residues(POCKET, chain="A") or None
 #
 # ⛔ These must be REAL references. The v6.9 line refuses a fabricated all-zero
 # reference, which is the guard that stops a silently-unsteered run reporting
-# itself as contrastive. Do not pass allow_unforwarded_contrastive=True to get
-# around a reference that failed to build — that flag suppresses exactly the
-# error you want to see.
+# itself as contrastive. No flag gets around a reference that failed to build:
+# allow_unforwarded_contrastive= is about the server's forwarding, not the
+# panel, and every panel invariant is checked regardless of it.
 OFF_TARGET_GENES = ["ENPP1", "ENPP6"]
 contrastive_refs = client.campaigns.contrastive_references(
     target="ENPP3",
@@ -153,17 +153,19 @@ contrastive_refs = client.campaigns.contrastive_references(
 )
 print(f"contrastive references built for {OFF_TARGET_GENES}")
 
-# ⛔ The references BUILD, but do not yet REACH the generator through the public
-# endpoint: /api/ptf/parallel/generate forwards a fixed key list that omits
-# reference_pocket_features, while the FastAPI request model and the Modal
-# generation path both accept it. Passing `contrastive=` therefore raises
-# LigandAIParameterNotForwarded rather than running unsteered and reporting
-# success. Tracked as bd-LIGANDAI_ALPHA_V2-cjtxi; when it lands, add
-#     contrastive=contrastive_refs,
-# to `common` below. Until then a v6.9-line run is still paralog-contrastive on
-# references the platform derives itself — you do not choose the panel.
-# Do NOT reach for allow_unforwarded_contrastive=True to make the line above
-# work: that flag suppresses the one error that tells you the panel was ignored.
+# ⛔ The references now REACH the generator [bd-dre-f4mc9]. The public
+# generation endpoint forwards reference_pocket_features to FastAPI, which
+# width-checks every matrix against the selected model's declared width, and the
+# v6.9.21 / v6.9.22 runtimes read it. Pass `contrastive=contrastive_refs` in
+# `common` below and the panel you named is the panel the sampler steers away
+# from. Without it a v6.9-line run is STILL paralog-contrastive — the platform
+# derives its own real panel and refuses the run rather than fabricating one —
+# you just do not choose or see the paralogs.
+#
+# allow_unforwarded_contrastive=True is now a no-op for a current server and is
+# not something to reach for: it answers a question about the SERVER, never
+# about the panel. It cannot make an all-zero reference, a width mismatch, or a
+# v6.5-line generator acceptable, and it never could.
 
 common = dict(
     gene="ENPP3",

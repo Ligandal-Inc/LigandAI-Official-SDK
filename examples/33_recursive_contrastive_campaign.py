@@ -203,20 +203,23 @@ def main() -> None:
 #         gene=TARGET, num_peptides=200, model="v6.9.21", contrastive=refs,
 #     )
 #
-# ⛔ On the current public API both of those calls stop with a named error
-# (LigandAIParameterNotForwarded) rather than doing nothing quietly:
+# ⛔ BOTH HOPS NOW EXIST [bd-dre-vd1fk, bd-dre-f4mc9]. This example runs as
+# written:
 #
-#   * the pocket featurizer that produces a reference at the model's declared
-#     width is not mounted on the public API, and
-#   * the generation endpoint's forward payload is built from a fixed key list
-#     that does not include the references — so they would be accepted by HTTP,
-#     dropped in transit, and the run would report the panel as set while
-#     executing without it.
+#   * the pocket featurizer is mounted on the public API and serves the width a
+#     generator declares (`pocket_features(gene, dim=107)` /
+#     `model="v6.9.21"`), resolving it from the cached per-width tensors or
+#     recomputing it — never padding or slicing across a block boundary, and
+#   * the generation endpoint forwards reference_pocket_features to FastAPI,
+#     which width-checks every matrix against the selected model and refuses a
+#     panel sent to a generator with no CFG reference operator.
 #
-# The client surface is complete and the errors name the exact hop, so this
-# example starts working unchanged the moment the plumbing lands. Until then,
-# `contrastive=` is reachable against a deployment where the passthrough exists
-# by passing `allow_unforwarded_contrastive=True`.
+# What still fails, loudly and client-side, is a panel that could only corrupt
+# the run: an all-zero reference, a width that is not the model's declared
+# width, a duplicate gene, an empty panel, or a v6.5-line model. Non-public
+# widths are entitled, so a caller without that entitlement gets a 403 naming
+# the alternative — run a v6.9-line model and let the platform derive its own
+# real panel — rather than a reshaped matrix.
 
 
 if __name__ == "__main__":

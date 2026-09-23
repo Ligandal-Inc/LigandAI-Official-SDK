@@ -447,3 +447,42 @@ def test_configure_auto_topup_server_403_free_tier(httpx_mock: HTTPXMock, free_c
     )
     with pytest.raises(LigandAITierError):
         free_client.account.configure_auto_topup(enabled=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bd-dre-if562 — AccountBalance vs what the server actually sends.
+#
+# `/api/billing/account-summary` answers with `burn_rate_30d: 17.2` and names
+# the runway `runway_days`. Typed `int`, the burn rate raised a raw pydantic
+# ValidationError out of `client.account.get_balance()` — not a LigandAI* error,
+# on the one call the panel-folding docs tell users to make before spending —
+# and `days_remaining` read None on every real response.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_account_balance_accepts_the_payload_the_server_really_sends() -> None:
+    from ligandai.types import AccountBalance
+
+    observed = {
+        "balance": 10000000000000000,
+        "tier": "discovery_partner",
+        "burn_rate_30d": 17.2,
+        "runway_days": 581395348837209,
+    }
+    bal = AccountBalance.model_validate(observed)
+    assert bal.credits == 10000000000000000
+    assert bal.burn_rate_30d == 17.2
+    assert bal.days_remaining == 581395348837209
+    assert bal.tier == "discovery_partner"
+
+
+def test_account_balance_still_reads_the_camelcase_aliases() -> None:
+    from ligandai.types import AccountBalance
+
+    bal = AccountBalance.model_validate(
+        {"balance": 500, "burnRate30d": 3, "daysRemaining": 166.6}
+    )
+    assert bal.burn_rate_30d == 3.0
+    assert bal.days_remaining == 166.6
+    # The alias the field has always dumped under is unchanged.
+    assert bal.model_dump(by_alias=True)["daysRemaining"] == 166.6

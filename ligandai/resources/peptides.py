@@ -1475,12 +1475,18 @@ def _generation_body(
     # references and refuses the run if it cannot produce any — this is how you
     # CHOOSE the panel instead of accepting the derived one.
     #
-    # ⛔ require_forwardable() is the guard that stops this becoming a knob that
-    # reads ON and executes OFF. See ligandai.contrastive for what it verifies.
+    # ⛔ require_forwardable() is the pre-flight that stops this becoming a knob
+    # that reads ON and executes OFF. It no longer refuses the forward itself —
+    # the passthrough exists (Express -> FastAPI -> the v6.9.21/v6.9.22 runtimes
+    # and the delta resident) — but it still refuses every panel that could only
+    # corrupt the run silently: an empty panel, an all-zero reference, a width
+    # that is not the model's declared width, a duplicate gene, and a v6.5-line
+    # generator that has no CFG reference operator at all. See
+    # ligandai.contrastive for what each one costs if it is not caught here.
     if contrastive is not None:
-        contrastive.validate_for_model(generator_model_id)
         contrastive.require_forwardable(
-            allow_unforwarded=bool(allow_unforwarded_contrastive)
+            model_id=generator_model_id,
+            allow_unforwarded=bool(allow_unforwarded_contrastive),
         )
         body.update(contrastive.to_wire())
 
@@ -2751,14 +2757,46 @@ class BatchFoldJob:
             "failed": int, "batch_id": str}`` on every poll tick.
         """
         import time
-        from ligandai.errors import LigandAITimeoutError
+        from ligandai.errors import LigandAINotFoundError, LigandAITimeoutError
 
         deadline = time.monotonic() + timeout
         total = len(self._sub_jobs)
+        # ⛔ MEASURED 2026-09-22: 4 of 18 COMPLETED sub-jobs answered their own
+        # status path (/api/folding/jobs/{id}) with 404 while the batch view and
+        # /api/jobs/{id}/status both reported "completed". A 404 was swallowed
+        # below as "transient" and retried forever, so wait() could never finish
+        # those batches — it burned the entire timeout and then reported a
+        # LigandAITimeoutError for folds that had been done for half an hour.
+        # A not-found that REPEATS is not transient. After a short grace (enough
+        # to cover the propagation race right after submission) the batch view is
+        # consulted, because it demonstrably answers for exactly these jobs.
+        _NOT_FOUND_GRACE = 3
+        not_found_streak: dict[int, int] = {}
+        batch_view_status: dict[str, str] = {}
+        batch_view_read = False
+
+        def _batch_view() -> dict[str, str]:
+            nonlocal batch_view_read
+            if not batch_view_read:
+                batch_view_read = True
+                try:
+                    payload = self._transport.request(
+                        "GET", f"/api/jobs/batch/{self._batch_id}"
+                    ) or {}
+                    for entry in payload.get("jobs") or []:
+                        jid = str(entry.get("id") or "").strip()
+                        st = str(entry.get("status") or "").strip().lower()
+                        if jid and st:
+                            batch_view_status[jid] = st
+                except Exception:
+                    pass
+            return batch_view_status
+
         while True:
             done = 0
             failed = 0
-            for sub in self._sub_jobs:
+            batch_view_read = False
+            for idx, sub in enumerate(self._sub_jobs):
                 if sub is None:
                     failed += 1
                     done += 1
@@ -2770,6 +2808,7 @@ class BatchFoldJob:
                 else:
                     try:
                         sub.refresh()
+                        not_found_streak.pop(idx, None)
                         if sub.is_terminal:
                             done += 1
                             if not sub.succeeded:
@@ -2781,6 +2820,19 @@ class BatchFoldJob:
                         # job that was never the problem. Surface the
                         # acceptance URL immediately.
                         raise
+                    except LigandAINotFoundError:
+                        streak = not_found_streak.get(idx, 0) + 1
+                        not_found_streak[idx] = streak
+                        if streak < _NOT_FOUND_GRACE:
+                            continue  # still plausibly a propagation race
+                        st = _batch_view().get(sub.id)
+                        if st in ("completed", "succeeded", "success"):
+                            done += 1
+                        elif st in ("failed", "error", "cancelled", "canceled"):
+                            done += 1
+                            failed += 1
+                        # Unknown to the batch view too — keep polling; the
+                        # deadline below is what ends it.
                     except Exception:
                         # Transient — keep retrying on next tick
                         pass

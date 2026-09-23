@@ -243,3 +243,80 @@ def test_grouped_body_is_json_serializable():
     assert json.loads(json.dumps(body))["msa_depth"] == 16
     # use_potentials None omits the key.
     assert "use_potentials" not in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A sub-job status path that 404s forever is not "transient"
+#
+# MEASURED against the live API 2026-09-22: 4 of 18 COMPLETED fold sub-jobs
+# answered /api/folding/jobs/{id} with 404 while the batch view AND
+# /api/jobs/{id}/status both said "completed". wait() swallowed the 404 as
+# transient and retried until the deadline, then reported LigandAITimeoutError
+# for folds that had finished half an hour earlier — and because
+# Campaigns.fold_panel waits on its batches in sequence, ONE such batch stalled
+# a whole selectivity panel for the full timeout.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_subjob_whose_status_path_404s_is_resolved_from_the_batch_view():
+    from ligandai.errors import LigandAINotFoundError
+    from ligandai.resources.peptides import BatchFoldJob
+
+    calls = {"status": 0, "batch": 0}
+
+    class _T:
+        def request(self, method, path, **kw):
+            if path.startswith("/api/jobs/batch/"):
+                calls["batch"] += 1
+                return {
+                    "batch": {"id": "batch_x", "status": "processing",
+                              "completedJobs": 0, "totalJobs": 2},
+                    "jobs": [{"id": "fold_ghost", "status": "completed"},
+                             {"id": "fold_real", "status": "completed"}],
+                }
+            calls["status"] += 1
+            if "fold_ghost" in path:
+                # Exactly what the live API does for these jobs.
+                raise LigandAINotFoundError("Job not found")
+            return {"id": "fold_real", "status": "completed", "result": {}}
+
+    batch = BatchFoldJob(
+        _T(),
+        batch_id="batch_x",
+        jobs=[{"job_id": "fold_ghost", "peptide_index": 0, "sequence": "ACDE"},
+              {"job_id": "fold_real", "peptide_index": 1, "sequence": "WYVT"}],
+        total_cost_credits=0,
+        peptide_count=2,
+        trajectories_per_peptide=1,
+    )
+    # Before the fix this raised LigandAITimeoutError after burning `timeout`.
+    batch.wait(timeout=30.0, poll_interval=0.0)
+    # The batch view was consulted only after the propagation grace, not on the
+    # first 404 — a fold that really is still landing must not be called done.
+    assert calls["batch"] >= 1
+    assert calls["status"] >= 3
+
+
+def test_a_transient_404_inside_the_grace_is_still_retried():
+    """A 404 right after submission is a propagation race, not a verdict."""
+    from ligandai.errors import LigandAINotFoundError
+    from ligandai.resources.peptides import BatchFoldJob
+
+    state = {"n": 0}
+
+    class _T:
+        def request(self, method, path, **kw):
+            if path.startswith("/api/jobs/batch/"):
+                raise AssertionError("batch view must not be needed here")
+            state["n"] += 1
+            if state["n"] == 1:
+                raise LigandAINotFoundError("Job not found")
+            return {"id": "fold_real", "status": "completed", "result": {}}
+
+    batch = BatchFoldJob(
+        _T(), batch_id="batch_y",
+        jobs=[{"job_id": "fold_real", "peptide_index": 0, "sequence": "ACDE"}],
+        total_cost_credits=0, peptide_count=1, trajectories_per_peptide=1,
+    )
+    batch.wait(timeout=30.0, poll_interval=0.0)
+    assert state["n"] == 2

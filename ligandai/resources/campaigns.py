@@ -120,23 +120,59 @@ def _aggregate(values: Sequence[float], statistic: LegStatistic) -> float:
     )
 
 
-def _pocket_features_unreachable(gene: str) -> LigandAIParameterNotForwarded:
-    """The one error for "the featurizer did not answer with a pocket".
+#: Error codes the mounted featurizer returns when it answered, looked, and
+#: found nothing for THIS gene. Distinct from "the route is not there", which
+#: is the same HTTP status and a completely different fix.
+_POCKET_FEATURES_LOOKED_AND_FAILED = frozenset({
+    "pocket_features_unavailable",
+    "pocket_selection_failed",
+    "pocket_config_error",
+})
 
-    Covers a 404 AND a 200 that carries no features, because an unmounted API
-    path on a single-page-app server commonly returns the app shell rather than
-    a 404 — the two are indistinguishable to a client and have the same fix.
+
+def _pocket_features_no_pocket(gene: str, detail: str | None = None) -> LigandAIError:
+    """The featurizer ANSWERED and has no pocket for this gene.
+
+    ⛔ Not the same fact as "the endpoint is unreachable", and the two used to
+    share one error. A gene symbol resolves (BRD4); a domain construct name
+    does not (BRD4ET), and telling that caller the API is unmounted sends them
+    to the wrong place entirely.
+    """
+    return LigandAIError(
+        f"no pocket features could be extracted for {gene!r}"
+        + (f": {detail}" if detail else "")
+        + ".\n"
+        "\n"
+        "This endpoint takes a gene SYMBOL. BRD4 resolves; BRD4ET does not, "
+        "because it names a domain construct rather than a gene. Upload a "
+        "construct with POST /api/proteins/upload-pdb and target the id it "
+        "returns, or pass pdb_code= to pin the structure."
+    )
+
+
+def _pocket_features_unreachable(gene: str) -> LigandAIParameterNotForwarded:
+    """The featurizer route is NOT THERE — nothing answered with a pocket.
+
+    Reserved for the case where the response cannot have come from the
+    featurizer at all: an unmounted API path on a single-page-app server
+    commonly returns 200 with the app shell rather than a 404, so "a response
+    with no features and no featurizer error code" is the observable signature
+    of a missing route.
+
+    ⛔ It is NOT raised for a gene the mounted featurizer simply cannot
+    featurize — see :func:`_pocket_features_no_pocket`. Collapsing the two made
+    every unresolvable gene look like a platform gap.
     """
     return LigandAIParameterNotForwarded(
         f"pocket features for {gene!r} are not reachable from this API surface. "
         f"The featurizer endpoint exists and is what the generation path calls "
-        f"internally, but it is not mounted on the public API, so a client cannot "
-        f"build its own contrastive reference panel yet.\n"
+        f"internally, but this server does not mount it on the public API, so a "
+        f"client cannot build its own contrastive reference panel here.\n"
         f"\n"
-        f"What works today: run a v6.9-line model and let the platform derive its "
-        f"own real paralog references — it refuses the run rather than generating "
-        f"against a fabricated one. What does not work: choosing the panel, or "
-        f"reading back which paralogs were used.",
+        f"What works on such a server: run a v6.9-line model and let the platform "
+        f"derive its own real paralog references — it refuses the run rather than "
+        f"generating against a fabricated one. What does not work: choosing the "
+        f"panel, or reading back which paralogs were used.",
         parameter="pocket_features",
         reached="internal featurizer service",
         dropped_at="public API surface (endpoint not mounted)",
@@ -175,6 +211,19 @@ class PanelLeg:
     scaffold_mediated_draws: list[bool] = field(default_factory=list)
     not_computed: int = 0
     """Draws whose ``peptide_ipsae`` was NULL — indeterminate, not a zero."""
+    peptide_ipsae_statuses: list[str] = field(default_factory=list)
+    """The platform's OWN reason per NULL draw, from ``peptide_ipsae_status``.
+
+    ⛔ Without this, "the binder metric was never computed" and "this design has
+    no measurable interface" are the same empty panel to the caller. The platform
+    distinguishes them and says which; dropping that turned a known unmeasured
+    run into a silent zero-survivor result. [bd-dre-if562]
+    """
+
+    @property
+    def not_computed_reasons(self) -> tuple[str, ...]:
+        """Distinct reasons this leg has no ``peptide_ipsae``, platform-stated."""
+        return tuple(dict.fromkeys(s for s in self.peptide_ipsae_statuses if s))
 
     @property
     def n_draws(self) -> int:
@@ -312,6 +361,14 @@ class PanelResult:
         self.legs = legs
         self.requested_draws = int(requested_draws)
         self.statistic: LegStatistic = statistic
+        #: ``(receptor, error)`` for every leg whose fold wait did not complete.
+        #: Non-empty means this panel is missing measurements it asked for — the
+        #: affected rows come back incomplete, never as a zero.
+        self.wait_errors: list[tuple[str, Exception]] = []
+        #: Receptors whose batch handle carried no per-sub-job entries, so no leg
+        #: could be built from it. Today the only way that happens is the local
+        #: 24h dedupe returning a cached batch id; see :meth:`Campaigns.fold_panel`.
+        self.unmapped_submissions: list[str] = []
 
     # ─── introspection ──────────────────────────────────────────────────────
 
@@ -528,6 +585,17 @@ class PanelResult:
             "n_partial_upper_bounds_not_verdicts": len(partial),
             "n_excluded_scaffold_mediated": n_scaffold_excluded,
             "n_no_target_leg": n_incomplete_target,
+            # ⛔ Reading this is the difference between "nothing passed" and
+            # "nothing was scored". Keyed by the platform's own status string.
+            "peptide_ipsae_not_computed_reasons": {
+                why: sum(
+                    1 for leg in self.legs.values()
+                    if why in leg.not_computed_reasons
+                )
+                for why in dict.fromkeys(
+                    w for leg in self.legs.values() for w in leg.not_computed_reasons
+                )
+            },
             "n_pass_both": sum(1 for r in complete if r.verdict == "PASS_BOTH"),
             "n_indistinguishable": sum(
                 1 for r in complete if r.verdict == "INDISTINGUISHABLE"
@@ -608,6 +676,7 @@ class PanelResult:
                 "quality_tier": next((t for t in leg.quality_tiers if t), None),
                 "scaffold_mediated": leg.scaffold_mediated,
                 "not_computed_draws": leg.not_computed,
+                "peptide_ipsae_status": list(leg.not_computed_reasons),
                 "fold_job_ids": list(leg.fold_job_ids),
             })
         return out
@@ -708,10 +777,25 @@ class Campaigns(Resource):
         ``GET /api/pocket-features/{gene}``
 
         Pass ``model=`` to take the width from the model registry, or ``dim=``
-        to state it. Whichever you give, the returned matrix is checked against
-        it and the call FAILS on a mismatch. It never pads or slices: a 48-wide
-        pocket is not a truncated 107-wide one, and converting between them
-        hands the generator geometry where it expects composition.
+        to state it. Either way the width is REQUESTED from the featurizer and
+        the returned matrix is then checked against it, so a mismatch is an
+        error on both sides. Nothing pads or slices anywhere on this path: a
+        48-wide pocket is not a truncated 107-wide one, and converting between
+        them hands the generator geometry where it expects composition.
+
+        ⛔ The width is a SERVER-SIDE resolution, and that is the whole point.
+        It used to be a client-side assertion only — the request went out
+        without it, the endpoint answered with its native 48, and every v6.9
+        panel failed the check it could never have passed. The featurizer
+        resolves a width from its cached per-width tensors, from provably
+        related blocks, or by recomputing from the stored structure, and
+        refuses widths it cannot build.
+
+        Widths other than 48 are entitled: the geometric / all-atom blocks the
+        v6.9 line consumes are Ligandal-internal, so a caller without that
+        entitlement gets a 403 naming the alternative (run a v6.9-line model
+        and let the platform derive its own real panel) rather than a reshaped
+        matrix.
         """
         want = dim if dim is not None else model_pocket_feature_dim(model)
         params: dict[str, Any] = {}
@@ -723,18 +807,35 @@ class Campaigns(Resource):
             params["chains"] = chains
         if target_residues:
             params["target_residues"] = ",".join(str(int(r)) for r in target_residues)
+        # ⛔ ASK for the width. `want` is None only when the caller named neither
+        # a dim nor a known model, and then the featurizer's native width is the
+        # right answer; sending dim= in that case would pin a width nobody chose.
+        if want is not None:
+            params["dim"] = int(want)
         try:
             payload = self._transport.request(
                 "GET", _POCKET_FEATURES_PATH.format(gene=gene), params=params or None
             ) or {}
         except LigandAINotFoundError as exc:
+            # ⛔ TWO DIFFERENT FACTS, ONE STATUS CODE. The mounted featurizer
+            # returns 404 + a named error code when it looked and this gene has
+            # no extractable pocket; an unmounted route returns 404 with nothing
+            # of the sort. Reporting the first as "the API does not carry this
+            # surface" sent callers to the platform instead of to their gene
+            # name, which is how "BRD4ET" read as a missing endpoint.
+            body = getattr(exc, "response", None) or {}
+            code = str((body or {}).get("error") or "").lower()
+            if code in _POCKET_FEATURES_LOOKED_AND_FAILED:
+                raise _pocket_features_no_pocket(
+                    gene, str((body or {}).get("message") or "") or None
+                ) from exc
             raise _pocket_features_unreachable(gene) from exc
 
         # ⛔ An UNMOUNTED route does not reliably 404. A single-page-app server
         # commonly answers an unknown /api path with 200 and the app shell, so
-        # "no features in the response" is the same observation as "the endpoint
-        # is not there" and must produce the same actionable error — not an
-        # opaque one about a missing key.
+        # "no features and no featurizer error code in the response" is the same
+        # observation as "the endpoint is not there" and must produce the same
+        # actionable error — not an opaque one about a missing key.
         feats = (payload or {}).get("features") if isinstance(payload, dict) else None
         if not feats:
             reason = ""
@@ -742,9 +843,7 @@ class Campaigns(Resource):
                 reason = str(payload.get("error") or payload.get("pocket_source") or "")
             if not isinstance(payload, dict) or not reason:
                 raise _pocket_features_unreachable(gene)
-            raise LigandAIError(
-                f"no pocket features returned for {gene!r}: {reason}"
-            )
+            raise _pocket_features_no_pocket(gene, reason)
         matrix = PocketFeatureMatrix(
             rows=feats,
             gene=payload.get("gene") or gene,
@@ -836,6 +935,7 @@ class Campaigns(Resource):
         sampling_steps: int = 50,
         msa_enabled: bool | None = True,
         statistic: LegStatistic = "median",
+        force_fresh: bool = False,
         wait: bool = True,
         timeout: float = 7200.0,
         poll_interval: float = 15.0,
@@ -862,8 +962,15 @@ class Campaigns(Resource):
         the returned ``fold_job_ids`` — they are the only handle on a specific
         draw.
 
+        ``force_fresh=True`` bypasses the dedupe for EVERY draw, not just the
+        second onward. Use it whenever these designs may already have been folded
+        against these receptors in the last 24h — otherwise draw 0 comes back as a
+        cached batch handle with no sub-jobs, no leg can be built from it, and the
+        receptor lands in :attr:`PanelResult.unmapped_submissions` with nothing
+        measured. :meth:`replicate` sets it for you.
+
         Cost scales as ``len(sequences) × (1 + len(off_targets)) × replicates``
-        fold jobs. Check it with ``client.account`` before a large panel.
+        fold jobs. Check it with ``client.account.credits()`` before a large panel.
         """
         seqs = [_norm_seq(s) for s in sequences]
         if not seqs:
@@ -884,6 +991,18 @@ class Campaigns(Resource):
         replicates = int(replicates)
         if replicates < 1:
             raise LigandAIValidationError("replicates must be >= 1")
+        if "force_resubmit" in fold_kwargs:
+            # It would otherwise reach fold_batch twice and die with a bare
+            # "got multiple values for keyword argument", which reads like a
+            # bug in the SDK rather than the wrong knob name.
+            raise LigandAIValidationError(
+                "pass force_fresh=True, not force_resubmit. fold_panel sets "
+                "force_resubmit per draw itself (draw 0 reuses the local 24h "
+                "dedupe, later draws must not), so it is not a knob a caller "
+                "can set per submission. force_fresh=True bypasses the dedupe "
+                "for EVERY draw, which is what you want when re-measuring "
+                "designs you have already folded."
+            )
 
         peptides_res = getattr(self._client, "peptides", None)
         if peptides_res is None:
@@ -900,15 +1019,30 @@ class Campaigns(Resource):
                     msa_enabled=msa_enabled,
                     # Every replicate after the first must be a REAL new fold,
                     # not the dedupe handing back the first one's result.
-                    force_resubmit=draw > 0,
+                    # ⛔ ...and so must EVERY draw when the caller asked for a
+                    # fresh measurement of designs it has already folded, which
+                    # is precisely what `replicate()` is for. Without
+                    # `force_fresh`, draw 0 of a re-fold inside the 24h dedupe
+                    # window comes back as a cached batch handle carrying NO
+                    # per-sub-job entries, so the panel builds zero legs and the
+                    # "independent draw" measures nothing. [bd-dre-if562]
+                    force_resubmit=bool(force_fresh) or draw > 0,
                     **fold_kwargs,
                 )
                 submissions.append((receptor, job))
 
         legs: dict[tuple[str, str], PanelLeg] = {}
         job_index: dict[str, tuple[str, str]] = {}
+        unmapped: list[str] = []
         for receptor, job in submissions:
-            for entry in job.jobs:
+            entries = list(getattr(job, "jobs", None) or [])
+            if not entries:
+                # A batch handle with no sub-job entries cannot be mapped back to
+                # a (sequence, receptor) leg. Recorded rather than silently
+                # yielding an empty panel that reads like a measured null.
+                unmapped.append(receptor)
+                continue
+            for entry in entries:
                 jid = str(entry.get("job_id") or entry.get("jobId") or "").strip()
                 idx = entry.get("peptide_index")
                 raw_seq = entry.get("sequence")
@@ -930,11 +1064,26 @@ class Campaigns(Resource):
             requested_draws=replicates,
             statistic=statistic,
         )
+        result.unmapped_submissions = unmapped
         if not wait:
             return result
 
+        # ⛔ `BatchFoldJob.wait()` takes (timeout, poll_interval, on_progress) and
+        # NOTHING ELSE. It was called here with `raise_on_failure=False`, a kwarg
+        # that has never existed on it, so every waiting panel — and therefore
+        # `replicate()` and every `RecursiveCampaign.run_round()` — died with a
+        # bare TypeError AFTER submitting (and paying for) the whole panel. The
+        # kwarg was also unnecessary: `wait()` already counts failed sub-jobs and
+        # returns, raising only on timeout. [bd-dre-if562]
         for _receptor, job in submissions:
-            job.wait(timeout=timeout, poll_interval=poll_interval, raise_on_failure=False)
+            try:
+                job.wait(timeout=timeout, poll_interval=poll_interval)
+            except LigandAIError as exc:
+                # One receptor timing out must not discard the rest of the panel:
+                # those folds are submitted, paid for, and real. The leg stays
+                # empty and `deltas()` reports the row as incomplete — which is
+                # exactly what it is — while `wait_errors` says why.
+                result.wait_errors.append((_receptor, exc))
 
         self._hydrate_metrics(result, job_index)
         return result
@@ -980,13 +1129,33 @@ class Campaigns(Resource):
                     leg.peptide_ipsae_draws.append(float(pi))
                 else:
                     leg.not_computed += 1
+                    # The platform says WHY, and it is the difference between
+                    # "not measurable" and "never measured". Observed live:
+                    # peptide_ipsae_status == "not_computed" on folds whose own
+                    # record carries interface_scores.ipsae. [bd-dre-if562]
+                    why = m.get("peptide_ipsae_status")
+                    if isinstance(why, str) and why.strip():
+                        leg.peptide_ipsae_statuses.append(why.strip())
                 for src, dest in (("iptm", leg.iptm_draws), ("plddt_mean", leg.plddt_draws)):
                     v = m.get(src)
                     if isinstance(v, (int, float)):
                         dest.append(float(v))
+                # ⛔ VERIFIED against a live filter_folds response (2026-09-22):
+                # quality_tier is {"criterion": "great_plus", "verdict":
+                # "indeterminate", "coValidated": false, "summary": "..."}. It
+                # carries neither "tier" nor "name", so reading only those two
+                # keys made the tier silently None on EVERY real row — while the
+                # module's own docstring promises the platform's tier is used
+                # rather than re-derived. `verdict` is the judgement; `criterion`
+                # is only the bar it was judged against, so verdict wins.
                 tier = row.get("quality_tier")
                 if isinstance(tier, dict):
-                    tier = tier.get("tier") or tier.get("name")
+                    tier = (
+                        tier.get("verdict")
+                        or tier.get("tier")
+                        or tier.get("name")
+                        or tier.get("criterion")
+                    )
                 leg.quality_tiers.append(tier if isinstance(tier, str) else None)
                 leg.scaffold_mediated_draws.append(bool(m.get("scaffold_mediated")))
 
@@ -1009,7 +1178,15 @@ class Campaigns(Resource):
 
         Returns the fresh panel and the hold report. Sequences the fresh panel
         could not measure come back as ``untested``, never as lost.
+
+        ⛔ Every draw here is submitted with the local 24h dedupe BYPASSED. The
+        shortlist reaching this method was, by construction, folded minutes ago
+        in the panel that selected it — so without the bypass the dedupe returns
+        the selecting panel's own cached batch and the "independent draw" is an
+        echo of the measurement it was supposed to test. Pass
+        ``force_fresh=False`` explicitly only when you want the cached handle.
         """
+        panel_kwargs.setdefault("force_fresh", True)
         panel = self.fold_panel(
             sequences,
             target=target,
@@ -1092,7 +1269,37 @@ class AsyncCampaigns(AsyncResource):
         "designs": "GET /api/campaign/{campaign_id}/leaderboard",
     }
 
+    #: Surfaces that exist on the SYNC :class:`Campaigns` and deliberately have
+    #: no async facade (see the class docstring). Named here so reaching for one
+    #: says "sync only" instead of raising a bare AttributeError that reads like
+    #: a typo -- the same defect class the guard below exists to prevent, one
+    #: attribute lookup away from it.
+    _SYNC_ONLY_SURFACE: ClassVar[tuple[str, ...]] = (
+        "contrastive_references",
+        "fold_panel",
+        "replicate",
+        "recursive",
+    )
+
     def __getattr__(self, name: str) -> Any:
+        if name in self._SYNC_ONLY_SURFACE:
+            raise LigandAISurfaceNotInThisPackage(
+                f"client.campaigns.{name}() exists, but only on the SYNC client.\n"
+                f"  you reached for : AsyncLigandAI(...).campaigns.{name}\n"
+                f"  where it lives  : LigandAI(...).campaigns.{name}\n"
+                f"  why             : {name} submits and waits on fold jobs, and an "
+                f"async facade over a blocking submit-and-wait would quietly block "
+                f"the event loop — so it is not shipped rather than shipped broken. "
+                f"AsyncCampaigns mirrors only the transport-free analysis surface "
+                f"(pocket_features, plus everything PanelResult computes — a "
+                f"PanelResult is usable from either client).\n"
+                f"  what to do      : build the panel on a sync LigandAI client, or "
+                f"run it in a worker thread (asyncio.to_thread).\n"
+                f"  tracking        : bd-dre-if562",
+                surface=name,
+                namespace="client.campaigns (async)",
+                server_routes=(),
+            )
         route = self._PLATFORM_CAMPAIGN_SURFACE.get(name)
         if route is None:
             raise AttributeError(
@@ -1132,15 +1339,31 @@ class AsyncCampaigns(AsyncResource):
         params: dict[str, Any] = {}
         if pdb_code:
             params["pdb_code"] = pdb_code
+        # Same contract as the sync surface: REQUEST the width, then check it.
+        # A client-side-only assertion can never pass for a v6.9 panel.
+        if want is not None:
+            params["dim"] = int(want)
         try:
             payload = await self._transport.request(
                 "GET", _POCKET_FEATURES_PATH.format(gene=gene), params=params or None
             ) or {}
         except LigandAINotFoundError as exc:
+            # Same two-facts-one-status split as the sync surface above.
+            body = getattr(exc, "response", None) or {}
+            code = str((body or {}).get("error") or "").lower()
+            if code in _POCKET_FEATURES_LOOKED_AND_FAILED:
+                raise _pocket_features_no_pocket(
+                    gene, str((body or {}).get("message") or "") or None
+                ) from exc
             raise _pocket_features_unreachable(gene) from exc
         feats = (payload or {}).get("features") if isinstance(payload, dict) else None
         if not feats:
-            raise _pocket_features_unreachable(gene)
+            reason = ""
+            if isinstance(payload, dict):
+                reason = str(payload.get("error") or payload.get("pocket_source") or "")
+            if not reason:
+                raise _pocket_features_unreachable(gene)
+            raise _pocket_features_no_pocket(gene, reason)
         matrix = PocketFeatureMatrix(
             rows=feats,
             gene=payload.get("gene") or gene,
@@ -1299,9 +1522,42 @@ class RecursiveCampaign:
             replicates=replicates,
             **panel_kwargs,
         )
+        if panel.unmapped_submissions:
+            # ⛔ An unmeasured panel and a panel of nulls produce the SAME empty
+            # verdict list, and the round would go on to report "0 survivors"
+            # as though it had looked. Say which receptors were never measured.
+            notes.append(
+                f"⛔ no legs could be built for receptor(s) "
+                f"{sorted(set(panel.unmapped_submissions))} — the batch came back "
+                f"as a cached handle with no sub-jobs (local 24h dedupe). Those "
+                f"rows are UNMEASURED, not negative. Re-run with "
+                f"panel_kwargs={{'force_fresh': True}}."
+            )
+        if panel.wait_errors:
+            notes.append(
+                f"⛔ fold wait did not complete for receptor(s) "
+                f"{sorted({r for r, _e in panel.wait_errors})}; affected rows are "
+                f"incomplete, not negative"
+            )
         complete, partial, summary = panel.deltas(
             band=self.band, target_leg_min=self.target_leg_min
         )
+        why = summary.get("peptide_ipsae_not_computed_reasons") or {}
+        if why and not complete:
+            # ⛔ "0 survivors" reads as a measurement. It is not one when the
+            # binder metric was never computed, and the platform said so.
+            notes.append(
+                f"⛔ NO design could be scored: the platform returned no "
+                f"peptide_ipsae for any leg (reasons {dict(why)}). This round "
+                f"measured NOTHING — it did not find that nothing binds. "
+                f"peptide_ipsae is the only metric selection runs on; iptm/plddt "
+                f"in the rows are not substitutes for it."
+            )
+        elif why:
+            notes.append(
+                f"peptide_ipsae unavailable on some legs (reasons {dict(why)}); "
+                f"those rows are incomplete, not negative"
+            )
         survivors = [r.sequence for r in complete if r.verdict == "PASS_BOTH"]
 
         spread = panel.observed_spread()

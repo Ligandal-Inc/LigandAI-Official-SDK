@@ -173,6 +173,8 @@ class AccountBalance(_LGModel):
     days_remaining: float | None = Field(
         default=None,
         validation_alias=AliasChoices("days_remaining", "daysRemaining", "runway_days"),
+        # Kept so model_dump(by_alias=True) still emits what it always emitted.
+        serialization_alias="daysRemaining",
     )
     tier: str | None = None
     auto_topup_enabled: bool | None = Field(default=None, alias="autoTopupEnabled")
