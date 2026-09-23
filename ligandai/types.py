@@ -162,8 +162,18 @@ class AccountBalance(_LGModel):
     """Current account balance and burn-rate summary."""
 
     credits: int = Field(alias="balance")
-    burn_rate_30d: int | None = Field(default=None, alias="burnRate30d")
-    days_remaining: float | None = Field(default=None, alias="daysRemaining")
+    # ⛔ A burn RATE is fractional by nature and the server sends it that way
+    # (``/api/billing/account-summary`` returned ``burn_rate_30d: 17.2``). Typed
+    # ``int`` it raised a raw pydantic ValidationError straight out of
+    # ``client.account.get_balance()`` — not a LigandAI* error, on the one call
+    # the fold/panel docs tell users to make before spending. [bd-dre-if562]
+    burn_rate_30d: float | None = Field(default=None, alias="burnRate30d")
+    # The same endpoint names the runway ``runway_days``; without the alias
+    # choice this field was silently None on every real response.
+    days_remaining: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("days_remaining", "daysRemaining", "runway_days"),
+    )
     tier: str | None = None
     auto_topup_enabled: bool | None = Field(default=None, alias="autoTopupEnabled")
 
@@ -809,8 +819,9 @@ class StructureAnalysis(_LGModel):
             f"empty pocket list — no verdict was reached. The SDK refuses to return it "
             f"as an analysis because an all-null StructureAnalysis is "
             f"indistinguishable from a real one.\n"
-            f"  what to do     : retry — the platform's suitability analyser falls back "
-            f"per-request, so a retry frequently succeeds. If it persists, the server is "
+            f"  what to do     : retry — whether the analyser reaches a verdict is "
+            f"response-dependent per request, so a retry frequently succeeds. If it "
+            f"persists, the server is "
             f"older than the fix for this endpoint (it returned 200 + all-null for its "
             f"entire life); upgrade the server or report the gene to support@ligandal.com. "
             f"For pockets/druggability/vacancy use "
