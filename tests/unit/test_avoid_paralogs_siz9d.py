@@ -511,8 +511,6 @@ def test_cfg_reference_provenance_from_wire_is_none_for_empty_or_non_dict():
 # confirmation their choice was honoured.
 # ═══════════════════════════════════════════════════════════════════════════
 
-from ligandai.contrastive import CfgReferenceProvenance  # noqa: E402
-
 _WIRE = {
     "generator_model_id": "v6.9.21",
     "expected_dim": 107,
