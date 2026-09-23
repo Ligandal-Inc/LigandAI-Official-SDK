@@ -44,6 +44,7 @@ from ligandai.thermo import (
     expected_false_positives,
     geometric_mean_kd,
     kd_bootstrap_ci,
+    kd_provenance_ok,
     multiplicity_note,
     selectivity_ratio,
     worst_case,
@@ -272,3 +273,44 @@ def test_nominal_hits_are_compared_against_chance():
     assert "does NOT exceed chance" in note["note"]
     note2 = multiplicity_note(n_hits=40, n_tests=200, alpha=0.05)
     assert note2["exceeds_chance"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Kd provenance — the v10.2 scorer, NOT calibration_head
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_v102_row_is_admissible_on_its_scorer_version():
+    ok, why = kd_provenance_ok({
+        "kd_nm": 86.197, "scorer_version": "v10_2_unified_parallel_2026_05_08",
+        "affinity_quotable": True,
+    })
+    assert ok is True and "v10_2_unified_parallel" in why
+
+
+def test_calibration_head_is_not_required_because_production_never_sets_it():
+    # ⛔ VERIFIED on production 2026-09-23: absent from every batch_score_fold
+    # response and NULL on all 43,668 persisted rows. Requiring it would refuse
+    # every real measurement while looking rigorous.
+    row = {"kd_nm": 86.197, "scorer_version": "v10_2_unified_parallel_2026_05_08"}
+    assert "calibration_head" not in row
+    assert kd_provenance_ok(row)[0] is True
+
+
+def test_the_v9_path_is_refused_by_name():
+    ok, why = kd_provenance_ok({"kd_nm": 0.4, "scorer": "compute_deltaforge_energy"})
+    assert ok is False
+    assert "v10.2" in why
+
+
+def test_a_row_with_no_scorer_at_all_is_refused():
+    assert kd_provenance_ok({"kd_nm": 12.0})[0] is False
+
+
+def test_a_platform_withheld_quote_is_refused_with_the_servers_own_code():
+    ok, why = kd_provenance_ok({
+        "kd_nm": 5.0, "scorer_version": "v10_2_unified_parallel_2026_05_08",
+        "affinity_quotable": False, "affinity_reason_code": "interface_type_tcr_pmhc",
+    })
+    assert ok is False
+    assert "interface_type_tcr_pmhc" in why

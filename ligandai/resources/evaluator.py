@@ -88,6 +88,7 @@ Domain rules enforced throughout:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ligandai.resources._base import AsyncResource, Resource
@@ -101,6 +102,50 @@ _EVALUATOR_CHAT      = "/api/v1/folds/evaluator-chat"
 
 # ─── Body builders ──────────────────────────────────────────────────────────
 
+def _normalize_deltaforge_scores(
+    scores: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add the ``fold_job_id`` the server merges on, without mutating the input.
+
+    ⛔ MEASURED ON PRODUCTION 2026-09-23. ``batch_score_fold`` emits the id as
+    ``foldJobId``; ``filter-by-criteria`` and ``empirical-evaluate`` build their
+    merge map from ``ds.fold_job_id`` (the same in the DEPLOYED blue bundle).
+    Nothing normalises between them, so passing ``dg["results"]`` verbatim — the
+    thing the docstrings instruct — merged NOTHING and returned
+    ``kd_nm: null`` while reporting success. Three live folds: null/null/null
+    passing the list as-emitted, 86.197/160.317/87.632 with this key added.
+
+    That silence is why every selection loop stayed ipSAE-only: selectivity is
+    ``min(off-target Kd) / on-target Kd`` and neither side ever arrived.
+
+    Rules this follows:
+
+    * the camelCase key is KEPT — discarding a field the caller handed us would
+      make this lossy on data we do not own;
+    * an existing ``fold_job_id`` WINS over ``foldJobId`` if the two disagree,
+      because rewriting it would re-attribute an affinity to another fold;
+    * a row with neither key is passed through untouched — it cannot merge, and
+      inventing an id would attach a Kd to an arbitrary fold;
+    * the caller's list and dicts are never mutated; they may hold
+      ``dg["results"]`` for a second call or for the run record.
+    """
+    out: list[dict[str, Any]] = []
+    for row in scores:
+        if not isinstance(row, Mapping):
+            raise TypeError(
+                "each deltaforge_scores entry must be a mapping (pass the "
+                "`results` list from client.deltaforge.batch_score_fold); got "
+                f"{type(row).__name__}"
+            )
+        row = dict(row)
+        if "fold_job_id" not in row:
+            camel = row.get("foldJobId")
+            if camel is not None:
+                row["fold_job_id"] = str(camel)
+        out.append(row)
+    return out
+
+
 def _filter_body(
     fold_job_ids: list[str],
     criteria: dict[str, Any],
@@ -113,7 +158,7 @@ def _filter_body(
         "criteria": criteria,
     }
     if deltaforge_scores is not None:
-        body["deltaforge_scores"] = deltaforge_scores
+        body["deltaforge_scores"] = _normalize_deltaforge_scores(deltaforge_scores)
     return body
 
 
@@ -128,7 +173,7 @@ def _empirical_body(
     if criteria is not None:
         body["criteria"] = criteria
     if deltaforge_scores is not None:
-        body["deltaforge_scores"] = deltaforge_scores
+        body["deltaforge_scores"] = _normalize_deltaforge_scores(deltaforge_scores)
     return body
 
 

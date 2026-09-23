@@ -154,6 +154,20 @@ from ligandai.multitarget import (
     CrossTargetAggregate,
     TargetSpec,
     aggregate_across_targets,
+    dual_objective_pass,
+)
+# The dual objective's shared primitives: ipSAE gates, DeltaForge Kd scores.
+# [bd-LIGANDAI_ALPHA_V2-jb73b]
+from ligandai.thermo import (
+    CONFIRM_MIN_DRAWS,
+    VALID_IPSAE,
+    MetricDirection,
+    SelectivityRatio,
+    geometric_mean_kd,
+    kd_bootstrap_ci,
+    kd_provenance_ok,
+    multiplicity_note,
+    selectivity_ratio,
 )
 from ligandai.resources.campaigns import (
     CampaignRound,
@@ -294,6 +308,17 @@ __all__ = [
     "MultiTargetDelta",
     "MultiTargetPartial",
     "aggregate_across_targets",
+    "dual_objective_pass",
+    # thermo primitives [bd-LIGANDAI_ALPHA_V2-jb73b]
+    "CONFIRM_MIN_DRAWS",
+    "VALID_IPSAE",
+    "MetricDirection",
+    "SelectivityRatio",
+    "geometric_mean_kd",
+    "kd_bootstrap_ci",
+    "kd_provenance_ok",
+    "multiplicity_note",
+    "selectivity_ratio",
     "CostEstimate",
     "CovalentAttachment",
     "DashboardHandle",

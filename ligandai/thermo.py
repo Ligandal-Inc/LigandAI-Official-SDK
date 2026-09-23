@@ -65,6 +65,9 @@ from ligandai.errors import LigandAIValidationError
 
 __all__ = [
     "VALID_IPSAE",
+    "V102_SCORER_NAMES",
+    "V102_SCORER_VERSION_PREFIX",
+    "kd_provenance_ok",
     "CONFIRM_MIN_DRAWS",
     "MetricDirection",
     "METRIC_DIRECTIONS",
@@ -112,6 +115,64 @@ DIRECTION_BY_METRIC: dict[str, MetricDirection] = {
     "kd_nm": "lower_is_better",
     "delta_g": "lower_is_better",
 }
+
+#: Scorer names the production v10.2 router reports. An admissible Kd must carry
+#: one of these (or a ``scorer_version`` starting with
+#: :data:`V102_SCORER_VERSION_PREFIX`).
+V102_SCORER_NAMES: frozenset[str] = frozenset({
+    "deltaforge_v10_2_unified_parallel",
+    "deltaforge_v10_boltz2_calibrated_gbr",
+})
+
+#: ``scorer_version`` prefix the v10.2 surface returns, e.g.
+#: ``"v10_2_unified_parallel_2026_05_08"``.
+V102_SCORER_VERSION_PREFIX: str = "v10_2_unified_parallel"
+
+
+def kd_provenance_ok(row: Mapping[str, Any]) -> tuple[bool, str]:
+    """Is this Kd attributable to the PRODUCTION v10.2 scorer?
+
+    Returns ``(ok, reason)``.
+
+    ⛔ DO NOT ASSERT ``calibration_head`` — VERIFIED ON PRODUCTION 2026-09-23.
+    It is not a v10.2 field: in ``deltaforge_v10_client.py`` only the **V9HQ**
+    branch ever sets ``calibration_head="v9hq_xray"``, the v10/v10.2 result
+    dicts never set it, it is absent from every ``batch_score_fold`` response,
+    and ``server/fold-thermo-join.ts`` records the column as NULL on all 43,668
+    persisted rows. An implementation that required it would refuse EVERY real
+    measurement while looking rigorous — a gate that rejects 100% of valid input
+    is indistinguishable from one that was never wired up.
+
+    What the API actually exposes, and what this checks instead, is
+    ``scorer_version`` / ``scorer``. That still does the job the
+    ``calibration_head`` assertion was reaching for: it separates the production
+    v10.2 router from ``compute_deltaforge_energy`` (the V9 path, whose bin
+    coefficients carry a 6.44 kcal/mol discontinuity at chain length 40 and a
+    wrong-signed entropy term below it — the same 4,255 structures gave 0 versus
+    32 single-digit-nM designs between the two).
+
+    ⛔ Also refuses a row the platform has marked non-quotable. DeltaForge's Kd
+    does not rank on every interface class (TCR-pMHC r=+0.02; symmetric /
+    multi-component r=−0.17, i.e. worse than ignoring it), so the server
+    withholds the quote and says why. A withheld number is a decision to
+    respect, not a null to fill in.
+    """
+    if row.get("affinity_quotable") is False:
+        code = row.get("affinity_reason_code") or "affinity_not_quotable"
+        return False, f"withheld by the platform affinity gate: {code}"
+    version = row.get("scorer_version")
+    if isinstance(version, str) and version.startswith(V102_SCORER_VERSION_PREFIX):
+        return True, f"scorer_version={version}"
+    scorer = row.get("scorer") or row.get("affinity_scorer")
+    if isinstance(scorer, str) and scorer in V102_SCORER_NAMES:
+        return True, f"scorer={scorer}"
+    return False, (
+        f"not attributable to the production v10.2 scorer "
+        f"(scorer_version={version!r}, scorer={scorer!r}); expected a version "
+        f"starting {V102_SCORER_VERSION_PREFIX!r} or one of "
+        f"{sorted(V102_SCORER_NAMES)}"
+    )
+
 
 # Gas constant × 298.15 K, in kcal/mol — the temperature DeltaForge calibrates at.
 _RT_KCAL: float = 0.001987204258640832 * 298.15
