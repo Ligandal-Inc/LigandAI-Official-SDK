@@ -314,3 +314,54 @@ def test_a_platform_withheld_quote_is_refused_with_the_servers_own_code():
     })
     assert ok is False
     assert "interface_type_tcr_pmhc" in why
+
+
+# ─── Non-positive denominator [bd-LIGANDAI_ALPHA_V2-jb73b.5] ────────────────
+#
+# selectivity_ratio() guarded `on_target_kd_nm is None` but never `> 0`, so a
+# computed 0.0 — a value the scorer really emits — raised ZeroDivisionError out
+# of a function whose whole contract is to return an explicit refusal rather
+# than a bad number. RED before the fix:
+#     ZeroDivisionError: float division by zero
+
+import math
+
+import pytest
+
+from ligandai.thermo import selectivity_ratio
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.5, -0.0, math.nan])
+def test_nonpositive_on_target_kd_refuses_instead_of_dividing(bad):
+    r = selectivity_ratio(
+        on_target_kd_nm=bad,
+        off_target_kd_nm={"X": 100.0},
+        on_target_n_draws=2,
+    )
+    # No raise, and no number invented.
+    assert r.ratio is None
+    assert r.reason == "on_target_nonpositive"
+    assert r.quotable is False
+
+
+def test_a_zero_denominator_is_not_infinite_selectivity():
+    r = selectivity_ratio(
+        on_target_kd_nm=0.0,
+        off_target_kd_nm={"X": 100.0},
+        on_target_n_draws=2,
+    )
+    assert r.ratio is not math.inf
+    assert r.ratio is None
+
+
+def test_a_real_ratio_is_unaffected_and_picks_the_TIGHTEST_off_target():
+    # Positive control: the guard must not suppress a legitimate ratio, and the
+    # tightest off-target is the Kd ARGMIN (biggest risk), not the ipSAE argmax.
+    r = selectivity_ratio(
+        on_target_kd_nm=1.0,
+        off_target_kd_nm={"X": 100.0, "Y": 20.0},
+        on_target_n_draws=2,
+    )
+    assert r.ratio == 20.0
+    assert r.reason == "ok"
+    assert r.tightest_off_target == "Y"

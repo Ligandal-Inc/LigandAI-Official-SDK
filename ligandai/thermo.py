@@ -319,6 +319,7 @@ RatioReason = Literal[
     "on_target_missing",
     "off_targets_missing",
     "on_target_not_gated",
+    "on_target_nonpositive",
 ]
 
 
@@ -406,6 +407,19 @@ def selectivity_ratio(
         return _no("on_target_not_gated",
                    f"On-target peptide ipSAE below {VALID_IPSAE}: DeltaForge "
                    f"scored a non-interface, so the denominator is not an affinity.")
+    # ⛔ A NON-POSITIVE DENOMINATOR IS A REFUSAL, NOT A DIVISION.
+    # This guarded `is None` but never `> 0`, and 0.0 is a value the scorer really
+    # emits, so selectivity_ratio(on_target_kd_nm=0.0, ...) raised
+    # ZeroDivisionError out of a function whose entire contract is "return an
+    # explicit refusal rather than a bad number". Reported by the SDK panel worker,
+    # which had guarded its own call site; every other caller was still exposed.
+    # A zero or negative Kd is not an infinitely selective design — it is a
+    # scorer output that cannot be a denominator.
+    if not on_target_kd_nm > 0:
+        return _no("on_target_nonpositive",
+                   f"On-target Kd is {on_target_kd_nm:.3g} nM, which cannot be a "
+                   f"denominator. A non-positive Kd is not an infinitely selective "
+                   f"design; it is a scorer output that carries no affinity.")
     if on_target_n_draws < min_draws:
         return _no("on_target_unconfirmed",
                    f"On-target leg has {on_target_n_draws} independent draw(s); "
