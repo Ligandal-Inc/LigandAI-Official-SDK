@@ -407,7 +407,7 @@ def test_kd_selectivity_leg_wire_shape() -> None:
             panel_comparator("CD8B", role="isoform"),
             panel_comparator("CD4", label="CD4 receptor", role="off_target"),
         ],
-        min_fold_selectivity=3.0,
+        min_kd_fold_selectivity=3.0,
     )
     assert leg == {
         "kind": "kd_selectivity",
@@ -423,7 +423,7 @@ def test_kd_selectivity_leg_wire_shape() -> None:
 
 def test_kd_selectivity_leg_requires_off_targets() -> None:
     with pytest.raises(LigandAIValidationError, match="off_target"):
-        kd_selectivity_criterion_leg(off_targets=[], min_fold_selectivity=3.0)
+        kd_selectivity_criterion_leg(off_targets=[], min_kd_fold_selectivity=3.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

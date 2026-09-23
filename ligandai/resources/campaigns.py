@@ -67,12 +67,13 @@ The loop this module makes expressible:
     * A Kd absent on ONE off-target leg makes the ratio an UPPER BOUND, exactly
       as a missing comparator does for Δ — see ``kd_upper_bound``, never
       ``kd_fold_selectivity``.
-    * ⛔ AND THE Kd IS NOT A VALIDATED WITHIN-TARGET ORDERING. Deployed v10.2
-      scored macro within-target Spearman **−0.0736** against measured pKd over
-      11 targets, while binder **LENGTH** scored **+0.1285** on the same rows.
-      So every row that carries a Kd also carries ``target_peptide_length``, and
-      nothing here re-ranks on Kd: :meth:`PanelResult.deltas` still orders on the
-      ipSAE Δ. A cross-target RATIO is the legitimate use — one scorer, one
+    * ⛔ AND THE Kd IS NOT A VALIDATED WITHIN-TARGET ORDERING. The deployed Kd
+      scorer has no measured-affinity evaluation on any row, so "design A's Kd
+      < design B's Kd, same target" is a reported number, never a validated
+      claim. So every row that carries a Kd also carries
+      ``target_peptide_length`` (the length confound travels with it), and
+      nothing here re-ranks on Kd: :meth:`PanelResult.deltas` still orders on
+      the ipSAE Δ. A cross-target RATIO is the legitimate use — one scorer, one
       binder, two receptors — and that is the only Kd claim this module makes.
 
 Refs: bd-dre-if562, bd-LIGANDAI_ALPHA_V2-jb73b.
@@ -341,8 +342,8 @@ class PanelLeg:
 
     ⛔ Not ``len(sequence)``: on a scaffolded construct the cassette is in the
     sequence and not in the binder chain the scorer saw. Carried because a
-    within-target Kd ordering is NOT a validated affinity ordering — v10.2
-    scored −0.0736 against measured pKd where length scored +0.1285 — so any
+    within-target Kd ordering is NOT a validated affinity ordering — the
+    deployed Kd scorer has no measured-affinity evaluation on any row — so any
     ordering that reads a Kd has to show the confound beside it.
     """
     kd_ipsae_gate: float | None = None
@@ -682,10 +683,9 @@ class SelectivityDelta(_KdReadouts):
     """The length confound, present on every row that carries a Kd.
 
     ⛔ Here because a within-target Kd ordering is not a validated affinity
-    ordering: deployed v10.2 scored macro within-target Spearman −0.0736 against
-    measured pKd across 11 targets while binder LENGTH scored +0.1285 on the same
-    rows. The ratio across targets is the legitimate claim; an ordering WITHIN
-    one target has to show this column.
+    ordering: the deployed Kd scorer has no measured-affinity evaluation on
+    any row. The ratio across targets is the legitimate claim; an ordering
+    WITHIN one target has to show this column.
     """
     kd_scorer: str | None = None
     """Scorer behind the Kd. None when the legs disagree — provenance travels
@@ -1418,8 +1418,8 @@ class PanelResult:
                 sorted(set(pos_kd_missing) | set(pos_kd_nonpositive))
             ),
             # ⛔ The confound. A within-target Kd ordering is not a validated
-            # affinity ordering (v10.2 macro Spearman -0.0736 vs measured pKd;
-            # LENGTH +0.1285 on the same rows), so length travels beside it.
+            # affinity ordering — the deployed Kd scorer has no measured-
+            # affinity evaluation on any row — so length travels beside it.
             "target_peptide_length": (
                 length_leg.peptide_length if length_leg is not None else None
             ),
@@ -1509,9 +1509,8 @@ class PanelResult:
         ⛔ STILL RANKED ON THE ipSAE Δ, AND DELIBERATELY SO. Every row now also
         carries the DeltaForge Kd and the selectivity ratio, but the ORDER is
         unchanged, because a within-target Kd ordering is not a validated
-        affinity ordering: deployed v10.2 scored macro within-target Spearman
-        −0.0736 against measured pKd over 11 targets, while binder LENGTH scored
-        +0.1285 on the same rows. Re-ranking on Kd would sort the panel partly by
+        affinity ordering: the deployed Kd scorer has no measured-affinity
+        evaluation on any row. Re-ranking on Kd would sort the panel partly by
         peptide length and call the result affinity. The cross-target RATIO is
         the legitimate Kd claim and it is reported, never sorted on.
         """

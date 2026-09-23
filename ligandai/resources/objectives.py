@@ -264,17 +264,30 @@ def panel_completeness_criterion_leg(
 def kd_selectivity_criterion_leg(
     *,
     off_targets: list[dict[str, Any]],
-    min_fold_selectivity: float,
+    min_kd_fold_selectivity: float,
     null_corrected: bool = True,
     on_target_ipsae_gate: float = 0.67,
 ) -> dict[str, Any]:
     """Declare a Kd-selectivity acceptance leg.
 
+    ⛔ ONE NAME FOR ONE RATIO. ``min_kd_fold_selectivity`` is deliberately the
+    SAME parameter name :meth:`~ligandai.resources.campaigns.Campaigns.replicate`
+    already uses for this exact quantity (``min(off-target Kd) / on-target
+    Kd``) when checking it CLIENT-SIDE against an already-folded
+    :class:`~ligandai.resources.campaigns.PanelResult`. This function does not
+    call into that machinery — it only builds the wire body for a SERVER-side
+    declared objective, evaluated by ``shared/campaign-criteria/evaluate.ts``
+    against the platform's own DB — but the two are the same real-world ratio
+    and must never carry two different spellings. The mapping onto the wire is
+    explicit and singular: ``min_kd_fold_selectivity`` → ``"minFoldSelectivity"``
+    (the server leg's own field name, ``KdSelectivityCriterionLeg`` in
+    ``shared/campaign-criteria/types.ts``) — never re-derive one from the other.
+
     Wire shape: ``{"kind": "kd_selectivity", "offTargets", "minFoldSelectivity",
-    "nullCorrected", "onTargetIpsaeGate"}`` — the server's OWN camelCase field
-    names (``shared/campaign-criteria/types.ts`` ``KdSelectivityCriterionLeg``),
-    never snake_cased on the wire even though this function's own arguments are.
-    Build ``off_targets`` entries with :func:`panel_comparator`.
+    "nullCorrected", "onTargetIpsaeGate"}`` — every OTHER field is also the
+    server's own camelCase name, never snake_cased on the wire even though this
+    function's own arguments are. Build ``off_targets`` entries with
+    :func:`panel_comparator`.
 
     ⛔ THE MEASUREMENT RULES THIS LEG GATES ON — read before use:
 
@@ -322,10 +335,10 @@ def kd_selectivity_criterion_leg(
     off_targets
         The comparator panel this design must be selective over — a list of
         :func:`panel_comparator` dicts. Passed through byte-exact.
-    min_fold_selectivity
+    min_kd_fold_selectivity
         Minimum ``min(off-target Kd) / on-target Kd`` to satisfy this leg.
         > 1 means the on-target Kd must be the tighter binder by at least this
-        factor.
+        factor. Wire name: ``minFoldSelectivity``.
     null_corrected
         Whether the min-of-k null correction is applied. Default ``True``.
     on_target_ipsae_gate
@@ -343,7 +356,9 @@ def kd_selectivity_criterion_leg(
     return {
         "kind": "kd_selectivity",
         "offTargets": list(off_targets),
-        "minFoldSelectivity": float(min_fold_selectivity),
+        # ⛔ min_kd_fold_selectivity -> minFoldSelectivity is the ONLY mapping
+        # for this ratio anywhere in the SDK. Do not introduce a second one.
+        "minFoldSelectivity": float(min_kd_fold_selectivity),
         "nullCorrected": bool(null_corrected),
         "onTargetIpsaeGate": gate,
     }
