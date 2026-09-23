@@ -586,6 +586,23 @@ class AsyncGoalCampaign:
 
 
 class Goals(Resource):
+    """Sync ``client.goals`` — goal-directed campaign engine and AutoResearch runs.
+
+    Two surfaces:
+
+    **AutoResearch (persistent multi-step runs):**
+    ``start()``, ``list()``, ``get()``, ``graph()``, ``stream()``,
+    ``pause()``, ``resume()``, ``stop()``.
+
+    **Goal-campaign engine (iterative design loops):**
+    ``campaign_scan()``, ``campaign_start()``, ``campaign_status()``,
+    ``campaign_stream()``, ``campaign_cancel()``, ``campaign_cross_validate()``.
+
+    **High-level one-call driver:**
+    ``drive()`` — express an abstract objective and receive a
+    :class:`GoalCampaign` handle you can ``.wait()`` or ``.stream()``.
+    """
+
     def estimate(
         self,
         *,
@@ -643,24 +660,6 @@ class Goals(Resource):
         if round_cfg:
             body["round"] = round_cfg
         return self._transport.request("POST", "/api/objectives/estimate", json=body) or {}
-
-
-    """Sync ``client.goals`` — goal-directed campaign engine and AutoResearch runs.
-
-    Two surfaces:
-
-    **AutoResearch (persistent multi-step runs):**
-    ``start()``, ``list()``, ``get()``, ``graph()``, ``stream()``,
-    ``pause()``, ``resume()``, ``stop()``.
-
-    **Goal-campaign engine (iterative design loops):**
-    ``campaign_scan()``, ``campaign_start()``, ``campaign_status()``,
-    ``campaign_stream()``, ``campaign_cancel()``, ``campaign_cross_validate()``.
-
-    **High-level one-call driver:**
-    ``drive()`` — express an abstract objective and receive a
-    :class:`GoalCampaign` handle you can ``.wait()`` or ``.stream()``.
-    """
 
     # ── AutoResearch (persistent runs) ───────────────────────────────────────
 

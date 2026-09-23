@@ -83,6 +83,7 @@ from ligandai.resources.linker_modifications import (
 )
 from ligandai.resources.memory import AsyncMemory, Memory
 from ligandai.resources.msa import MSA, AsyncMSA
+from ligandai.resources.objectives import AsyncObjectives, Objectives
 from ligandai.resources.peptides import AsyncPeptides, Peptides
 from ligandai.resources.programs import AsyncPrograms, Programs
 from ligandai.resources.proteins import AsyncProteins, Proteins
@@ -679,6 +680,10 @@ class LigandAI(_ClientCommon):
         self.ligands: Ligands = Ligands(self._transport, client=self)
         self.memory: Memory = Memory(self._transport)
         self.msa: MSA = MSA(self._transport)
+        # Run-until-criteria campaigns — shared/campaign-criteria vocabulary,
+        # /api/ptf/campaigns*. Distinct from client.goals' hit-target-mode
+        # vocabulary. [bd-LIGANDAI_ALPHA_V2-zwiz5.4]
+        self.objectives: Objectives = Objectives(self._transport, client=self)
         self.peptides: Peptides = Peptides(self._transport, client=self)
         # Singular alias: users (and AI assistants) reach for `client.peptide`.
         self.peptide: Peptides = self.peptides
@@ -1130,6 +1135,8 @@ class AsyncLigandAI(_ClientCommon):
         self.ligands: AsyncLigands = AsyncLigands(self._transport, client=self)
         self.memory: AsyncMemory = AsyncMemory(self._transport)
         self.msa: AsyncMSA = AsyncMSA(self._transport)
+        # Run-until-criteria campaigns. [bd-LIGANDAI_ALPHA_V2-zwiz5.4]
+        self.objectives: AsyncObjectives = AsyncObjectives(self._transport, client=self)
         self.peptides: AsyncPeptides = AsyncPeptides(self._transport, client=self)
         # singular alias + DeltaForge scoring namespace.
         self.peptide: AsyncPeptides = self.peptides
