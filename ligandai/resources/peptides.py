@@ -1074,7 +1074,10 @@ def _generation_body(
     # receptor pockets at sampling time. See ligandai.contrastive.
     contrastive: "ContrastiveGuidance | None",
     allow_unforwarded_contrastive: bool,
-    extra: dict[str, Any] | None,
+    # SUPERADMIN-ONLY GPU routing. Emitted ONLY when true, so a body from a
+    # caller who never heard of this flag is byte-identical to before.
+    local: bool = False,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Client-side targeting validation — BEFORE any HTTP call.
     # [bd-LIGANDAI_ALPHA_V2-x4vt8] target_residues/avoid_residues/hotspot_residues
@@ -1489,6 +1492,21 @@ def _generation_body(
             allow_unforwarded=bool(allow_unforwarded_contrastive),
         )
         body.update(contrastive.to_wire())
+
+    # ── SUPERADMIN-ONLY local (on-prem) GPU routing [bd-LIGANDAI_ALPHA_V2-d7b23]
+    # ⛔ EMITTED ONLY WHEN TRUE, and never as `false`. The platform's gate is
+    # "falsy is a complete no-op" (fastapi_backend/middleware/local_execution.py
+    # and the Express gateLocalGpuFlag) — sending `local: false` on every request
+    # would be harmless but would change the wire body for 100% of callers, and
+    # the whole design of this flag is that the 99.9% who never set it pay no
+    # auth round-trip and see a byte-identical request.
+    # ⛔ A non-superadmin key that sets this gets HTTP 403 from the server, NOT a
+    # silent downgrade to Modal. That is deliberate and the SDK does not soften
+    # it: a caller who was quietly sent to the other machine would have a
+    # different bill and a different confidentiality posture with nothing in the
+    # response saying so.
+    if local:
+        body["local"] = True
 
     if extra:
         body.update(extra)
@@ -4145,6 +4163,8 @@ class Peptides(Resource):
         cascade_gate_metric: str = "ipsae",
         cascade_gate_threshold: float | None = 0.67,
         cascade_gate_top_n: int | None = None,
+        # ── Local (on-prem) GPU routing — SUPERADMIN ONLY (bd-d7b23) ────────
+        local: bool = False,
         # ── Contrastive guidance + avoidance (bd-dre-if562) ─────────────────
         contrastive: "ContrastiveGuidance | None" = None,
         avoidance: "AvoidancePolicy | None" = None,
@@ -4514,6 +4534,18 @@ class Peptides(Resource):
             md_relaxation_enabled: Enable MD relaxation when server-supported.
             num_trajectories: Diffusion samples / trajectories per folded
                 peptide. ReceptorDB defaults to 4; set 1 to reduce runtime.
+            local: **SUPERADMIN ONLY.** Route this run's GPU work onto Ligandal's
+                own cards (delta, via the gpusched broker) instead of Modal.
+                Changes three things at once and is gated for all three: the
+                cards are a shared finite tenancy, the sequences are computed on
+                a multi-tenant box rather than an isolated Modal container, and
+                the work is not metered as Modal spend. A key that is not a
+                platform superadmin gets **HTTP 403**, never a quiet fall back to
+                Modal — being told your work ran locally when it did not would
+                mean a different bill and a different confidentiality posture
+                with nothing in the response saying so. Left at ``False`` the
+                field is not sent at all and the request is byte-identical to
+                one from a caller who never heard of it.
             fold_engines: Opt-in ENSEMBLE auto-fold. ``None`` (default) or
                 ``["boltz2"]`` keeps the legacy single-Boltz-2 Phase-2 auto-fold
                 unchanged. Provide 1-5 of ``esmfold2``/``boltz2``/``protenix``/
@@ -4703,6 +4735,7 @@ class Peptides(Resource):
             cascade_gate_top_n=cascade_gate_top_n,
             contrastive=contrastive,
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
+            local=local,
             extra=extra,
         )
         payload = self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
@@ -7277,6 +7310,8 @@ class AsyncPeptides(AsyncResource):
         cascade_gate_metric: str = "ipsae",
         cascade_gate_threshold: float | None = 0.67,
         cascade_gate_top_n: int | None = None,
+        # ── Local (on-prem) GPU routing — SUPERADMIN ONLY (bd-d7b23) ────────
+        local: bool = False,
         # ── Contrastive guidance + avoidance (bd-dre-if562) ─────────────────
         contrastive: "ContrastiveGuidance | None" = None,
         avoidance: "AvoidancePolicy | None" = None,
@@ -7439,6 +7474,7 @@ class AsyncPeptides(AsyncResource):
             cascade_gate_top_n=cascade_gate_top_n,
             contrastive=contrastive,
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
+            local=local,
             extra=extra,
         )
         payload = await self._transport.request("POST", "/api/ptf/parallel/generate", json=body) or {}
