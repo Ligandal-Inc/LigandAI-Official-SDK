@@ -2025,6 +2025,73 @@ _MATURATION_422_CODES = {
 }
 
 
+#: ⛔ The Express→FastAPI spend-grant deny reasons, as the platform's own frozen
+#: table names them. The route is metered by a single-use EXECUTION GRANT that
+#: Express mints only AFTER it has reserved credits against a quote you accepted,
+#: so "no grant" is a statement about the AUTHORIZATION, not about your balance —
+#: and telling a customer "you need more credits" when the real problem is an
+#: unauthorized call sends them to the wrong fix.
+#:
+#: Two reasons are deliberately NOT distinguished here: a grant for a different
+#: surface and a grant for a different user are folded by the server into one
+#: message, because saying which would confirm the existence of the other. Do not
+#: un-fold them client-side.
+_SPEND_GRANT_REASONS: dict[str, str] = {
+    "SPEND_GRANT_MISSING": (
+        "this route is metered, and the call carried no spend authorization. "
+        "Accept a quote and pass it as quote= to start(); the platform mints the "
+        "execution grant after it reserves the credits. Nothing was queued and "
+        "nothing was charged."
+    ),
+    "SPEND_GRANT_MALFORMED": (
+        "the spend authorization could not be read. Accept a fresh quote — do not "
+        "hand-build or edit this token."
+    ),
+    "SPEND_GRANT_BAD_SIGNATURE": (
+        "the spend authorization did not verify. Accept a fresh quote; a token "
+        "that fails signature check is never retried."
+    ),
+    "SPEND_GRANT_EXPIRED": (
+        "the spend authorization expired before the run started. Accept a fresh "
+        "quote. ⛔ Nothing here refetches one for you: a price that moved after "
+        "you accepted it needs a NEW acceptance, and that decision is yours."
+    ),
+    "SPEND_GRANT_REQUEST_MISMATCH": (
+        "the request does not match the one that was priced and authorized. A "
+        "grant covers the EXACT inputs it was quoted for — change the spec and it "
+        "has to be re-quoted, or the ceiling you accepted would not be the "
+        "ceiling that runs."
+    ),
+    "SPEND_GRANT_CEILING_EXCEEDED": (
+        "this run prices above the ceiling the authorization covers. Re-quote and "
+        "decide whether the new number is acceptable; the SDK will not raise a "
+        "ceiling on your behalf."
+    ),
+    "SPEND_GRANT_REPLAYED": (
+        "this spend authorization was already used. Each one is single-use, so a "
+        "second campaign needs a second acceptance — that is what stops a lost "
+        "response from turning into two charged runs."
+    ),
+    "SPEND_GRANT_UNCONFIGURED": (
+        "the deployment cannot verify spend authorizations, so it refuses to run "
+        "GPU work rather than run it unmetered. This is a server-side "
+        "provisioning fault, not your call being wrong."
+    ),
+    "SPEND_GRANT_METER_UNAVAILABLE": (
+        "the platform cannot record what this run spends, so it will not start "
+        "it. Server-side, not your call."
+    ),
+    "SPEND_GRANT_PRICE_UNAVAILABLE": (
+        "the platform could not price this run, and refuses to guess. Server-side, "
+        "not your call."
+    ),
+    "SPEND_GRANT_CLAIM_FAILED": (
+        "the single-use claim on the authorization could not be recorded, so the "
+        "run was not started. A claim that cannot be recorded is not a claim."
+    ),
+}
+
+
 def _interpret_maturation_error(exc: LigandAIError, *,
                                 accepted_quote: dict[str, Any] | None = None) -> None:
     """Re-raise a server error with the rule that produced it attached.
@@ -2075,7 +2142,44 @@ def _interpret_maturation_error(exc: LigandAIError, *,
             response=dict(payload),
         ) from exc
 
-    # ── the credit-quote lifecycle the Express proxy will enforce ───────────
+    # ── the credit-authorization lifecycle the metered route enforces ──────
+    #
+    # ⛔ THIS LEG RUNS BEFORE THE GENERIC 402. A missing or stale spend grant
+    # arrives as a 402 too, and answering it with "you need more credits" points
+    # a customer at their balance when the actual problem is that the call was
+    # never authorized. Those are different fixes.
+    reason = str(
+        (detail or {}).get("reason") or payload.get("reason") or ""
+    ).strip().upper()
+    if err == "credit_authorization_required" or reason in _SPEND_GRANT_REASONS:
+        explanation = _SPEND_GRANT_REASONS.get(
+            reason,
+            "this route is metered and the call was not authorized to spend. "
+            "Accept a quote and pass it as quote= to start().",
+        )
+        message = (
+            f"{exc.message}\n"
+            f"  reason  : {reason or 'unspecified'}\n"
+            f"  meaning : {explanation}"
+        )
+        if status == 402 and isinstance(exc, LigandAICreditError):
+            raise LigandAICreditError(
+                message,
+                required=exc.required,
+                available=exc.available,
+                code=exc.code or reason or None,
+                status_code=status,
+                request_id=exc.request_id,
+                response=dict(payload),
+            ) from exc
+        raise LigandAIError(
+            message,
+            code=exc.code or reason or None,
+            status_code=status,
+            request_id=exc.request_id,
+            response=dict(payload),
+        ) from exc
+
     if status == 402 and isinstance(exc, LigandAICreditError):
         raise LigandAICreditError(
             f"{exc.message}\n"

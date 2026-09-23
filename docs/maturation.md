@@ -341,3 +341,13 @@ enforce — `quote_required` / `quote_invalid` (400) and `quote_expired` /
 `quote_inputs_changed` / `quote_superseded` (409). ⛔ Nothing here ever refetches
 a quote or relaunches at a new price: a price that moved after you accepted it
 needs a new acceptance, and that decision is yours.
+
+It also maps the platform's **spend-authorization** denials, which arrive as
+`credit_authorization_required` with a `reason`. ⛔ These are not balance
+problems, and this client does not report them as one: a missing, expired,
+replayed, or request-mismatched authorization means the call was never authorized
+to spend, and the fix is to accept a quote — not to top up. Each reason's message
+says which. A `SPEND_GRANT_UNCONFIGURED` / `_METER_UNAVAILABLE` /
+`_PRICE_UNAVAILABLE` / `_CLAIM_FAILED` is a server-side fault: the platform
+refuses to start GPU work it cannot price, meter or record, rather than running
+it unmetered. Nothing was queued and nothing was charged in any of these cases.

@@ -694,6 +694,59 @@ def test_sorting_by_contact_margin_is_refused():
     assert not t.calls              # refused locally — no request was made
 
 
+def test_a_missing_spend_grant_is_not_reported_as_a_low_balance():
+    """⛔ Observed live once the metered route landed: POST /mature denied with
+    402 credit_authorization_required / SPEND_GRANT_MISSING, and a generic 402
+    handler answered "you need at least 2000 credits". Those are different fixes
+    — one sends the customer to top up, the other to accept a quote."""
+    from ligandai.errors import LigandAICreditError
+    from ligandai.resources.maturation import _interpret_maturation_error
+
+    exc = LigandAICreditError(
+        '{"error":"credit_authorization_required"}',
+        status_code=402,
+        response={"detail": {"error": "credit_authorization_required",
+                             "reason": "SPEND_GRANT_MISSING", "grantId": None},
+                  "error": "credit_authorization_required"},
+    )
+    with pytest.raises(LigandAICreditError) as excinfo:
+        _interpret_maturation_error(exc)
+    msg = str(excinfo.value)
+    assert "SPEND_GRANT_MISSING" in msg
+    assert "Accept a quote" in msg
+    assert "nothing was charged" in msg
+    assert "at least" not in msg          # ⛔ not a balance problem
+
+
+@pytest.mark.parametrize("reason,marker", [
+    ("SPEND_GRANT_EXPIRED", "needs a NEW acceptance"),
+    ("SPEND_GRANT_REPLAYED", "single-use"),
+    ("SPEND_GRANT_REQUEST_MISMATCH", "EXACT inputs"),
+    ("SPEND_GRANT_CEILING_EXCEEDED", "will not raise a ceiling"),
+    ("SPEND_GRANT_UNCONFIGURED", "not your call being wrong"),
+])
+def test_each_spend_grant_reason_says_what_to_do_about_it(reason, marker):
+    from ligandai.errors import LigandAIError
+    from ligandai.resources.maturation import _interpret_maturation_error
+
+    exc = LigandAIError("denied", status_code=409,
+                        response={"detail": {"reason": reason}})
+    with pytest.raises(LigandAIError) as excinfo:
+        _interpret_maturation_error(exc)
+    assert marker in str(excinfo.value)
+
+
+def test_a_real_low_balance_still_reads_as_a_low_balance():
+    from ligandai.errors import LigandAICreditError
+    from ligandai.resources.maturation import _interpret_maturation_error
+
+    exc = LigandAICreditError("insufficient credits", status_code=402,
+                              response={"error": "insufficient_credits"})
+    with pytest.raises(LigandAICreditError) as excinfo:
+        _interpret_maturation_error(exc)
+    assert "2000 credits" in str(excinfo.value)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. Leaderboard rows and their populations
 # ─────────────────────────────────────────────────────────────────────────────
