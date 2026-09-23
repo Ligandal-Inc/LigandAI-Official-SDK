@@ -442,6 +442,23 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     # keeping the two in sync. These nine campaign codes were registered on the
     # platform and left unmirrored here, which turned that guard red on main.
     # [bd-dre-3jqok, mirroring bd-dre-7nn5h]
+    # [bd-dre-ic7jz] Added to catch the SDK registry up to shared/warnings.json,
+    # which gained both legs server-side. Without them a server warning under
+    # either code arrived with no title and no remediation.
+    "campaign_criteria_kd_selectivity_not_null_corrected": {
+        "severity": "warning",
+        "stage": "request",
+        "title": "Selectivity leg compares a raw min-of-k ratio with no bias correction",
+        "remediation": "min(off-target Kd)/on-target Kd is biased BELOW 1x by chance alone even for a design with no real selectivity, and the bias grows with the off-target panel size. Set nullCorrected: true so the ratio is divided by the measured null (shared/selectivity-null.json) before comparison, unless minFoldSelectivity was deliberately chosen to already account for this.",
+        "doc_anchor": "guides/run-until-criteria#kd-selectivity",
+    },
+    "campaign_criteria_kd_selectivity_uncovered_panel_size": {
+        "severity": "warning",
+        "stage": "request",
+        "title": "No measured null for this off-target panel size",
+        "remediation": "nullCorrected is true but shared/selectivity-null.json has no measured min-of-k null for this many off-targets. Every design against this leg will resolve to indeterminate until the null table is extended (re-run scripts/selectivity_min_of_k_null.py for the wider k range) or the panel is resized to a covered k.",
+        "doc_anchor": "guides/run-until-criteria#kd-selectivity",
+    },
     "campaign_criteria_no_ceiling": {
         "severity": "error",
         "stage": "request",

@@ -7,7 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
+### Added — an ambiguous target name is now ANSWERABLE, and can be decided once
+
+- **`LigandAIAmbiguousTarget` carries the candidates.** A name that matches
+  several of your own uploaded structures still refuses rather than guessing —
+  a silently-picked conformer folds, scores and reaches your results table
+  looking exactly like a correct answer, so "most recent upload wins" would be
+  indistinguishable from working. What changed is that the refusal can be
+  answered without a second call: catch it, read `.candidates` (each with
+  `upload_id`, `name`, `residue_count`, `chain_count`, `size_bytes`,
+  `uploaded_at`, `content_sha256`), and re-call with a chosen `user_pdb_id`.
+  The refusal now arrives at SUBMIT time (HTTP 409), before credits are spent,
+  instead of as a failed job minutes later.
+- **`client.targets.candidates(name)`** lists those structures without
+  submitting anything.
+- **`client.targets.choose(name, upload_id)` / `.choice()` / `.choices()` /
+  `.clear_choice()`** — decide once and stop being asked. ⛔ A saved choice is a
+  decision you made, never an inference: its only source is `"user"`, it is
+  visible on every surface that resolves through it, it is clearable, and it is
+  re-validated against the live candidates every time — a deleted or renamed
+  structure makes it *stale*, and a stale choice refuses rather than falling
+  through to whatever is left. `resolve()` still reports
+  `outcome == "ambiguous"` when a choice applies, because the name IS ambiguous;
+  the choice is how it gets answered.
+- **Duplicates are collapsed, not listed.** `user_proteins` has no
+  `content_sha256` column, so content-dedup was structurally unreachable for
+  every upload the SDK makes — one account's 41 rows named `BRD4ET` (3 real
+  structures and 38 duplicate re-uploads, many provoked by the resolver bug's own
+  fail → re-upload → retry loop) were reported as 41 distinct. Hashes are now
+  computed for colliding names, so candidates and `client.targets.list()` return
+  one entry per DISTINCT STRUCTURE, with `duplicate_count` / `duplicate_ids`
+  naming what was folded and `aliases` carrying any other name those rows
+  answered to — collapsing can never make a name unaddressable. Verified live:
+  41 → 3, and the account's full index 72 rows → 15 structures.
+- `TargetIndex` gained `.ambiguous` (structured collisions with their distinct
+  counts and which one you chose) and `.choices`; `NamedTarget` gained
+  `duplicate_count`, `duplicate_ids`, `size_bytes`, `chain_count`,
+  `residue_count`, `uploaded_at`, `chosen`.
+- New docs: [named targets](docs/named_targets.md).
+
+Refs: bd-LIGANDAI_ALPHA_V2-etbo3
+
+## [0.15.0] - 2026-09-23
+
+### Added — folds, lineage, panel depth
 - **A fold run on ligandai.com is a BATCH, and its designs are now addressable
   one at a time.** `client.folds.list_designs(job_id)` / `iter_designs(job_id)`
   enumerate every design a `ligandforge_folding` job produced, each with its own
@@ -112,9 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (some rows 0-1, some 0-100) and the platform normalises each row before averaging.
 
 
-## [0.15.0] - 2026-09-23
-
-### Added
+### Added — binder maturation
 - **`client.maturation` — the platform's binder maturation loop finally has a
   published client.** [bd-dre-rp11j.9, bd-dre-rp11j.9.1] The server has run an
   affinity/selectivity maturation loop since bd-dre-vd1fk.4.1 — fold, gate on
@@ -166,12 +207,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   are local, and making one of the five secretly drive a server-side campaign would
   give one namespace two unrelated behaviours.
 
-### Known limitation
-- `/api/campaign/*` is **not yet proxied through ligandai.com** — a call against
-  the public base URL returns 404, not 401. The metered proxy is in flight
-  (bd-dre-xfs48 / bd-LIGANDAI_ALPHA_V2-6qfgh). `start()` already accepts the
-  `quote=` that route will require and omits it from the wire when absent, so no
-  caller code changes when it lands.
+### Added — `client.maturation.estimate()`, the quote `start()` requires
+- `POST /api/campaign/mature/estimate`. Read-only: nothing is created and nothing
+  is charged. This is the **only** way to obtain the quote a metered deployment
+  demands — `objectives.estimate()` prices `/api/ptf/campaigns`, a DIFFERENT
+  surface, and a quote issued there is rejected here as `quote_invalid`. Without
+  it `start(quote=...)` documented a parameter no caller could fill.
+  ```python
+  quoted = client.maturation.estimate(spec)
+  print(quoted["estimate"]["ceilingCredits"])       # decide
+  run = client.maturation.start(spec, quote=quoted["quote"])
+  ```
+  ⛔ The quote is bound to the exact spec it priced (`inputsHash`) and to this
+  surface. Change the spec and it must be re-quoted — otherwise the ceiling you
+  agreed to is not the ceiling that runs. Nothing in this SDK accepts a quote on
+  your behalf, refetches an expired one, or re-prices after a refusal.
+
+### Availability
+- `/api/campaign/*` is **live on ligandai.com** — the metered Express proxy
+  (bd-dre-xfs48 / bd-LIGANDAI_ALPHA_V2-6qfgh) shipped. Verified against production
+  2026-09-23: `GET /api/campaign` → 200, `GET /api/campaign/{id}/status` → 404
+  *Campaign not found* for an id that does not exist, `POST
+  /api/campaign/mature/estimate` → 200 with a signed quote. The 0.15.0 draft of
+  this file said the routes were not yet proxied and returned 404; that is no
+  longer true and the docs have been corrected.
+- ⛔ `POST /api/campaign/mature` is metered and **fails closed**: it mints a
+  single-use execution grant after reserving credits against your accepted quote,
+  and a deployment that cannot mint one answers `503` with
+  `reason: "SPEND_GRANT_UNCONFIGURED"` and starts nothing, rather than run GPU
+  work unmetered. This client reports that as a server-side provisioning fault by
+  name instead of telling you to buy credits — they are different fixes. Reads
+  (`list`, `status`, `readout`, `leaderboard`, `structure`) are not metered and
+  are unaffected.
 
 ## [0.14.0] - 2026-09-21
 

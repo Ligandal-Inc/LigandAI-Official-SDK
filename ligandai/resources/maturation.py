@@ -27,16 +27,35 @@ has no ``mature``, and reaching for one says so by name rather than raising a ba
 
 PUBLIC AVAILABILITY
 -------------------
-⛔ As of this release the ``/api/campaign/*`` routes answer on the platform's
-internal FastAPI port but are **not yet proxied through ligandai.com** — a call
-against the public base URL returns 404, not 401. The Express proxy (quote →
-reserve → grant → meter → settle, so the GPU spend is metered rather than
-fail-open) is in flight under ``bd-dre-xfs48`` / ``bd-LIGANDAI_ALPHA_V2-6qfgh``.
-This client is built against the frozen server contract and is exercised against
-the internal port; it starts working publicly the moment that proxy lands, with
-no change here. :meth:`Maturation.start` already accepts the ``quote=`` the proxy
-will require (see :class:`~ligandai.resources.objectives.CampaignQuote`), and
-omits it entirely when you do not pass one, so the same call works against both.
+The ``/api/campaign/*`` routes are **live on ligandai.com**. The Express proxy
+(quote → reserve → grant → meter → settle, so the GPU spend is metered rather
+than fail-open) shipped under ``bd-dre-xfs48`` / ``bd-LIGANDAI_ALPHA_V2-6qfgh``.
+Verified against production 2026-09-23: ``GET /api/campaign`` → 200,
+``GET /api/campaign/{id}/status`` → 404 *Campaign not found* for an id that does
+not exist, ``POST /api/campaign/mature/estimate`` → 200 with a signed quote.
+
+⛔ THE START ROUTE IS METERED AND FAILS CLOSED. ``POST /api/campaign/mature``
+mints a single-use EXECUTION GRANT after it reserves credits against the quote
+you accepted. A deployment that cannot mint one answers ``503`` with
+``reason: "SPEND_GRANT_UNCONFIGURED"`` and starts nothing — it refuses to run GPU
+work unmetered rather than run it. That is a server-side provisioning fault, not
+your call being wrong, and :func:`_interpret_maturation_error` says so by name
+rather than telling you to buy credits. Reads (``list``, ``status``,
+``readout``, ``leaderboard``, ``structure``) are not metered and are unaffected.
+
+Get the quote from :meth:`Maturation.estimate`, which prices the SAME spec you
+are about to start and costs nothing::
+
+    quoted = client.maturation.estimate(spec)
+    print(quoted["estimate"]["ceilingCredits"])      # decide
+    run = client.maturation.start(spec, quote=quoted["quote"])
+
+⛔ The quote is bound to the EXACT spec it priced (``inputsHash``) and to this
+surface. Change the spec and it has to be re-quoted; a quote from another surface
+(e.g. :meth:`ligandai.resources.objectives.Objectives.estimate`, which prices
+``/api/ptf/campaigns``) is rejected as ``quote_invalid``. ``start`` omits the
+token entirely when you pass none, so the same call also works against an
+unmetered internal port.
 
 THE LOOP, PER CYCLE
 -------------------
@@ -123,6 +142,7 @@ otherwise be quotable and wrong.
 
 ENDPOINT MAP
 ------------
+- :meth:`Maturation.estimate`    → ``POST /api/campaign/mature/estimate``
 - :meth:`Maturation.start`       → ``POST /api/campaign/mature``
 - :meth:`Maturation.status`      → ``GET  /api/campaign/{id}/status``
 - :meth:`Maturation.readout`     → ``GET  /api/campaign/{id}/maturation``
@@ -2377,6 +2397,67 @@ class Maturation(Resource):
         started = MaturationStarted.from_wire(payload)
         return MaturationRun(self, started.campaign_id, started=started, spec=spec)
 
+    # -- price ---------------------------------------------------------------
+
+    def estimate(
+        self,
+        spec: MaturationSpec,
+        *,
+        spend_ceiling_credits: float | None = None,
+    ) -> dict[str, Any]:
+        """``POST /api/campaign/mature/estimate`` — price it, and get the quote.
+
+        Read-only: no campaign is created and nothing is charged. This is the ONLY
+        way to obtain the ``quote`` that :meth:`start` requires on a metered
+        deployment — :meth:`ligandai.resources.objectives.Objectives.estimate`
+        prices ``/api/ptf/campaigns``, a DIFFERENT surface, and a quote issued
+        there is rejected here as ``quote_invalid``.
+
+        Returns the server's response verbatim::
+
+            {"success": True,
+             "surface": "closed_loop_campaign:mature",
+             "estimate": {"firstRoundCredits": ..., "ceilingCredits": ...,
+                          "affordability": ..., "shortfallCredits": ...},
+             "quote":    {"token": ..., "expiresAt": ..., "ceilingCredits": ...,
+                          "firstRoundCredits": ..., "inputsHash": ...}}
+
+        ⛔ THE QUOTE IS BOUND TO THIS EXACT SPEC. ``inputsHash`` covers the
+        normalized request, so a quote accepted for one spec will not authorize a
+        different one — the ceiling you agreed to would not be the ceiling that
+        ran. Re-estimate after any change, and decide again::
+
+            quoted = client.maturation.estimate(spec)
+            if quoted["estimate"]["ceilingCredits"] <= my_budget:
+                run = client.maturation.start(spec, quote=quoted["quote"])
+
+        ⛔ Nothing in this SDK accepts a quote on your behalf, refetches an expired
+        one, or re-prices after a refusal. Those are spend decisions.
+
+        Args:
+            spec: the same :class:`MaturationSpec` you intend to start. Validated
+                locally first, so a spec the server would 422 never gets priced.
+            spend_ceiling_credits: the ceiling you are considering. Echoed back in
+                ``quote["ceilingCredits"]`` when accepted.
+        """
+        if not isinstance(spec, MaturationSpec):
+            raise LigandAIValidationError(
+                "spec must be a MaturationSpec — the estimate has to price the "
+                "SAME normalized request the start will send, or the quote's "
+                f"inputsHash will not match it; got {type(spec).__name__}."
+            )
+        body = spec.to_payload()
+        if spend_ceiling_credits is not None:
+            body["spendCeilingCredits"] = float(spend_ceiling_credits)
+        try:
+            payload = self._transport.request(
+                "POST", "/api/campaign/mature/estimate", json=body
+            )
+        except LigandAIError as exc:
+            _interpret_maturation_error(exc)
+            raise
+        return _as_dict(payload, what="a maturation estimate")
+
     # -- read ---------------------------------------------------------------
 
     def status(self, campaign_id: str) -> MaturationStatus:
@@ -2619,6 +2700,31 @@ class AsyncMaturation(AsyncResource):
             _interpret_maturation_error(exc, accepted_quote=_quote_dict(quote) if quote else None)
             raise
         return MaturationStarted.from_wire(payload).campaign_id
+
+    async def estimate(
+        self,
+        spec: MaturationSpec,
+        *,
+        spend_ceiling_credits: float | None = None,
+    ) -> dict[str, Any]:
+        """``POST /api/campaign/mature/estimate``. See :meth:`Maturation.estimate`."""
+        if not isinstance(spec, MaturationSpec):
+            raise LigandAIValidationError(
+                "spec must be a MaturationSpec — the estimate has to price the "
+                "SAME normalized request the start will send, or the quote's "
+                f"inputsHash will not match it; got {type(spec).__name__}."
+            )
+        body = spec.to_payload()
+        if spend_ceiling_credits is not None:
+            body["spendCeilingCredits"] = float(spend_ceiling_credits)
+        try:
+            payload = await self._transport.request(
+                "POST", "/api/campaign/mature/estimate", json=body
+            )
+        except LigandAIError as exc:
+            _interpret_maturation_error(exc)
+            raise
+        return _as_dict(payload, what="a maturation estimate")
 
     async def status(self, campaign_id: str) -> MaturationStatus:
         cid = _require_campaign_id(campaign_id)

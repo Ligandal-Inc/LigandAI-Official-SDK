@@ -94,6 +94,7 @@ from ligandai.contrastive import (
     PocketFeatureMatrix,
     V6_9_POCKET_FEATURE_DIM,
     model_pocket_feature_dim,
+    normalize_avoid_paralogs,
 )
 from ligandai.multitarget import (
     CROSS_TARGET_AGGREGATES,
@@ -115,6 +116,7 @@ from ligandai.thermo import (
 from ligandai.errors import (
     LigandAISurfaceNotInThisPackage,
     LigandAIError,
+    LigandAIForbidden,
     LigandAINotFoundError,
     LigandAIParameterNotForwarded,
     LigandAIValidationError,
@@ -617,6 +619,66 @@ def _pocket_features_unreachable(gene: str) -> LigandAIParameterNotForwarded:
         reached="internal featurizer service",
         dropped_at="public API surface (endpoint not mounted)",
         tracking="bd-dre-eadc7",
+    )
+
+
+#: The server's error code for the width-entitlement 403
+#: (``server/receptor-intelligence-routes.ts``: ``PUBLIC_POCKET_DIMS`` is
+#: ``{48}``; any other width 403s a non-superadmin caller with this code).
+_POCKET_DIM_INTERNAL_CODE = "POCKET_DIM_INTERNAL"
+
+
+def _is_pocket_dim_entitlement_403(exc: Exception) -> bool:
+    """True when ``exc`` is the width-entitlement refusal, not some other 403."""
+    if not isinstance(exc, LigandAIForbidden):
+        return False
+    return (
+        getattr(exc, "code", None) == _POCKET_DIM_INTERNAL_CODE
+        or getattr(exc, "reason", None) == _POCKET_DIM_INTERNAL_CODE
+    )
+
+
+def _pocket_dim_not_entitled(gene: str, dim: int, exc: Exception) -> LigandAIForbidden:
+    """The real production wall a customer hits: 403 ``POCKET_DIM_INTERNAL``.
+
+    ⛔ THIS IS THE SINGLE MOST IMPORTANT ERROR MESSAGE IN THIS MODULE. The
+    geometric / all-atom pocket-feature widths the v6.9 line consumes (107 /
+    65) are Ligandal-internal — ``shared/design-surface-gate.ts`` publishes
+    only width 48 — so a caller without that entitlement 403s here on every
+    non-48 request, which means :meth:`Campaigns.pocket_features` and
+    :meth:`Campaigns.contrastive_references` are dead ends for a paying
+    customer: the one *named* contrastive surface in this namespace requires
+    an entitlement almost nobody has.
+
+    The reachable way to get the SAME capability — steering generation away
+    from named off-targets — is ``avoid_paralogs=`` on
+    :meth:`~ligandai.resources.peptides.Peptides.generate` /
+    :meth:`~ligandai.resources.peptides.Peptides.generate_multi` /
+    :meth:`Campaigns.recursive`. It sends the gene NAMES on the request
+    (``cfg_reference_genes``) and lets the server build the reference panel
+    from them, so it never needs this width at all.
+    """
+    return LigandAIForbidden(
+        f"pocket features for {gene!r} at width {dim} are Ligandal-internal — "
+        f"this account is not entitled to fetch the raw geometric/all-atom "
+        f"pocket matrix the v6.9 generator line consumes (only width 48 is "
+        f"published). This is why {gene!r} 403'd: it is not a bug or a typo, "
+        f"and no API key upgrade published to customers unlocks it.\n"
+        f"\n"
+        f"What to use instead: avoid_paralogs=[...] on "
+        f"client.peptides.generate() / client.peptides.generate_multi() / "
+        f"client.campaigns.recursive(). Pass the off-target GENE NAMES "
+        f"directly — 'avoid_paralogs=[\"ENPP1\", \"ENPP6\"]' — instead of "
+        f"fetching this width yourself and building a ContrastiveGuidance "
+        f"panel from it. The server resolves each named gene through the "
+        f"same paralog criterion contrastive_references() would have used, "
+        f"and refuses the run rather than substituting a different panel if "
+        f"a named gene does not qualify.",
+        reason=_POCKET_DIM_INTERNAL_CODE,
+        code=getattr(exc, "code", _POCKET_DIM_INTERNAL_CODE),
+        status_code=getattr(exc, "status_code", 403),
+        request_id=getattr(exc, "request_id", None),
+        response=getattr(exc, "response", None),
     )
 
 
@@ -2627,6 +2689,7 @@ class Campaigns(Resource):
         "stop": "POST /api/campaign/{campaign_id}/stop",
         "stream": "GET /api/campaign/{campaign_id}/stream",
         "designs": "GET /api/campaign/{campaign_id}/leaderboard",
+        "estimate": "POST /api/campaign/mature/estimate",
     }
 
     #: ⛔ [bd-dre-rp11j.9.1] WHERE EACH SURFACE ACTUALLY LIVES NOW. The platform
@@ -2651,6 +2714,7 @@ class Campaigns(Resource):
         "stop": "client.maturation.stop(campaign_id)",
         "stream": "client.maturation.stream(campaign_id)",
         "list": "client.maturation.list()",
+        "estimate": "client.maturation.estimate(spec)",
     }
 
     def __getattr__(self, name: str) -> Any:
@@ -2746,6 +2810,17 @@ class Campaigns(Resource):
             payload = self._transport.request(
                 "GET", _POCKET_FEATURES_PATH.format(gene=gene), params=params or None
             ) or {}
+        except LigandAIForbidden as exc:
+            # ⛔ THE REAL PRODUCTION WALL. A width other than 48 is
+            # Ligandal-internal (shared/design-surface-gate.ts:
+            # PUBLIC_POCKET_DIMS = {48}); a caller without the entitlement
+            # 403s here with code POCKET_DIM_INTERNAL. This is not "the route
+            # is missing" (LigandAIParameterNotForwarded, below) — the route
+            # answered, and named exactly which width is not published. Point
+            # at avoid_paralogs= rather than leaving the caller at a bare 403.
+            if _is_pocket_dim_entitlement_403(exc):
+                raise _pocket_dim_not_entitled(gene, int(want or 0), exc) from exc
+            raise
         except LigandAINotFoundError as exc:
             # ⛔ TWO DIFFERENT FACTS, ONE STATUS CODE. The mounted featurizer
             # returns 404 + a named error code when it looked and this gene has
@@ -3637,6 +3712,11 @@ class Campaigns(Resource):
         contrastive: ContrastiveGuidance | None = None,
         contrastive_by_target: dict[str, ContrastiveGuidance] | None = None,
         allow_unforwarded_contrastive: bool = False,
+        # Name the off-target genes yourself, carried into EVERY round's
+        # generation leg (bd-dre-siz9d) — the customer-reachable alternative to
+        # contrastive=/contrastive_by_target=, which both need
+        # contrastive_references()'s entitlement-gated raw pocket width.
+        avoid_paralogs: Sequence[str] | None = None,
         **generate_kwargs: Any,
     ) -> RecursiveCampaign:
         """Build a :class:`RecursiveCampaign` bound to this client.
@@ -3653,10 +3733,25 @@ class Campaigns(Resource):
         neither threshold set nothing is REQUIRED of it, and each round says so
         instead of implying the Kd passed. ⛔ Neither has a default: a ceiling
         that was right on one campaign is not a ceiling on yours.
+
+        ``avoid_paralogs=["ENPP1", "ENPP6"]`` restricts the platform's
+        server-side paralog reference producer to these genes, on every round
+        this campaign runs — the same panel every time, not re-derived each
+        round. Mutually exclusive with ``contrastive=``/``contrastive_by_target=``:
+        they are two ways of naming one panel, and accepting both while
+        silently preferring one is how a caller ends up steered away from a
+        receptor they never named.
         """
         if (target is None) == (targets is None):
             raise LigandAIValidationError(
                 "recursive() needs exactly one of target= or targets=."
+            )
+        if avoid_paralogs is not None and (contrastive is not None or contrastive_by_target):
+            raise LigandAIValidationError(
+                "pass either avoid_paralogs=[...] or contrastive=/contrastive_by_target=, "
+                "not both — they are two ways of naming the same off-target panel, and "
+                "silently preferring one would steer generation away from receptors "
+                "the caller did not choose to name that way."
             )
         if targets is not None:
             if isinstance(targets, CoOptimization):
@@ -3704,6 +3799,7 @@ class Campaigns(Resource):
             contrastive=contrastive,
             contrastive_by_target=dict(contrastive_by_target or {}),
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
+            avoid_paralogs=avoid_paralogs,
             generate_kwargs=dict(generate_kwargs),
         )
 
@@ -3741,6 +3837,7 @@ class AsyncCampaigns(AsyncResource):
         "stop": "POST /api/campaign/{campaign_id}/stop",
         "stream": "GET /api/campaign/{campaign_id}/stream",
         "designs": "GET /api/campaign/{campaign_id}/leaderboard",
+        "estimate": "POST /api/campaign/mature/estimate",
     }
 
     #: ⛔ [bd-dre-rp11j.9.1] WHERE EACH SURFACE ACTUALLY LIVES NOW. The platform
@@ -3765,6 +3862,7 @@ class AsyncCampaigns(AsyncResource):
         "stop": "client.maturation.stop(campaign_id)",
         "stream": "client.maturation.stream(campaign_id)",
         "list": "client.maturation.list()",
+        "estimate": "client.maturation.estimate(spec)",
     }
 
     #: Surfaces that exist on the SYNC :class:`Campaigns` and deliberately have
@@ -3860,6 +3958,11 @@ class AsyncCampaigns(AsyncResource):
             payload = await self._transport.request(
                 "GET", _POCKET_FEATURES_PATH.format(gene=gene), params=params or None
             ) or {}
+        except LigandAIForbidden as exc:
+            # Same width-entitlement wall as the sync surface above.
+            if _is_pocket_dim_entitlement_403(exc):
+                raise _pocket_dim_not_entitled(gene, int(want or 0), exc) from exc
+            raise
         except LigandAINotFoundError as exc:
             # Same two-facts-one-status split as the sync surface above.
             body = getattr(exc, "response", None) or {}
@@ -4054,6 +4157,7 @@ class RecursiveCampaign:
         contrastive: ContrastiveGuidance | None = None,
         contrastive_by_target: dict[str, ContrastiveGuidance] | None = None,
         allow_unforwarded_contrastive: bool = False,
+        avoid_paralogs: Sequence[str] | None = None,
         generate_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if (target is None) == (co_optimization is None):
@@ -4110,6 +4214,22 @@ class RecursiveCampaign:
                 f"panel keyed to nothing is silently never applied."
             )
         self.allow_unforwarded_contrastive = allow_unforwarded_contrastive
+        #: Normalized (uppercase, deduped, capped) off-target gene names, or
+        #: None. Threaded into EVERY round's generation leg — see
+        #: :meth:`_generate` — as long as that leg has no explicit contrastive
+        #: panel of its own. Normalized here (not just in Campaigns.recursive())
+        #: so a RecursiveCampaign built directly gets the same validation.
+        self.avoid_paralogs = normalize_avoid_paralogs(avoid_paralogs)
+        if self.avoid_paralogs is not None and (
+            contrastive is not None or self.contrastive_by_target
+        ):
+            raise LigandAIValidationError(
+                "pass either avoid_paralogs=[...] or "
+                "contrastive=/contrastive_by_target=, not both — they are two "
+                "ways of naming the same off-target panel, and silently "
+                "preferring one would steer generation away from receptors the "
+                "caller did not choose to name that way."
+            )
         self.generate_kwargs = dict(generate_kwargs or {})
         self.rounds: list[CampaignRound] = []
 
@@ -4815,6 +4935,15 @@ class RecursiveCampaign:
                 kwargs["contrastive"] = panel
                 kwargs["allow_unforwarded_contrastive"] = self.allow_unforwarded_contrastive
                 notes.append(f"{spec.key}: contrastive guidance {panel.describe()}")
+            elif self.avoid_paralogs:
+                # Same panel every round — carried unchanged from the campaign,
+                # not re-derived leg by leg. See RecursiveCampaign.avoid_paralogs.
+                kwargs["avoid_paralogs"] = list(self.avoid_paralogs)
+                notes.append(
+                    f"{spec.key}: avoid_paralogs={list(self.avoid_paralogs)} — "
+                    f"restricts the platform's derived reference panel to "
+                    f"these named genes"
+                )
             else:
                 notes.append(
                     f"{spec.key}: no explicit contrastive panel supplied; a "
@@ -4852,6 +4981,9 @@ class RecursiveCampaign:
             "cross_species": self.co_optimization.is_cross_species,
             "off_targets": list(self.off_targets),
             "model": self.model,
+            # None: no NAMED restriction — a CFG-capable model still derives
+            # its own panel every round, this campaign just did not choose it.
+            "avoid_paralogs": list(self.avoid_paralogs) if self.avoid_paralogs else None,
             "band": self.band,
             "target_leg_min": self.target_leg_min,
             # ⛔ THE THERMODYNAMIC HALF OF THE OBJECTIVE, always stated — None

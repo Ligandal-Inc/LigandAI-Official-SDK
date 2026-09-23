@@ -30,18 +30,48 @@ collision permanent instead of pointing out of it.
 
 ---
 
-## ⛔ Availability today
+## Availability
 
-The `/api/campaign/*` routes answer on the platform's internal service but are
-**not yet proxied through `ligandai.com`** — a call against the public base URL
-returns **404**, not 401. The proxy that exposes them (with a quote → reserve →
-meter → settle path, so the GPU spend is metered rather than unbounded) is being
-built under `bd-dre-xfs48` / `bd-LIGANDAI_ALPHA_V2-6qfgh`.
+The `/api/campaign/*` routes are **live on `ligandai.com`**. The metered Express
+proxy — quote → reserve → grant → meter → settle, so the GPU spend is metered
+rather than unbounded — shipped under `bd-dre-xfs48` /
+`bd-LIGANDAI_ALPHA_V2-6qfgh`. Verified against production 2026-09-23:
 
-This client is complete and is tested against the frozen server contract. Nothing
-in your code changes when the proxy lands: `start()` already accepts the `quote=`
-the metered route will require, and **omits it from the wire entirely** when you
-do not pass one, so one call works against both routes.
+| Call | Result |
+|---|---|
+| `GET /api/campaign` | 200 |
+| `GET /api/campaign/{id}/status` (id that does not exist) | 404 *Campaign not found* |
+| `POST /api/campaign/mature/estimate` | 200 with a signed quote |
+
+### ⛔ The start route is metered and fails closed
+
+`POST /api/campaign/mature` mints a **single-use execution grant** after it
+reserves credits against the quote you accepted. A deployment that cannot mint
+one answers **503** with `reason: "SPEND_GRANT_UNCONFIGURED"` and starts nothing
+— it refuses to run GPU work unmetered rather than run it. That is a server-side
+provisioning fault, not your call being wrong, and this client says so by name
+rather than pointing you at your credit balance; those have different fixes.
+
+Reads — `list`, `status`, `readout`, `leaderboard`, `iter_designs`, `structure`
+— are not metered and are unaffected.
+
+### Getting the quote
+
+`client.maturation.estimate(spec)` prices the SAME spec you are about to start
+and costs nothing:
+
+```python
+quoted = client.maturation.estimate(spec)
+print(quoted["estimate"]["ceilingCredits"], quoted["estimate"]["affordability"])
+run = client.maturation.start(spec, quote=quoted["quote"])
+```
+
+⛔ The quote is bound to the exact spec it priced (`inputsHash`) and to this
+surface. Change the spec and it must be re-quoted, or the ceiling you agreed to
+is not the ceiling that runs. A quote from `objectives.estimate()` prices
+`/api/ptf/campaigns` — a different surface — and is rejected here as
+`quote_invalid`. `start()` omits the token entirely when you pass none, so the
+same call also works against an unmetered internal port.
 
 ---
 
