@@ -2622,10 +2622,20 @@ class BatchFoldJob:
         trajectories_per_peptide: int,
         receptor: dict[str, Any] | None = None,
         sampling_steps: int | None = None,
+        from_cache: bool = False,
     ) -> None:
         from ligandai.jobs import Job  # local to avoid circular import
 
         self._transport = transport
+        # [bd-LIGANDAI_ALPHA_V2-jb73b] Was this handle SUBMITTED, or handed back
+        # by the 24h dedupe? Measured 2026-09-23: six separate submissions of
+        # one payload returned peptide_ipsae identical to 8 decimal places,
+        # because each after the first was the cache. A caller building
+        # "independent draws" out of repeat calls gets N copies of one
+        # measurement and no error — the previous signal for this lived inside
+        # `receptor={'source': 'cached'}`, which nothing computing a spread
+        # would think to read.
+        self._from_cache = bool(from_cache) or (receptor or {}).get("source") == "cached"
         self._batch_id = batch_id
         self._jobs_meta = jobs
         self._total_cost_credits = int(total_cost_credits)
@@ -2660,6 +2670,24 @@ class BatchFoldJob:
     @property
     def batch_id(self) -> str:
         return self._batch_id
+
+    @property
+    def from_cache(self) -> bool:
+        """True when the 24-hour dedupe returned this batch instead of running it.
+
+        ⛔ Check this before treating repeat submissions as independent draws.
+        A cached handle is the FIRST submission's measurement handed back, so a
+        spread, interval or cross-draw band computed over several of them
+        describes one fold, not several. Measured 2026-09-23: six separate
+        submissions of one payload returned ``peptide_ipsae`` identical to
+        eight decimal places.
+
+        ``fold_batch(..., force_resubmit=True)`` bypasses the dedupe, and
+        ``campaigns.replicate`` / ``fold_panel(force_fresh=True)`` already do.
+        For genuinely independent draws also vary Boltz-2's ``seed=`` — one
+        submission per seed, each seed's result counting as ONE observation.
+        """
+        return self._from_cache
 
     @property
     def jobs(self) -> list[dict[str, Any]]:
@@ -5377,6 +5405,7 @@ class Peptides(Resource):
                 trajectories_per_peptide=int(diffusion_samples),
                 receptor={"source": "cached"},
                 sampling_steps=int(sampling_steps),
+                from_cache=True,
             )
 
         # 3) Credit pre-flight — estimate locally, compare to balance, raise
