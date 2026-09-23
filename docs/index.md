@@ -51,6 +51,7 @@ what host an AI agent is actually talking to.
 quickstart
 authentication
 resources
+maturation
 api_reference
 workflows
 error_codes
