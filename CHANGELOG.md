@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **A fold run on ligandai.com is a BATCH, and its designs are now addressable
+  one at a time.** `client.folds.list_designs(job_id)` / `iter_designs(job_id)`
+  enumerate every design a `ligandforge_folding` job produced, each with its own
+  `fold_handle` (`foldrow_<ptf_fold_results.id>`), and that handle is accepted
+  anywhere a `fold_job_id` is — `evaluator.filter_folds`,
+  `deltaforge.batch_score_fold`, `folds.download_pae`. Measured on production
+  2026-09-23: 271 of 291 linked `ligandforge_folding` jobs span more than one
+  distinct sequence (largest: 200 designs under one id), so the job id has no
+  single `peptide_ipsae` and the metric surfaces refuse it
+  (`peptide_ipsae_reason: "job_is_a_batch_of_designs"`). That refusal is correct
+  and is unchanged — returning one arbitrary design's number as the job's is a
+  confident measurement of the wrong design — but it left a customer who folded
+  66 peptides holding 66 real measured values with no id to ask for any one of
+  them. Verified end to end against production on a real 66-design AQP2 batch:
+  66 handles enumerated, `foldrow_72210` resolving to peptide_ipsae 0.8777092 /
+  ΔG -10.818047 kcal/mol / Kd 11.76 nM at peptide_length 29.
+  ⛔ The handle is namespaced rather than a bare `ptf_fold_results.id` integer:
+  `fold_job_ids=` is a string-typed JOB id parameter, and a bare integer in it
+  would be disambiguated only by "no job id happens to be all digits" — true of
+  all 11,177 gpu_jobs and 5,026 folding_jobs ids today, guaranteed by nothing.
+  Every row that resolves to ONE design now also carries `metrics["fold_handle"]`
+  and `metrics["fold_result_id"]` on `filter_folds` and `empirical_evaluate`, so
+  a result can be re-opened later. [bd-LIGANDAI_ALPHA_V2-44z2l]
 - **Lineage on the recursive campaign — a round-N design can name the round-(N-1)
   design it came from, and the comparison is fair or it is not offered.**
   `run_round(derived_from={child: parent})` states per-child parentage;

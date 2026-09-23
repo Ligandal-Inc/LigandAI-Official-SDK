@@ -1,10 +1,28 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
-"""Fold-result filtering and pocket-expansion endpoints.
+"""Fold-result filtering, per-design addressing, and pocket expansion.
 
 Wraps:
 
+- :meth:`Folds.list_designs`         → ``GET  /api/v1/folds/{job_id}/designs``
 - :meth:`Folds.partition_by_hotspot` → ``POST /api/folds/partition-by-hotspot``
 - :meth:`Folds.expand_hotspot`       → ``GET  /api/folds/expand-hotspot``
+
+⛔ A FOLD JOB RUN ON ligandai.com IS A BATCH. [bd-LIGANDAI_ALPHA_V2-44z2l]
+``ligandforge_folding`` — the website's fold funnel — hands every peptide of a
+run to one smartfold job. Measured on production 2026-09-23, 271 of 291 such
+jobs span more than one distinct sequence, the largest holding 200 designs. So
+the job id has NO single ``peptide_ipsae``, and every metric surface refuses it
+(``peptide_ipsae_reason: "job_is_a_batch_of_designs"``) rather than report one
+arbitrary design's number as the job's.
+
+:meth:`Folds.list_designs` is how you get inside one. It returns every design
+with its own ``fold_handle`` (``foldrow_<ptf_fold_results.id>``), and that handle
+is accepted anywhere a ``fold_job_id`` is — ``client.evaluator.filter_folds``,
+``client.deltaforge.batch_score_fold``, :meth:`Folds.download_pae`::
+
+    batch = client.folds.list_designs(job_id)
+    for d in batch["designs"]:
+        print(d["fold_handle"], d["peptide_ipsae"], d["peptide_length"], d["kd_nm"])
 
 Example workflow::
 
@@ -61,6 +79,8 @@ from __future__ import annotations
 
 import io
 import math
+import re
+from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from ligandai.resources._base import AsyncResource, Resource
@@ -93,6 +113,73 @@ _PAE_ID_HELP = (
 )
 
 
+# ── The PER-DESIGN fold handle [bd-LIGANDAI_ALPHA_V2-44z2l] ─────────────────
+#
+# A ``ligandforge_folding`` job — every fold a customer runs on ligandai.com —
+# is a BATCH: smartfold folds every peptide it was handed. Measured on
+# production 2026-09-23, 271 of 291 such jobs span more than one distinct
+# sequence; the largest holds 200 designs under one job id.
+#
+# So a fold JOB id has no single binder metric, and the server refuses to
+# pretend otherwise: ``filter_folds`` / ``batch_score_fold`` answer
+# ``peptide_ipsae_reason: "job_is_a_batch_of_designs"`` and return no structure
+# and no ``fold_result_id`` for one. That refusal is correct — returning one
+# arbitrary design's number as "the job's" is a confident measurement of the
+# WRONG design — and until now it left a customer who folded 66 peptides holding
+# 66 real measured values with no id to ask for any one of them.
+#
+# ``foldrow_<ptf_fold_results.id>`` is that id. Get them from
+# :meth:`Folds.list_designs`, then pass one anywhere a ``fold_job_id`` is taken.
+#
+# ⛔ WHY IT IS NOT A BARE INTEGER. ``fold_job_ids=`` is a string-typed JOB id
+# parameter. A bare integer in it would be disambiguated only by "no job id
+# happens to be all digits" — true of all 11,177 gpu_jobs and 5,026
+# folding_jobs ids today, guaranteed by nothing, since job ids are free-form.
+# The day that stops holding, the request would silently return another design's
+# numbers with a 200. This is the same hazard ``_PAE_ID_HELP`` below refuses in
+# the other direction. The prefix makes the two id spaces disjoint by
+# construction, so a wrong id is a loud 404 and never a wrong measurement.
+FOLD_DESIGN_HANDLE_PREFIX = "foldrow_"
+
+_FOLD_DESIGN_HANDLE_RE = re.compile(r"^foldrow_(\d{1,15})$")
+
+
+def fold_design_handle(fold_result_id: int | str) -> str:
+    """``ptf_fold_results.id`` -> the per-design handle ``foldrow_<id>``."""
+    try:
+        value = int(str(fold_result_id).strip())
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"fold_result_id must be a positive integer primary key, got {fold_result_id!r}"
+        ) from None
+    if value <= 0:
+        raise ValueError(
+            f"fold_result_id must be a positive integer primary key, got {fold_result_id!r}"
+        )
+    return f"{FOLD_DESIGN_HANDLE_PREFIX}{value}"
+
+
+def fold_result_id_from_handle(handle: object) -> int | None:
+    """``foldrow_<id>`` -> the integer, or ``None`` when this is not a handle.
+
+    ⛔ ``None`` means "this is a JOB id", never "a malformed handle" — callers
+    branch on it to pick an id space, so anything that is not an exact handle
+    must fall through to the job path unchanged.
+    """
+    if not isinstance(handle, str):
+        return None
+    m = _FOLD_DESIGN_HANDLE_RE.match(handle.strip())
+    if not m:
+        return None
+    value = int(m.group(1))
+    return value if value > 0 else None
+
+
+def is_fold_design_handle(handle: object) -> bool:
+    """True when this string addresses ONE design rather than a fold job."""
+    return fold_result_id_from_handle(handle) is not None
+
+
 def _resolve_fold_result_id(
     fold_result_id: int | str | None,
     fold_id: int | str | None = None,
@@ -112,6 +199,13 @@ def _resolve_fold_result_id(
         value = raw
     else:
         text = str(raw).strip()
+        # [bd-LIGANDAI_ALPHA_V2-44z2l] A per-design handle IS a fold-row id, in
+        # the one spelling that can never be a job id — so accepting it closes
+        # the round trip (list_designs -> handle -> download_pae) without
+        # weakening the guard above, which exists to refuse JOB ids.
+        from_handle = fold_result_id_from_handle(text)
+        if from_handle is not None:
+            return from_handle
         if not text.isdigit():
             raise ValueError(
                 f"fold_result_id must be a positive integer primary key, got {raw!r}. "
@@ -331,8 +425,195 @@ class PanelResult(TypedDict, total=False):
     designs: list[PanelDesignRow]
 
 
+class FoldDesignRow(TypedDict, total=False):
+    """ONE design out of a fold job. [bd-LIGANDAI_ALPHA_V2-44z2l]
+
+    ``fold_handle`` is the id every ``fold_job_id`` surface accepts for this
+    single design — :meth:`ligandai.resources.evaluator.Evaluator.filter_folds`,
+    :meth:`ligandai.resources.deltaforge.DeltaForge.batch_score_fold`, and
+    :meth:`Folds.download_pae` (which also takes the bare ``fold_result_id``).
+    """
+
+    fold_handle: str
+    """``foldrow_<ptf_fold_results.id>`` — pass this, not the job id."""
+    fold_result_id: int
+    """The same fact as an integer: the key ``GET /api/v1/folds/:id/pae`` and
+    ``GET /api/v1/structures/:id/pdb`` already take."""
+    fold_job_id: str
+    """The BATCH job this design came out of. It names many designs, so it has
+    NO single binder metric and every metric surface refuses it."""
+    sample_idx: int | None
+    gene: str | None
+    sequence: str | None
+    peptide_length: int | None
+    """⛔ Travels beside every Kd. The deployed DeltaForge scorer has no
+    measured-affinity evaluation, so a Kd ordering is NOT a validated affinity
+    ordering, and length is its most obvious confound."""
+    peptide_length_source: str | None
+    peptide_ipsae: float | None
+    """⛔ THE binder metric: the A-B peptide-receptor interface iPSAE, bounded
+    at 1.0. Overall ``ipsae`` is complex-level — a detached peptide can read
+    ``ipsae`` 0.93 at ``peptide_ipsae`` 0.00 — and is deliberately not returned
+    here. A value of ``0.0`` is a MEASUREMENT (no interface), not a gap."""
+    peptide_ipsae_status: str
+    peptide_ipsae_reason: str
+    peptide_ipsae_reason_text: str
+    peptide_ipsae_attribution: str
+    iptm: float | None
+    plddt_mean: float | None
+    coord_degenerate: bool
+    """⛔ TRUE means the structure parsed with NO GEOMETRY. Its scalars are
+    misleading, not missing — such a complex reads to DeltaForge as a
+    systematically excellent binder. Never rank one."""
+    has_structure: bool
+    delta_g: float | None
+    kd_nm: float | None
+    kd_status: str
+    """``ok`` | ``below_ipsae_gate`` | ``ipsae_not_computed`` |
+    ``coord_degenerate`` | ``scorer_not_quotable`` | ``not_computed`` |
+    ``fold_row_ambiguous``. ⛔ ``below_ipsae_gate`` is a REFUSAL TO QUOTE, not a
+    missing or zero affinity: DeltaForge scores an interface, and below the gate
+    there is none to score."""
+    kd_reason: str | None
+    kd_scorer: str | None
+    kd_scorer_version: str | None
+    kd_aggregate_method: str | None
+    kd_ipsae_gate: float
+
+
+class FoldDesignListing(TypedDict, total=False):
+    """Return shape of :meth:`Folds.list_designs`."""
+
+    fold_job_id: str
+    attribution: str
+    is_batch: bool
+    """TRUE when this job folded more than one distinct peptide — i.e. when it
+    has no single binder metric and every metric surface refuses its id."""
+    design_count: int
+    """Distinct peptides. NOT the row count: a batch at ``diffusion_samples>1``
+    writes several trajectories per peptide."""
+    row_count: int
+    returned: int
+    limit: int
+    offset: int
+    has_more: bool
+    kd_ipsae_gate: float
+    metric_notes: dict[str, str]
+    designs: list[FoldDesignRow]
+
+
+_DESIGNS_PAGE_DEFAULT = 200
+_DESIGNS_PAGE_MAX = 500
+
+_DESIGN_HANDLE_NOT_A_JOB = (
+    "{job_id!r} is a per-design fold handle, not a fold JOB id. It already names "
+    "exactly one design — pass it straight to client.evaluator.filter_folds("
+    "[handle]) or client.deltaforge.batch_score_fold([handle]). list_designs() "
+    "enumerates the designs INSIDE a fold job."
+)
+
+
+def _designs_request(job_id: str, limit: int, offset: int) -> tuple[str, dict[str, Any]]:
+    """Validate client-side, then build (path, params) for the designs listing.
+
+    ⛔ Refuses a per-design handle BEFORE spending a round trip. Treating the
+    two id spaces as interchangeable is precisely the confusion the namespaced
+    handle exists to prevent, so the SDK must not launder one into the other.
+    """
+    text = str(job_id or "").strip()
+    if not text:
+        raise ValueError("job_id is required")
+    if is_fold_design_handle(text):
+        raise ValueError(_DESIGN_HANDLE_NOT_A_JOB.format(job_id=text))
+    n = int(limit)
+    if not 1 <= n <= _DESIGNS_PAGE_MAX:
+        raise ValueError(f"limit must be between 1 and {_DESIGNS_PAGE_MAX}, got {limit!r}")
+    off = int(offset)
+    if off < 0:
+        raise ValueError(f"offset must be >= 0, got {offset!r}")
+    return f"/api/v1/folds/{text}/designs", {"limit": n, "offset": off}
+
+
 class Folds(Resource):
     """``/api/folds/*`` — hotspot/pocket fold-result filtering."""
+
+    def list_designs(
+        self,
+        job_id: str,
+        *,
+        limit: int = _DESIGNS_PAGE_DEFAULT,
+        offset: int = 0,
+    ) -> FoldDesignListing:
+        """``GET /api/v1/folds/{job_id}/designs`` — the designs inside a fold job.
+
+        [bd-LIGANDAI_ALPHA_V2-44z2l] THE HOP THAT WAS MISSING. A
+        ``ligandforge_folding`` job — every fold run on ligandai.com — is a
+        BATCH: smartfold folds every peptide it was handed, and 271 of 291 such
+        jobs span more than one distinct sequence (largest measured: 200). Its
+        job id therefore has NO single binder metric, and ``filter_folds`` /
+        ``batch_score_fold`` refuse it with ``job_is_a_batch_of_designs`` rather
+        than report one arbitrary design's number as the job's.
+
+        This returns every design under that job with its own ``fold_handle``,
+        which those surfaces DO accept::
+
+            batch = client.folds.list_designs(job_id)
+            print(batch["design_count"], "designs;", "batch" if batch["is_batch"] else "single")
+
+            # Rank by the binder metric. peptide_ipsae is the A-B interface
+            # metric and is bounded at 1.0; overall ipsae is not a binder readout
+            # and is not returned.
+            ranked = sorted(
+                (d for d in batch["designs"] if d.get("peptide_ipsae") is not None),
+                key=lambda d: d["peptide_ipsae"],
+                reverse=True,
+            )
+            best = ranked[0]["fold_handle"]           # e.g. 'foldrow_216530'
+
+            # Now address that ONE design anywhere a fold_job_id is taken.
+            detail = client.evaluator.filter_folds([best], criteria={})
+            pae = client.folds.download_pae(ranked[0]["fold_result_id"])
+
+        ⛔ METRIC DISCIPLINE ON WHAT COMES BACK.
+        ``peptide_ipsae`` is the binder metric; ``0.0`` is a MEASUREMENT (no
+        interface), not a gap. ``kd_nm`` / ``delta_g`` are quoted only from
+        persisted DeltaForge V10 rows and only at ``peptide_ipsae >=
+        kd_ipsae_gate`` — a design below it carries ``kd_status ==
+        'below_ipsae_gate'``, which is a REFUSAL TO QUOTE and never a missing or
+        zero affinity. ``peptide_length`` travels beside every Kd because the
+        deployed scorer has no measured-affinity evaluation, so a Kd ordering is
+        not a validated affinity ordering.
+
+        :param job_id: a fold JOB id. ⛔ Passing a ``foldrow_...`` handle raises
+            ``ValueError``: it already names one design.
+        :param limit: rows per page, 1..500 (default 200).
+        :param offset: rows to skip.
+        :raises ValueError: for an empty id, a per-design handle, or a bad page.
+        """
+        path, params = _designs_request(job_id, limit, offset)
+        return self._transport.request("GET", path, params=params) or {}  # type: ignore[return-value]
+
+    def iter_designs(
+        self,
+        job_id: str,
+        *,
+        page_size: int = _DESIGNS_PAGE_DEFAULT,
+    ) -> Iterator[FoldDesignRow]:
+        """Page through every design in a fold job.
+
+        Stops on ``has_more is False`` or on an empty page, so a server that
+        stops paginating cannot spin this forever.
+        """
+        offset = 0
+        while True:
+            page = self.list_designs(job_id, limit=page_size, offset=offset)
+            rows = page.get("designs") or []
+            if not rows:
+                return
+            yield from rows
+            if not page.get("has_more"):
+                return
+            offset += len(rows)
 
     def partition_by_hotspot(
         self,
@@ -790,6 +1071,36 @@ class Folds(Resource):
 
 class AsyncFolds(AsyncResource):
     """Async mirror of :class:`Folds`."""
+
+    async def list_designs(
+        self,
+        job_id: str,
+        *,
+        limit: int = _DESIGNS_PAGE_DEFAULT,
+        offset: int = 0,
+    ) -> FoldDesignListing:
+        """Async variant of :meth:`Folds.list_designs`."""
+        path, params = _designs_request(job_id, limit, offset)
+        return await self._transport.request("GET", path, params=params) or {}  # type: ignore[return-value]
+
+    async def iter_designs(
+        self,
+        job_id: str,
+        *,
+        page_size: int = _DESIGNS_PAGE_DEFAULT,
+    ) -> AsyncIterator[FoldDesignRow]:
+        """Async variant of :meth:`Folds.iter_designs`."""
+        offset = 0
+        while True:
+            page = await self.list_designs(job_id, limit=page_size, offset=offset)
+            rows = page.get("designs") or []
+            if not rows:
+                return
+            for row in rows:
+                yield row
+            if not page.get("has_more"):
+                return
+            offset += len(rows)
 
     async def partition_by_hotspot(
         self,

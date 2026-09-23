@@ -40,6 +40,34 @@ Typical workflow::
     elite_ids = [r["fold_job_id"] for r in filtered["results"] if r["passes"]]
     print(f"{filtered['passing']} / {filtered['total']} passed criteria")
 
+⛔ A FOLD RUN ON ligandai.com IS A BATCH, AND ITS JOB ID IS NOT A DESIGN.
+[bd-LIGANDAI_ALPHA_V2-44z2l] A ``ligandforge_folding`` job — what the website
+submits — folds EVERY peptide it was handed: measured on production 2026-09-23,
+271 of 291 such jobs span more than one distinct sequence, the largest holding
+200. So its id has no single ``peptide_ipsae``, and :meth:`filter_folds` refuses
+it rather than report one arbitrary design's number as the job's::
+
+    r = client.evaluator.filter_folds([batch_job_id], criteria={})["results"][0]
+    r["metrics"]["peptide_ipsae_reason"]   # 'job_is_a_batch_of_designs'
+    r["metrics"]["fold_handle"]            # None — no single design to address
+
+Get the per-design handles, then pass them here exactly like job ids::
+
+    batch = client.folds.list_designs(batch_job_id)
+    print(batch["design_count"], "designs")           # e.g. 66
+    handles = [d["fold_handle"] for d in batch["designs"]]   # 'foldrow_72210', ...
+
+    per_design = client.evaluator.filter_folds(handles, criteria={})
+    best = max(
+        (r for r in per_design["results"]
+         if r["metrics"]["peptide_ipsae"] is not None),
+        key=lambda r: r["metrics"]["peptide_ipsae"],
+    )
+
+Every row that resolves to ONE design now carries ``metrics["fold_handle"]`` and
+``metrics["fold_result_id"]``, so a result can be re-opened later without
+re-deriving it.
+
     # 4. Empirical evaluator: data-first, no narrative
     report = client.evaluator.empirical_evaluate(
         fold_job_ids=fold_ids,

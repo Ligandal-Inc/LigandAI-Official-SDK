@@ -9,6 +9,18 @@ canonical HTTP endpoints are:
   * ``client.deltaforge.score_fold(...)``       -> ``POST /api/v1/deltaforge/score-fold``
   * ``client.deltaforge.batch_score_fold(...)`` -> ``POST /api/v1/deltaforge/batch-score-fold``
 
+⛔ ``fold_job_ids`` ALSO TAKES A PER-DESIGN HANDLE. [bd-LIGANDAI_ALPHA_V2-44z2l]
+A ``ligandforge_folding`` job — every fold run on ligandai.com — is a BATCH, so
+its id names many designs and this endpoint refuses it (``peptide_ipsae_reason:
+"job_is_a_batch_of_designs"``, no structure, no Kd) rather than score whichever
+design happened to sort first. Enumerate the designs and score them
+individually::
+
+    handles = [d["fold_handle"] for d in
+               client.folds.list_designs(batch_job_id)["designs"]]
+    dg = client.deltaforge.batch_score_fold(handles)
+
+
 Auth is ``Authorization: Bearer <api_key>`` (handled by the client). The online
 production scorer is selected server-side (``scorer="auto"``); the returned
 :attr:`DeltaForgeScore.scorer_version` records exactly which model ran.

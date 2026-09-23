@@ -425,6 +425,62 @@ kept = client.evaluator.filter_folds(
 )
 ```
 
+### A fold job submitted on ligandai.com is a BATCH — address the designs, not the job
+
+A `ligandforge_folding` job (what the website's fold funnel submits) hands every
+peptide of a run to **one** smartfold job. Measured on production 2026-09-23,
+271 of 291 such jobs span more than one distinct sequence; the largest holds 200
+designs. That job id therefore has **no single `peptide_ipsae`**, and the metric
+surfaces refuse it rather than report one arbitrary design's number as the job's:
+
+```python
+r = client.evaluator.filter_folds([batch_job_id], criteria={})["results"][0]
+r["metrics"]["peptide_ipsae_reason"]   # 'job_is_a_batch_of_designs'
+r["metrics"]["peptide_ipsae"]          # None — NOT a failed gate, and not zero
+r["metrics"]["fold_handle"]            # None — no single design to address
+```
+
+`client.folds.list_designs()` enumerates what that job actually produced, each
+design with its own handle:
+
+```python
+batch = client.folds.list_designs(batch_job_id)
+print(batch["design_count"], "designs;", "batch" if batch["is_batch"] else "single fold")
+
+for d in batch["designs"]:
+    print(d["fold_handle"],        # 'foldrow_72210' — pass this anywhere a fold_job_id goes
+          d["peptide_ipsae"],      # the A-B peptide-receptor interface metric
+          d["peptide_length"],     # travels beside every Kd
+          d["kd_nm"], d["kd_status"])
+```
+
+A `fold_handle` is accepted by `client.evaluator.filter_folds`,
+`client.deltaforge.batch_score_fold` and `client.folds.download_pae`, so one
+design's metrics and structure are one call away:
+
+```python
+best = max(
+    (d for d in batch["designs"] if d["peptide_ipsae"] is not None),
+    key=lambda d: d["peptide_ipsae"],
+)
+detail = client.evaluator.filter_folds([best["fold_handle"]], criteria={})
+pae    = client.folds.download_pae(best["fold_result_id"])
+```
+
+Reading the numbers (real output, AQP2 batch of 66 designs, 2026-09-23):
+
+| field | meaning |
+|---|---|
+| `peptide_ipsae` | **The binder metric** — the A-B peptide-receptor interface iPSAE, bounded at 1.0. Overall `ipsae` is complex-level and is deliberately not returned. **`0.0` is a measurement** ("no interface"), never a gap. |
+| `kd_status: "ok"` | A Kd is quoted: a persisted DeltaForge V10 row above the interface gate. 27 of the 66 designs. |
+| `kd_status: "below_ipsae_gate"` | **A refusal to quote, not a missing or zero affinity.** DeltaForge scores an interface; below `kd_ipsae_gate` (0.67) there is none to score. 39 of the 66. `kd_nm` is `None` — do not read it as a weak binder. |
+| `peptide_length` | Carried beside every Kd. The deployed scorer has **no measured-affinity evaluation**, so a Kd ordering is *not* a validated affinity ordering, and length is its most obvious confound. |
+| `coord_degenerate: true` | The structure parsed with no geometry. Its scalars are misleading, not missing — such a complex reads to DeltaForge as a systematically excellent binder. Never rank one. |
+
+Use `client.folds.iter_designs(job_id)` to page through a batch larger than one
+response.
+
+
 The `avoid_conformance_violation` / `avoid_conformance_clean` fold-stage
 diagnostics report the same check for an exclusion, on the finished complex.
 
