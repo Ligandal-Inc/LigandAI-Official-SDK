@@ -566,3 +566,43 @@ def test_a_lead_resubmitted_in_its_own_steered_pool_is_not_its_own_baseline():
     assert self_cmp is not None
     assert self_cmp.delta_baseline_from != P1
     assert self_cmp.delta_baseline_from == P2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10 — the co-optimization row arity carries lineage too
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_co_optimization_row_also_names_its_parent():
+    # ⛔ `deltas()` returns MultiTargetDelta for a co-optimization. Annotating
+    # only the single-target arity would leave every multi-target campaign
+    # silently without lineage.
+    t1, t2, off = "ENPP3", "ENPP5", "ENPP1"
+    ip = {}
+    for seq, (a, b, o) in {
+        P1: (0.90, 0.88, 0.30),
+        C1: (0.95, 0.93, 0.30),
+    }.items():
+        ip[(seq, t1)] = a
+        ip[(seq, t2)] = b
+        ip[(seq, off)] = o
+    client = _Client(_Evaluator(ip))
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    run = camp.recursive(
+        targets=[t1, t2], aggregate="worst_case", off_targets=[off],
+        band=0.02, target_leg_min=0.66,
+    )
+    run.run_round(sequences=[P1], confirm=False)
+    r2 = run.run_round(sequences=[C1], derived_from={C1: P1}, confirm=False)
+
+    rows = {r.sequence: r for r in r2.complete}
+    assert rows[C1].parent == P1
+    assert rows[C1].parent_round == 1
+    assert rows[C1].lineage_origin == "derived"
+    assert rows[C1].parent_in_panel is True
+    assert rows[C1].vs_parent is not None
+    assert rows[C1].vs_parent.verdict == "BETTER"
+    # The on-target side of a co-optimization row is the AGGREGATE, read
+    # through the same accessor rather than a second implementation.
+    assert rows[C1].vs_parent.child_target_ipsae == pytest.approx(0.93)
+    assert rows[C1].vs_parent.parent_target_ipsae == pytest.approx(0.88)
