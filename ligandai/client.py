@@ -88,6 +88,7 @@ from ligandai.resources.programs import AsyncPrograms, Programs
 from ligandai.resources.proteins import AsyncProteins, Proteins
 from ligandai.resources.receptors import AsyncReceptors, Receptors
 from ligandai.resources.reports import AsyncReports, Reports
+from ligandai.resources.targets import AsyncTargets, Targets  # bd-pw9mu
 from ligandai.resources.structures import AsyncStructures, Structures
 from ligandai.resources.synthesis import AsyncSynthesis, Synthesis
 from ligandai.resources.validated_binder import AsyncValidatedBinder, ValidatedBinder
@@ -688,6 +689,9 @@ class LigandAI(_ClientCommon):
         self.evaluator: Evaluator = Evaluator(self._transport, client=self)
         self.programs: Programs = Programs(self._transport)
         self.proteins: Proteins = Proteins(self._transport)
+        # [bd-LIGANDAI_ALPHA_V2-pw9mu] the index of names THIS account can
+        # target. A named upload is addressable as `gene=` with no upload id.
+        self.targets: Targets = Targets(self._transport)
         self.receptors: Receptors = Receptors(self._transport, client=self)
         self.reports: Reports = Reports(self._transport)
         self.structures: Structures = Structures(self._transport)
@@ -1135,6 +1139,8 @@ class AsyncLigandAI(_ClientCommon):
         self.evaluator: AsyncEvaluator = AsyncEvaluator(self._transport, client=self)
         self.programs: AsyncPrograms = AsyncPrograms(self._transport)
         self.proteins: AsyncProteins = AsyncProteins(self._transport)
+        # [bd-LIGANDAI_ALPHA_V2-pw9mu] see the sync client for the contract.
+        self.targets: AsyncTargets = AsyncTargets(self._transport)
         self.receptors: AsyncReceptors = AsyncReceptors(self._transport, client=self)
         self.reports: AsyncReports = AsyncReports(self._transport)
         self.structures: AsyncStructures = AsyncStructures(self._transport)
