@@ -119,6 +119,58 @@ collapsed into a generic `"message"` event — see CHANGELOG `[Unreleased]`). A
 `targeting_warning` is also mirrored to `warnings.warn(...,
 ligandai.LigandAITargetingWarning)` so it's visible even via `job.wait()`.
 
+### `POST /api/ptf/parallel/generate` — contrastive (paralog-conditioned) guidance
+
+See [contrastive](contrastive.md) for the full picture, including the measured
+head-to-head result. This section is the wire-level reference.
+
+| SDK kwarg | Wire key(s) | Shape |
+|---|---|---|
+| `avoid_paralogs` | `cfg_reference_genes` / `cfgReferenceGenes` | `list[str]` — HGNC gene symbols, uppercase-normalized, deduplicated, max 8 |
+| `contrastive` (`ContrastiveGuidance`) | `reference_pocket_features` / `referencePocketFeatures` | `list[list[list[float]]]` — one 2-D `[n_residues][dim]` matrix per reference. **Entitled/internal**: `reference_pocket_features` exists as a request field, but the pocket widths it requires (107 for `v6.9.21`, 65 for `v6.9.22`) are not public — see `shared/design-surface-gate.ts` (`PUBLIC_POCKET_DIMS = {48}`), which 403s (`POCKET_DIM_INTERNAL`) anything else. `avoid_paralogs` is the supported way to reach the same capability without that entitlement. |
+
+Only valid when the resolved generator's `inference_config.cfg_reference ==
+"paralog_mean"` (the v6.9 line). Supplying either field to a model outside
+that line is refused (`cfg_references_not_supported`). Supplying **both**
+`avoid_paralogs` and `contrastive=` on the same call is refused
+(`cfg_reference_genes_with_explicit_features`) — two different ways to name
+one panel, and silently preferring one is how a caller ends up steered away
+from something they did not choose.
+
+**Provenance.** A run that executed `"paralog_mean"` emits an SSE event on the
+generation stream, `cfg_references_resolved`:
+
+```json
+{
+  "generator_model_id": "v6.9.21",
+  "expected_dim": 107,
+  "n_references": 1,
+  "paralogs": [
+    {"paralog_gene": "BRD2", "source_pdb_id": "2E3K", "source_chain": "A",
+     "identity_to_target_domain": 0.71, "n_rows": 58}
+  ],
+  "rule_version": "...",
+  "requested_reference_genes": ["BRD2", "BRD3", "BRDT"]
+}
+```
+
+`requested_reference_genes` is `null` when the platform picked the panel
+itself; it echoes the caller's `cfg_reference_genes` otherwise.
+
+This is also persisted on the completed job record as
+`cfg_reference_provenance`, so a finished run stays auditable after the SSE
+stream closes. Absent provenance on a v6.9-line run means the server build did
+not report it — never that the run was unconditioned; `"paralog_mean"`
+executes unconditionally on that line.
+
+**Errors:**
+
+| Code | When |
+|---|---|
+| `missing_nonzero_cfg_references` | No usable reference could be produced — either every named gene in `cfg_reference_genes` failed the paralog criterion (`paralog_reference_reason: "named_references_all_rejected"`, with per-gene rejection reasons), or, with no genes named, the platform's own paralog discovery found nothing defensible for this target. Never falls back to a fabricated or zero-filled reference. |
+| `cfg_references_not_supported` | A contrastive reference (named or explicit) was sent to a generator outside the v6.9 line. |
+| `cfg_reference_genes_with_explicit_features` | Both `cfg_reference_genes` and `reference_pocket_features` were supplied on one request. |
+
 ### `GET /api/v1/peptides/list`
 
 list peptides by program_id. v0.5.0+.

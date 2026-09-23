@@ -52,6 +52,8 @@ quickstart
 authentication
 resources
 named_targets
+contrastive
+campaigns
 maturation
 api_reference
 workflows
