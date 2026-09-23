@@ -554,3 +554,15 @@ def test_an_explicit_force_fresh_choice_is_not_overridden():
     run.run_round(sequences=[C1], derived_from={C1: P1}, confirm=False,
                   panel_kwargs={"force_fresh": False})
     assert client.peptides.calls[n_before]["force_resubmit"] is False
+
+
+def test_a_lead_resubmitted_in_its_own_steered_pool_is_not_its_own_baseline():
+    # ⛔ Comparing a design against itself reads INDISTINGUISHABLE, which is a
+    # measurement of nothing wearing a verdict's name.
+    _client, run = _run(_Evaluator(BASE))
+    run.run_round(sequences=[P1, P2], confirm=False)
+    r2 = run.run_round(sequences=[P1, C1], steered_by=[P1, P2], confirm=False)
+    self_cmp = r2.comparison_for(P1)
+    assert self_cmp is not None
+    assert self_cmp.delta_baseline_from != P1
+    assert self_cmp.delta_baseline_from == P2

@@ -4439,10 +4439,14 @@ class RecursiveCampaign:
                     kd_band_log10=_kd_band, blocked_reason=_blocked,
                 ))
             else:
+                # ⛔ A design is never its own baseline. A lead that is also
+                # resubmitted in this round's pool would otherwise be compared
+                # against itself and read INDISTINGUISHABLE, which is a
+                # measurement of nothing wearing a verdict's name.
                 _base = [
                     (p, parent_round_of.get(p), rows_by_seq[p])
                     for p in steered
-                    if p not in parent_block_reason and p in rows_by_seq
+                    if p != s and p not in parent_block_reason and p in rows_by_seq
                 ]
                 vs_parent.append(_compare_to_baseline(
                     sequence=s, child_round=index, child_row=rows_by_seq.get(s),
