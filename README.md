@@ -24,9 +24,12 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.15.0** — binder maturation reaches customers. `client.maturation` drives the
-> platform's server-side maturation loop: hand it sequences you already have and it
-> folds them, gates on the peptide-interface ipSAE, scores the in-domain poses,
+> **v0.15.1** — binder maturation reaches customers. (0.15.0 shipped without
+> `ligandai/contrastive.py` and could not be imported at all; it is yanked, and
+> 0.15.1 is that release plus the missing module. Nothing else differs.)
+>
+> `client.maturation` drives the platform's server-side maturation loop: hand it
+> sequences you already have and it folds them, gates on the peptide-interface ipSAE, scores the in-domain poses,
 > mutates the interface, and re-folds the variants **and their parents in the same
 > cycle**, so a variant-vs-parent delta means something. Every withheld number says
 > which of six reasons withheld it — and only one of the six is a verdict about the
