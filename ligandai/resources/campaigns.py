@@ -3117,6 +3117,27 @@ class Campaigns(Resource):
         range pools the panel's affinity distribution into what is supposed to
         be its noise.
         """
+        # ⛔ `replicate` takes **panel_kwargs while `run_round` takes
+        # panel_kwargs={...} as a dict. One parameter, two spellings on one
+        # resource — and a caller who follows run_round's convention here had
+        # the dict forwarded as a keyword literally named `panel_kwargs`, down
+        # through fold_panel's **fold_kwargs into fold_batch, surfacing as
+        # `TypeError: Peptides.fold_batch() got an unexpected keyword argument
+        # 'panel_kwargs'` with nothing pointing at the real mistake.
+        # Accept both spellings rather than making the caller know which method
+        # they are in. [bd-LIGANDAI_ALPHA_V2-jb73b]
+        nested = panel_kwargs.pop("panel_kwargs", None)
+        if nested is not None:
+            if not isinstance(nested, dict):
+                raise LigandAIValidationError(
+                    "panel_kwargs must be a dict of fold_panel keyword arguments; "
+                    f"got {type(nested).__name__}. On replicate() you may also pass "
+                    "them directly as keywords."
+                )
+            # An explicit keyword wins over the same key inside the dict.
+            for k, v in nested.items():
+                panel_kwargs.setdefault(k, v)
+
         panel_kwargs.setdefault("force_fresh", True)
         panel = self.fold_panel(
             sequences,

@@ -586,6 +586,65 @@ class AsyncGoalCampaign:
 
 
 class Goals(Resource):
+    def estimate(
+        self,
+        *,
+        target_hits: int,
+        criterion: str = "super_elite",
+        max_rounds: int = 3,
+        max_credits: float,
+        peptides_per_round: int | None = None,
+        folds_per_round: int | None = None,
+        trajectories: int | None = None,
+        sampling_steps: int | None = None,
+    ) -> dict:
+        """What does this objective cost if it runs to its bound?
+
+        ``POST /api/objectives/estimate`` — [bd-LIGANDAI_ALPHA_V2-vkp6w]
+
+        An objective is N designs passing a named acceptance criterion, bounded
+        by ``max_rounds`` and ``max_credits``. This returns the deterministic
+        worst-case credit projection for that shape, and says which of the two
+        ceilings actually binds::
+
+            est = client.goals.estimate(target_hits=25, criterion="super_elite",
+                                        max_rounds=3, max_credits=50000)
+            est["projection"]["perRoundCredits"]
+            est["projection"]["maxTotalCredits"]
+            est["projection"]["bindingConstraint"]   # "maxRounds" | "maxCredits"
+
+        ⛔ **No yield is assumed.** This is arithmetic on the round
+        configuration priced through the platform's own credit pricing, times
+        the round ceiling. It is what the objective costs if every round runs —
+        never a prediction of when the target is met, which would need a
+        per-target hit rate the platform cannot predict. Read
+        ``est["basis"]`` before presenting the number as an "estimated cost".
+
+        Because no yield is involved it holds for **every** acceptance
+        criterion, including ones a measured-hit-rate projection must refuse.
+
+        Read-only: no run is created and no credits are reserved.
+        """
+        body: dict = {
+            "objective": {
+                "criterion": criterion,
+                "targetHits": target_hits,
+                "maxRounds": max_rounds,
+                "maxCredits": max_credits,
+            }
+        }
+        round_cfg = {
+            "peptidesPerRound": peptides_per_round,
+            "foldsPerRound": folds_per_round,
+            "trajectories": trajectories,
+            "samplingSteps": sampling_steps,
+        }
+        round_cfg = {k: v for k, v in round_cfg.items() if v is not None}
+        if round_cfg:
+            body["round"] = round_cfg
+        return self._transport.request("POST", "/api/objectives/estimate", json=body) or {}
+
+
     """Sync ``client.goals`` — goal-directed campaign engine and AutoResearch runs.
 
     Two surfaces:
