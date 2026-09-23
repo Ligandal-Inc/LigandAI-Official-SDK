@@ -52,15 +52,39 @@ The loop this module makes expressible:
     Rows flagged ``scaffold_mediated`` are excluded from selection and counted,
     never silently dropped.
 
-Refs: bd-dre-if562.
+``IPSAE_IS_THE_GATE, KD_IS_THE_OBJECTIVE``
+    Selectivity is ``min(off-target Kd) / on-target Kd``, so a panel carrying
+    only ``peptide_ipsae`` cannot state the deliverable at all. Every leg now
+    carries the DeltaForge Kd beside the ipSAE — and carries it under the same
+    absent-measurement discipline, because for a Kd the stakes are sharper:
+    0 nM is infinitely tight binding, so a missing Kd defaulted to zero does not
+    dilute a ranking, it manufactures the best design in the set and sorts it
+    first. The rules, all in :mod:`ligandai.thermo`:
+
+    * Below :data:`~ligandai.thermo.VALID_IPSAE` the platform returns no Kd —
+      DeltaForge scores an INTERFACE and there is none. That is
+      ``kd_status='below_ipsae_gate'``, an INDETERMINATE leg, never a weak one.
+    * A Kd absent on ONE off-target leg makes the ratio an UPPER BOUND, exactly
+      as a missing comparator does for Δ — see ``kd_upper_bound``, never
+      ``kd_fold_selectivity``.
+    * ⛔ AND THE Kd IS NOT A VALIDATED WITHIN-TARGET ORDERING. Deployed v10.2
+      scored macro within-target Spearman **−0.0736** against measured pKd over
+      11 targets, while binder **LENGTH** scored **+0.1285** on the same rows.
+      So every row that carries a Kd also carries ``target_peptide_length``, and
+      nothing here re-ranks on Kd: :meth:`PanelResult.deltas` still orders on the
+      ipSAE Δ. A cross-target RATIO is the legitimate use — one scorer, one
+      binder, two receptors — and that is the only Kd claim this module makes.
+
+Refs: bd-dre-if562, bd-LIGANDAI_ALPHA_V2-jb73b.
 """
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, TypeGuard
 
 from ligandai.contrastive import (
     AvoidancePolicy,
@@ -77,6 +101,15 @@ from ligandai.multitarget import (
     TargetSpec,
     aggregate_across_targets,
     coerce_target,
+)
+from ligandai.thermo import (
+    CONFIRM_MIN_DRAWS,
+    VALID_IPSAE,
+    SelectivityRatio,
+    geometric_mean_kd,
+    kd_bootstrap_ci,
+    selectivity_ratio,
+    worst_case,
 )
 from ligandai.errors import (
     LigandAISurfaceNotInThisPackage,
@@ -99,6 +132,11 @@ __all__ = [
     "ReplicationReport",
     "RecursiveCampaign",
     "CampaignRound",
+    "ThermoScoreReport",
+    # Re-exported so a caller reading a Kd off a panel reaches the rules that
+    # govern it without a second import.
+    "SelectivityRatio",
+    "VALID_IPSAE",
     # Re-exported so one import reaches the whole co-optimization surface.
     "CoOptimization",
     "TargetSpec",
@@ -193,6 +231,22 @@ def _pocket_features_unreachable(gene: str) -> LigandAIParameterNotForwarded:
     )
 
 
+def _is_measure(v: Any) -> TypeGuard[float]:
+    """Is ``v`` a real numeric MEASUREMENT?
+
+    ⛔ THE TEST IS THE TYPE, NEVER THE TRUTHINESS. A computed ``0.0`` is
+    something the platform measured, and ``if not kd:`` discards it — which for
+    a Kd is the worst possible direction to be wrong in, since 0 nM would
+    otherwise sort to the top of every ranking as the tightest binder in the
+    panel.
+
+    ⛔ And ``bool`` is excluded explicitly: ``isinstance(True, int)`` is True in
+    Python, so a boolean in a numeric field would land as 1.0 — a silent perfect
+    ipSAE, or a 1 nM Kd.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _norm_seq(seq: str) -> str:
     s = str(seq).strip().upper()
     if not s or not s.isalpha():
@@ -233,10 +287,251 @@ class PanelLeg:
     run into a silent zero-survivor result. [bd-dre-if562]
     """
 
+    # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
+    kd_nm_draws: list[float] = field(default_factory=list)
+    """DeltaForge predicted Kd in NANOMOLAR, one per draw that produced one.
+
+    ⛔ The unit is in the name and there is no bare ``kd`` anywhere on this
+    class. ⛔ Routinely SHORTER than ``peptide_ipsae_draws``: of 17,649
+    ipSAE-gated folds in the live DB only 9,286 carry a persisted DeltaForge
+    score, so a panel has Kd on some legs and not others as a matter of course.
+    Read :attr:`n_kd_draws`, never ``n_draws``, when reasoning about a Kd.
+    """
+    delta_g_draws: list[float] = field(default_factory=list)
+    """DeltaForge ΔG in kcal/mol for the same draws. Linear, unlike the Kd."""
+    kd_not_computed: int = 0
+    """Draws with no admissible Kd — INDETERMINATE, and never a zero.
+
+    ⛔ 0 nM is infinitely tight binding. Defaulting an absent Kd to zero does
+    not merely dilute an aggregate, it manufactures the best design in the panel
+    and sorts it to the top of the ranking.
+    """
+    kd_statuses: list[str] = field(default_factory=list)
+    """The platform's OWN ``kd_status`` per draw with no Kd.
+
+    One of ``not_computed`` / ``below_ipsae_gate`` / ``ipsae_not_computed`` /
+    ``scorer_not_quotable`` / ``coord_degenerate``. ⛔ These are not
+    interchangeable: "this fold sits below the interface gate, so there was
+    nothing to score" and "nobody has ever scored this fold" are different
+    facts with different fixes — the second is what :meth:`Campaigns.score_thermo`
+    exists to repair, and paying to repair the first buys nothing.
+    """
+    kd_reasons: list[str] = field(default_factory=list)
+    """The platform's own ``kd_reason`` sentence per draw with no Kd, verbatim."""
+    kd_scorers: list[str] = field(default_factory=list)
+    """Which scorer produced each recorded Kd, e.g.
+    ``deltaforge_v10_2_unified_parallel``.
+
+    ⛔ PROVENANCE IS THE SCORER, NOT THE CALIBRATION HEAD, and the reason is the
+    RESPONSE SHAPE rather than a broken scorer. A live ``score_deltaforge_v102``
+    call does assign a head ('v10_boltz2', 'v9hq_xray', and their
+    ``_autodetected`` variants), but neither surface this module reads exposes
+    the field: ``PerBinderResult`` on ``POST /api/v1/deltaforge/batch-score-fold``
+    carries ``scorer_version`` / ``interface_type`` / ``affinity_quotable`` /
+    ``affinity_reason_code`` / ``affinity_reason`` and no head at all, and the
+    persisted ``ptf_deltaforge_scores.calibration_head`` column is NULL on all
+    43,668 rows. So a guard that refuses a Kd lacking a head rejects 100% of
+    real rows — and would tell the next reader the scorer is broken when the
+    scorer is fine and the route simply does not return that field. Scorer +
+    version is the attribution that is actually on the wire.
+    """
+    kd_scorer_versions: list[str] = field(default_factory=list)
+    peptide_length: int | None = None
+    """The LENGTH CONFOUND column, as the platform measured it.
+
+    ⛔ Not ``len(sequence)``: on a scaffolded construct the cassette is in the
+    sequence and not in the binder chain the scorer saw. Carried because a
+    within-target Kd ordering is NOT a validated affinity ordering — v10.2
+    scored −0.0736 against measured pKd where length scored +0.1285 — so any
+    ordering that reads a Kd has to show the confound beside it.
+    """
+    kd_ipsae_gate: float | None = None
+    """The gate the PLATFORM applied, echoed rather than assumed. 0.67 today."""
+    ipsae_by_job: dict[str, float] = field(default_factory=dict)
+    """``peptide_ipsae`` keyed by fold job id — the EXACT per-draw pairing.
+
+    ⛔ ``fold_job_ids`` and ``peptide_ipsae_draws`` are NOT index-aligned: ids
+    are appended at submission, values in whatever order the metrics surface
+    returns rows. Anything that needs "the ipSAE of THIS fold" — the gate check
+    in :meth:`Campaigns.score_thermo`, which decides what gets BILLED — must
+    read this, not a positional guess.
+    """
+    kd_by_job: dict[str, float] = field(default_factory=dict)
+    """Admissible Kd keyed by fold job id. The pairing, and the already-paid set."""
+    kd_status_by_job: dict[str, str] = field(default_factory=dict)
+    """``kd_status`` keyed by fold job id, present whether or not a Kd landed."""
+
     @property
     def not_computed_reasons(self) -> tuple[str, ...]:
         """Distinct reasons this leg has no ``peptide_ipsae``, platform-stated."""
         return tuple(dict.fromkeys(s for s in self.peptide_ipsae_statuses if s))
+
+    # ─── the thermodynamic objective ────────────────────────────────────────
+
+    @property
+    def n_kd_draws(self) -> int:
+        """Draws carrying an admissible Kd. ⛔ Not :attr:`n_draws`."""
+        return len(self.kd_nm_draws)
+
+    @property
+    def kd_not_computed_reasons(self) -> tuple[str, ...]:
+        """Distinct platform-stated ``kd_reason`` sentences for this leg."""
+        return tuple(dict.fromkeys(s for s in self.kd_reasons if s))
+
+    @property
+    def kd_not_computed_statuses(self) -> tuple[str, ...]:
+        """Distinct platform-stated ``kd_status`` codes for this leg.
+
+        Branch on these; read :attr:`kd_not_computed_reasons` to quote a human
+        a sentence. A summary keyed on the free-text reason counts one fact
+        under as many spellings as the server has ever used for it.
+        """
+        return tuple(dict.fromkeys(s for s in self.kd_statuses if s))
+
+    @property
+    def kd_scorer_set(self) -> tuple[str, ...]:
+        """Every distinct scorer that contributed a Kd draw to this leg."""
+        return tuple(dict.fromkeys(s for s in self.kd_scorers if s))
+
+    @property
+    def kd_scorer_conflict(self) -> bool:
+        """True when this leg's Kd draws came from more than one scorer.
+
+        ⛔ A leg scored by two different calibrations is not one measurement,
+        and aggregating across them reports a spread that is partly the
+        difference between two models. The set is kept rather than collapsed.
+        """
+        return len(self.kd_scorer_set) > 1
+
+    @property
+    def kd_scorer(self) -> str | None:
+        """The one scorer behind this leg's Kd, or None.
+
+        None both when nothing was scored and when :attr:`kd_scorer_conflict` —
+        naming one of two calibrations would be a claim the draws do not
+        support. Read :attr:`kd_scorer_set` to see what actually ran.
+        """
+        s = self.kd_scorer_set
+        return s[0] if len(s) == 1 else None
+
+    @property
+    def kd_scorer_version(self) -> str | None:
+        """The one scorer version behind this leg's Kd, or None if it varies."""
+        v = tuple(dict.fromkeys(s for s in self.kd_scorer_versions if s))
+        return v[0] if len(v) == 1 else None
+
+    @property
+    def kd_nonpositive_draws(self) -> int:
+        """Recorded draws at or below 0 nM.
+
+        ⛔ Such a draw is RECORDED — a computed 0.0 is a measurement the server
+        made, not an absence — but it has no logarithm, so it cannot enter a
+        geometric mean. :meth:`kd_value` returns None under ``mean`` rather than
+        substituting something that can.
+        """
+        return sum(1 for v in self.kd_nm_draws if not v > 0.0)
+
+    @property
+    def ipsae_gated(self) -> bool:
+        """Does the aggregated ``peptide_ipsae`` clear the platform's gate?
+
+        The gate the PLATFORM reported for this leg when it reported one, else
+        :data:`~ligandai.thermo.VALID_IPSAE`. False for an unmeasured leg,
+        because nothing was shown to clear anything.
+        """
+        v = self.value()
+        gate = self.kd_ipsae_gate if self.kd_ipsae_gate is not None else VALID_IPSAE
+        return v is not None and v >= gate
+
+    @property
+    def kd_confirmed(self) -> bool:
+        """Enough independent draws for this Kd to serve as a ratio denominator.
+
+        One screen-depth draw is not a confirmation of itself: an independent
+        re-fold moved the cohort median from 1.03 nM to 22.43 nM and only 3 of
+        12 designs held within 2x.
+        """
+        return self.n_kd_draws >= CONFIRM_MIN_DRAWS
+
+    def kd_value(self, statistic: LegStatistic = "median") -> float | None:
+        """Aggregate the Kd draws in nM, or None if there are none.
+
+        ⛔ AGGREGATED IN LOG10 SPACE, because Kd is log-distributed and a linear
+        mean over draws is dominated by the weakest one — 1 nM and 100 nM
+        average to 10 nM, not 50.5 nM. Concretely:
+
+        * ``median`` / ``min`` / ``max`` are ORDER statistics. log10 is
+          monotonic, so the log-space answer and the raw-space answer are the
+          same value and these need no transform. They are also the only
+          statistics defined when a draw is 0.0.
+        * ``mean`` is the GEOMETRIC mean (:func:`~ligandai.thermo.geometric_mean_kd`)
+          — the mean of the logs. This is the statistic the log-space rule is
+          about, and it is None when any draw is non-positive
+          (:attr:`kd_nonpositive_draws`), never a substituted finite number.
+        """
+        if not self.kd_nm_draws:
+            return None
+        if statistic == "mean":
+            if self.kd_nonpositive_draws:
+                return None
+            return geometric_mean_kd(self.kd_nm_draws)
+        return _aggregate(self.kd_nm_draws, statistic)
+
+    def kd_spread(self) -> float | None:
+        """max − min of the Kd draws, in nM. None with fewer than two draws.
+
+        This is a RANGE, not a standard error. It does not shrink as √n and must
+        not be divided by one.
+
+        ⛔ And it is a LINEAR range on a log-distributed quantity, so it is
+        dominated by the weakest draw and is not comparable between a
+        tight-binding leg and a weak one. For a noise BAND use
+        :meth:`log10_kd_spread`, which is a fold-change and is.
+        """
+        if len(self.kd_nm_draws) < 2:
+            return None
+        return float(max(self.kd_nm_draws) - min(self.kd_nm_draws))
+
+    def log10_kd_spread(self) -> float | None:
+        """Draw-to-draw range of log10(Kd) — the band, in orders of magnitude.
+
+        1.0 means the draws span a factor of ten. None with fewer than two
+        draws, or when any draw is non-positive and has no logarithm.
+        """
+        if len(self.kd_nm_draws) < 2 or self.kd_nonpositive_draws:
+            return None
+        logs = [math.log10(v) for v in self.kd_nm_draws]
+        return float(max(logs) - min(logs))
+
+    def kd_ci(self, *, confidence: float = 0.90) -> tuple[float, float] | None:
+        """Bootstrap CI (nM) for the geometric mean. None below two draws.
+
+        None also when a draw is non-positive — the resampling happens in log
+        space and there is no log of zero.
+        """
+        if len(self.kd_nm_draws) < CONFIRM_MIN_DRAWS or self.kd_nonpositive_draws:
+            return None
+        return kd_bootstrap_ci(self.kd_nm_draws, confidence=confidence)
+
+    def delta_g_value(self, statistic: LegStatistic = "median") -> float | None:
+        """Aggregate ΔG in kcal/mol. Linear, so an ordinary statistic."""
+        if not self.delta_g_draws:
+            return None
+        return _aggregate(self.delta_g_draws, statistic)
+
+    def paired_draws(self) -> tuple[tuple[str, float, float | None], ...]:
+        """``(fold_job_id, peptide_ipsae, kd_nm | None)`` per measured draw.
+
+        ⛔ The pairing, stated rather than inferred. A Kd aggregated over a
+        different draw set than the ipSAE it is reported beside is a silent
+        mismatch, and positional zipping of ``fold_job_ids`` against
+        ``peptide_ipsae_draws`` produces exactly that — the two lists are filled
+        by different loops in different orders.
+        """
+        return tuple(
+            (jid, ipsae, self.kd_by_job.get(jid))
+            for jid, ipsae in self.ipsae_by_job.items()
+        )
 
     @property
     def n_draws(self) -> int:
@@ -273,8 +568,62 @@ class PanelLeg:
         return f"<PanelLeg {self.receptor} {self.sequence[:12]}… ipSAE={shown} n={self.n_draws}>"
 
 
+class _KdReadouts:
+    """The Kd read-outs, defined ONCE and inherited by both row arities.
+
+    ⛔ A MIXIN RATHER THAN A COPY. :class:`SelectivityDelta` and
+    :class:`MultiTargetDelta` must answer "how selective is this, on Kd" the
+    same way; two copies of these four properties is how a guard gets tightened
+    on one arity and the other keeps quoting the old number. The fields they
+    read are declared (not assigned) here so the type checker can see them, and
+    are supplied as real dataclass fields by each subclass.
+    """
+
+    selectivity: SelectivityRatio | None
+    kd_comparators_missing: tuple[str, ...]
+
+    @property
+    def kd_fold_selectivity(self) -> float | None:
+        """``min(off-target Kd) / on-target Kd``. >1 means on-target is tighter.
+
+        ⛔ None whenever the ratio is not quotable — an incomplete off-target
+        panel, an unconfirmed or ungated denominator, a non-positive on-target
+        Kd. It is NEVER ``inf``: a 0 nM on-target Kd is a scorer artifact, not a
+        perfectly selective design. Read ``kd_upper_bound`` for the partial case
+        and ``kd_selectivity_status`` for which rule applied.
+        """
+        s = self.selectivity
+        if s is None or not s.quotable or self.kd_comparators_missing:
+            return None
+        return s.ratio
+
+    @property
+    def log10_kd_selectivity(self) -> float | None:
+        """log10 of :attr:`kd_fold_selectivity` — the margin in orders of magnitude."""
+        r = self.kd_fold_selectivity
+        return None if r is None or r <= 0.0 else float(math.log10(r))
+
+    @property
+    def worst_off_target_by_kd(self) -> str | None:
+        """The TIGHTEST-binding off-target — the argMIN of off-target Kd.
+
+        ⛔ A DIFFERENT RECEPTOR FROM ``worst_off_target``, which is the argMAX of
+        off-target ipSAE. Kd is lower-is-better, so the risk is the smallest
+        number; ipSAE is higher-is-better, so its risk is the largest. Reusing
+        one argument for the other names the wrong receptor as the liability and
+        nothing in the row contradicts it — which is why the two fields are
+        spelled so differently.
+        """
+        return None if self.selectivity is None else self.selectivity.tightest_off_target
+
+    @property
+    def kd_selectivity_resolvable(self) -> bool:
+        """False when the ratio cannot be read. ⛔ Read THIS, not the number."""
+        return self.kd_fold_selectivity is not None
+
+
 @dataclass(frozen=True)
-class SelectivityDelta:
+class SelectivityDelta(_KdReadouts):
     """A complete-panel selectivity row. Ranked on ``delta``, never on ``target``."""
 
     sequence: str
@@ -291,6 +640,59 @@ class SelectivityDelta:
     delta_resolvable: bool = True
     quality_tier: str | None = None
     n_draws: int = 1
+
+    # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
+    selectivity: SelectivityRatio | None = None
+    """``min(off-target Kd) / on-target Kd``, or an explicit refusal to state one.
+
+    ⛔ THE ONE IMPLEMENTATION of the ratio, from
+    :func:`~ligandai.thermo.selectivity_ratio`. The convenience properties below
+    read it; they do not recompute it. Two implementations of one ordering is how
+    a fix lands in one of them and the other keeps selecting.
+
+    ⛔ Read ``selectivity.quotable`` BEFORE ``selectivity.ratio``. A withheld
+    ratio is the NORMAL outcome for a screen-depth panel, not an error, and
+    ``selectivity.reason`` names which rule withheld it.
+    """
+    target_kd_nm: float | None = None
+    """Aggregated on-target Kd in NANOMOLAR. None when nothing was scored."""
+    off_target_kd_nm: dict[str, float] = field(default_factory=dict)
+    """Per-off-target Kd in nM, for the comparators that have one."""
+    kd_selectivity_status: str = "on_target_missing"
+    """Why the ratio reads as it does — ``ok`` or the withholding reason.
+
+    Normally ``selectivity.reason``. It is a stored field rather than a pure
+    passthrough because one case cannot be expressed there: a non-positive
+    on-target Kd reports ``on_target_nonpositive`` here, and
+    :func:`~ligandai.thermo.selectivity_ratio` is never asked to divide by it.
+    """
+    kd_upper_bound: float | None = None
+    """The subset-minimised ratio when the off-target Kd panel is INCOMPLETE.
+
+    ⛔ THIS IS NOT ``kd_fold_selectivity`` AND MUST NEVER BE READ AS ONE. A
+    minimum over a subset of comparators can only FALL as the missing ones
+    arrive, so a partial Kd panel yields an upper bound — the same
+    ``PARTIAL_PANEL_INFLATES_THE_WORST_CASE`` defect this module opens with,
+    wearing the other objective's name. ``kd_comparators_missing`` says what is
+    absent.
+    """
+    kd_comparators_missing: tuple[str, ...] = ()
+    """Off-targets with no Kd. Non-empty ⇒ read ``kd_upper_bound``, not the ratio."""
+    target_peptide_length: int | None = None
+    """The length confound, present on every row that carries a Kd.
+
+    ⛔ Here because a within-target Kd ordering is not a validated affinity
+    ordering: deployed v10.2 scored macro within-target Spearman −0.0736 against
+    measured pKd across 11 targets while binder LENGTH scored +0.1285 on the same
+    rows. The ratio across targets is the legitimate claim; an ordering WITHIN
+    one target has to show this column.
+    """
+    kd_scorer: str | None = None
+    """Scorer behind the Kd. None when the legs disagree — provenance travels
+    with the number, and two calibrations are not one measurement."""
+    kd_scorer_version: str | None = None
+    kd_ipsae_gate: float | None = None
+    """The gate the platform applied below which it returns no Kd at all."""
 
     @property
     def resolvable(self) -> bool:
@@ -327,10 +729,18 @@ class PartialDelta:
     comparators_missing: tuple[str, ...]
     delta_upper_bound: float
     worst_present: str
+    # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
+    target_kd_nm: float | None = None
+    off_target_kd_nm: dict[str, float] = field(default_factory=dict)
+    kd_upper_bound: float | None = None
+    """Subset-minimised Kd ratio. An upper bound on an already-partial row —
+    doubly so, and never a verdict under any reading."""
+    kd_comparators_missing: tuple[str, ...] = ()
+    target_peptide_length: int | None = None
 
 
 @dataclass(frozen=True)
-class MultiTargetDelta:
+class MultiTargetDelta(_KdReadouts):
     """A complete-panel row for a CO-OPTIMIZATION over several positive targets.
 
     ⛔ THE AGGREGATION RULE TRAVELS WITH THE NUMBER. There is no field on this
@@ -369,6 +779,58 @@ class MultiTargetDelta:
     delta_resolvable: bool = True
     quality_tier: str | None = None
     n_draws: int = 1
+
+    # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
+    selectivity: SelectivityRatio | None = None
+    """The ratio, from :func:`~ligandai.thermo.selectivity_ratio`. Read
+    ``selectivity.quotable`` first. Its denominator is
+    :attr:`aggregate_kd_nm`, so ``aggregate_kd_rule`` governs it too."""
+    per_target_kd_nm: dict[str, float] = field(default_factory=dict)
+    """On-target Kd in nM per positive target, always populated beside the
+    aggregate so a ``mean``-rule number carried by one strong leg is visible."""
+    aggregate_kd_nm: float | None = None
+    """The positive legs' Kd combined by :attr:`aggregate_kd_rule`.
+
+    ⛔ THE DIRECTION IS INVERTED RELATIVE TO ipSAE AND THAT IS THE WHOLE POINT.
+    ipSAE is higher-is-better, so its ``worst_case`` is the MIN. Kd is
+    lower-is-better, so ``worst_case`` over Kd is the MAX — the weakest leg.
+    Combining a Kd under ipSAE's direction returns a confidently inverted
+    verdict that no other field contradicts, which is why this module routes
+    every combination through :func:`~ligandai.thermo.worst_case` with the
+    direction named rather than inferred.
+    """
+    aggregate_kd_rule: str | None = None
+    """The rule that produced :attr:`aggregate_kd_nm`, next to the number it
+    produced — ``worst_case`` (max Kd), ``mean`` (GEOMETRIC), or ``single``."""
+    limiting_target_by_kd: str | None = None
+    """The WEAKEST positive leg on Kd — the argMAX. ⛔ Not
+    :attr:`limiting_target`, which is the argMIN of ipSAE; on a real panel they
+    are routinely different targets."""
+    per_target_kd_pass: dict[str, bool] = field(default_factory=dict)
+    """Per-target ``Kd <= kd_ceiling_nm``, when a ceiling was supplied."""
+    kd_selectivity_status: str = "on_target_missing"
+    kd_upper_bound: float | None = None
+    """Subset-minimised ratio when the off-target Kd panel is incomplete. ⛔
+    Never :attr:`kd_fold_selectivity`."""
+    kd_comparators_missing: tuple[str, ...] = ()
+    kd_targets_missing: tuple[str, ...] = ()
+    """Positive targets with no Kd. Non-empty ⇒ the aggregate is over a SUBSET,
+    and under ``mean`` that is not a bound in either direction."""
+    off_target_kd_nm: dict[str, float] = field(default_factory=dict)
+    target_peptide_length: int | None = None
+    kd_scorer: str | None = None
+    kd_scorer_version: str | None = None
+    kd_ipsae_gate: float | None = None
+
+    @property
+    def all_targets_pass_kd(self) -> bool:
+        """Every positive leg cleared the Kd ceiling on its own.
+
+        The thermodynamic twin of :attr:`all_targets_pass`, and the stricter
+        statement a ``mean`` aggregate does not make. False when no ceiling was
+        supplied, because nothing was required and so nothing was shown.
+        """
+        return bool(self.per_target_kd_pass) and all(self.per_target_kd_pass.values())
 
     @property
     def resolvable(self) -> bool:
@@ -419,6 +881,13 @@ class MultiTargetPartial:
     bound_kind: Literal["upper_bound", "indeterminate"]
     delta_upper_bound: float | None
     worst_present: str | None
+    # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
+    per_target_kd_nm: dict[str, float] = field(default_factory=dict)
+    off_target_kd_nm: dict[str, float] = field(default_factory=dict)
+    kd_upper_bound: float | None = None
+    kd_comparators_missing: tuple[str, ...] = ()
+    kd_targets_missing: tuple[str, ...] = ()
+    target_peptide_length: int | None = None
 
 
 @dataclass(frozen=True)
@@ -430,18 +899,165 @@ class ReplicationReport:
     lost: tuple[str, ...]
     untested: tuple[str, ...]
     criterion: str
+    """The ipSAE criterion. Unchanged, and still what ``held`` refers to."""
+
+    # ─── the thermodynamic leg [bd-LIGANDAI_ALPHA_V2-jb73b.2] ───────────────
+    # ⛔ A SEPARATE LEG, not a widened `criterion`. "It held on ipSAE and its Kd
+    # moved" is the single most important thing a replication can find, and
+    # folding both objectives into one boolean makes it the one thing the report
+    # cannot say. `held` stays exactly what it was so every existing caller is
+    # unchanged.
+    kd_tested: tuple[str, ...] = ()
+    kd_held: tuple[str, ...] = ()
+    kd_lost: tuple[str, ...] = ()
+    kd_untested: tuple[str, ...] = ()
+    """Sequences whose Kd was not measurable at the fresh draw.
+
+    ⛔ UNTESTED, NEVER LOST. 47% of gated folds carry no persisted DeltaForge
+    score, so an absent Kd is the common case and counting it as a failure to
+    hold would report a coverage gap as a reproducibility result.
+    """
+    thermo_criterion: str | None = None
+    """What the Kd had to do to count as held, or a statement that nothing was
+    asked of it. ⛔ Never None-meaning-passed: when no thermodynamic threshold
+    was supplied this says so, in words, and every sequence is ``kd_untested``.
+    This module invents no thresholds."""
 
     @property
     def hold_rate(self) -> float | None:
         n = len(self.tested)
         return None if n == 0 else len(self.held) / n
 
+    @property
+    def kd_hold_rate(self) -> float | None:
+        """Fraction of the Kd-TESTED shortlist that held on Kd.
+
+        None when nothing was Kd-tested — either no threshold was stated or no
+        sequence had a measurable Kd. ⛔ Denominated in ``kd_tested``, not
+        ``tested``: dividing by the ipSAE denominator would report a missing
+        measurement as a thermodynamic failure.
+        """
+        n = len(self.kd_tested)
+        return None if n == 0 else len(self.kd_held) / n
+
+    @property
+    def held_both(self) -> tuple[str, ...]:
+        """Survived BOTH objectives — the only set that answers the deliverable."""
+        kd = set(self.kd_held)
+        return tuple(s for s in self.held if s in kd)
+
+    @property
+    def held_ipsae_lost_kd(self) -> tuple[str, ...]:
+        """Held on ipSAE and MOVED on Kd — the finding this leg exists to surface."""
+        kd = set(self.kd_lost)
+        return tuple(s for s in self.held if s in kd)
+
     def __repr__(self) -> str:  # pragma: no cover - repr only
         hr = self.hold_rate
         shown = "n/a" if hr is None else f"{hr:.0%}"
+        khr = self.kd_hold_rate
+        kshown = "untested" if khr is None else f"{khr:.0%}"
         return (
             f"<ReplicationReport {len(self.held)}/{len(self.tested)} held ({shown}); "
-            f"{len(self.untested)} untested>"
+            f"{len(self.untested)} untested; Kd {kshown}>"
+        )
+
+
+@dataclass(frozen=True)
+class ThermoScoreReport:
+    """What one :meth:`Campaigns.score_thermo` backfill sent, got, and SPENT.
+
+    ⛔ THE COUNTS ARE THE POINT. ``POST /api/v1/deltaforge/batch-score-fold`` is
+    billed per successfully-scored fold, so this report is a receipt: what was
+    submitted, what was deliberately not submitted and why, and what came back
+    indeterminate after being paid for.
+    """
+
+    submitted: tuple[str, ...]
+    """Fold job ids actually sent to the scorer — the billable set."""
+    skipped_below_gate: dict[str, str] = field(default_factory=dict)
+    """``fold_job_id -> why``, for folds under the platform's ipSAE gate.
+
+    ⛔ Paying to score a fold the platform will then refuse to quote is money
+    for nothing: below the gate DeltaForge is scoring a non-interface. These are
+    skipped before the request is built, not filtered out of the response.
+    """
+    skipped_no_ipsae: dict[str, str] = field(default_factory=dict)
+    """Folds whose ``peptide_ipsae`` was never computed, so the gate is
+    unanswerable. ⛔ Not below the gate — unmeasured against it, which is a
+    different fact and a different fix (the ipSAE, not the Kd)."""
+    skipped_already_scored: tuple[str, ...] = ()
+    """Folds that already carry a Kd on the panel. Re-scoring them would pay a
+    second time for a number already in hand."""
+    scored: dict[str, float] = field(default_factory=dict)
+    """``fold_job_id -> kd_nm`` for every fold that returned a quotable Kd."""
+    indeterminate: dict[str, str] = field(default_factory=dict)
+    """``fold_job_id -> affinity_reason_code`` where the server WITHHELD the number.
+
+    ⛔ ``affinity_quotable == False`` is a decision, not a failure and not a
+    zero: the interface-type gate declined to quote (TCR-pMHC and symmetric
+    multimers, where the scorer does not rank). These folds WERE billed if the
+    score itself succeeded, and the reason code is the server's own.
+    """
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    """Rows carrying an ``error`` — scoring genuinely failed. Distinct from
+    :attr:`indeterminate` in exactly the way the server distinguishes them."""
+    deltaforge_scores: list[dict[str, Any]] = field(default_factory=list)
+    """The ``{fold_job_id, delta_g, kd_nm}`` payload for the forward merge.
+
+    ⛔ THIS IS THE ONLY ROUTE BY WHICH THESE SCORES REACH A PANEL.
+    ``batch-score-fold`` does NOT write ``ptf_deltaforge_scores``, so re-calling
+    ``fold_panel`` / ``filter_folds`` will not pick them up — a second panel
+    would come back Kd-free and a caller could pay twice for the same numbers.
+    They are merged forward through
+    ``filter_folds(deltaforge_scores=...)`` instead.
+    """
+    merged_into_panel: bool = False
+    """True when the scores were re-hydrated onto the panel's legs."""
+    chunk_size: int = 200
+    """⛔ The server's own ``MAX_BATCH``, not a tuning knob: a larger request is
+    rejected outright with "Batch too large"."""
+
+    @property
+    def n_submitted(self) -> int:
+        return len(self.submitted)
+
+    @property
+    def n_scored(self) -> int:
+        """Folds that returned a Kd — the count that was BILLED on success."""
+        return len(self.scored)
+
+    @property
+    def n_skipped_below_gate(self) -> int:
+        return len(self.skipped_below_gate)
+
+    @property
+    def n_skipped_no_ipsae(self) -> int:
+        return len(self.skipped_no_ipsae)
+
+    @property
+    def n_already_scored(self) -> int:
+        return len(self.skipped_already_scored)
+
+    @property
+    def n_indeterminate(self) -> int:
+        return len(self.indeterminate)
+
+    @property
+    def coverage(self) -> float | None:
+        """Fraction of the submitted set that came back with a Kd.
+
+        None when nothing was submitted — which is a legitimate and cost-free
+        outcome, not a zero-coverage result.
+        """
+        return None if not self.submitted else self.n_scored / len(self.submitted)
+
+    def __repr__(self) -> str:  # pragma: no cover - repr only
+        return (
+            f"<ThermoScoreReport {self.n_scored}/{self.n_submitted} scored; "
+            f"{self.n_indeterminate} withheld, {len(self.errors)} errored; "
+            f"skipped {self.n_skipped_below_gate} below-gate, "
+            f"{self.n_already_scored} already scored>"
         )
 
 
@@ -613,6 +1229,209 @@ class PanelResult:
         r = spread.get("median_range")
         return None if r is None else round(float(r) * (2 ** 0.5), 4)
 
+    def observed_kd_spread(self) -> dict[str, Any]:
+        """Measured draw-to-draw spread of the Kd, IN LOG10 SPACE, over every leg.
+
+        ⛔ log10 AND NOT NANOMOLAR. A linear nM range is dominated by whichever
+        leg binds weakest — a 1→100 nM leg and a 1,000→100,000 nM leg both span
+        two orders of magnitude, but their nM ranges differ by a factor of 1,000,
+        so pooling them measures the panel's affinity distribution rather than
+        its noise. In log10 both read 2.0, which is what a band needs.
+
+        Returns ``{"n_legs", "median_log10_range", "max_log10_range",
+        "pooled_sd_log10", "median_fold_range"}``. ``median_fold_range`` is the
+        same median expressed as a multiplicative factor, for quoting.
+        """
+        ranges = [
+            s for leg in self.legs.values()
+            if (s := leg.log10_kd_spread()) is not None
+        ]
+        devs: list[float] = []
+        for leg in self.legs.values():
+            if len(leg.kd_nm_draws) < 2 or leg.kd_nonpositive_draws:
+                continue
+            logs = [math.log10(v) for v in leg.kd_nm_draws]
+            m = statistics.fmean(logs)
+            devs.extend(v - m for v in logs)
+        med = None if not ranges else float(statistics.median(ranges))
+        return {
+            "n_legs": len(ranges),
+            "median_log10_range": med,
+            "max_log10_range": None if not ranges else float(max(ranges)),
+            "pooled_sd_log10": (
+                float(statistics.pstdev(devs)) if len(devs) >= 2 else None
+            ),
+            "median_fold_range": None if med is None else float(10 ** med),
+        }
+
+    def cross_draw_kd_band_log10(self) -> float | None:
+        """One-leg log10 Kd range propagated through a RATIO of two legs.
+
+        ``log10-range × √2``. A selectivity ratio is a difference of two
+        log10(Kd) values, and when the two legs were folded in separate
+        submissions their noise is independent, so none of it cancels and the
+        band on the ratio is wider than the band on either leg. Compare a
+        claimed fold-selectivity against ``10 ** this`` before quoting it.
+        """
+        r = self.observed_kd_spread().get("median_log10_range")
+        return None if r is None else round(float(r) * (2 ** 0.5), 4)
+
+    # ─── the thermodynamic side of a row ────────────────────────────────────
+
+    def _kd_side(
+        self,
+        seq: str,
+        *,
+        rule: CrossTargetAggregate | None,
+        multi: bool,
+        kd_ceiling_nm: float | None,
+    ) -> dict[str, Any]:
+        """Everything Kd about one design, computed ONCE for both row kinds.
+
+        ⛔ ONE IMPLEMENTATION, called from the complete branch and the partial
+        branch of :meth:`deltas`. The ipSAE side learned this the hard way: two
+        implementations of one ordering is how a fix lands in one of them while
+        the other keeps selecting.
+
+        ⛔ THE Kd PANEL'S COMPLETENESS IS A SEPARATE AXIS FROM THE ipSAE
+        PANEL'S. 47% of ipSAE-gated folds carry no persisted DeltaForge score, so
+        an ipSAE-complete row with a partial Kd panel is the ordinary case, not
+        an edge one. It stays a Δ verdict and reports a Kd upper BOUND.
+        """
+        # ─── per-leg Kd, geometric over draws ───────────────────────────────
+        pos_kd: dict[str, float] = {}
+        pos_kd_missing: list[str] = []
+        pos_kd_nonpositive: list[str] = []
+        denom_draws: list[int] = []
+        denom_gated: list[bool] = []
+        for key in self.targets:
+            leg = self.legs.get((seq, key))
+            # ⛔ "mean" here is the GEOMETRIC mean (PanelLeg.kd_value), which is
+            # the estimator for a log-symmetric quantity. The panel's own
+            # `statistic` governs ipSAE and is deliberately not reused: a median
+            # over the 2-4 poses a cell actually has is an optimistic order
+            # statistic on Kd, biased low, and leave-one-out cannot detect it.
+            v = None if leg is None else leg.kd_value("mean")
+            if leg is None or v is None:
+                # ⛔ TWO DIFFERENT FACTS. "No Kd was recorded" and "a Kd of 0 nM
+                # was recorded and has no logarithm" both make the geometric mean
+                # None, and collapsing them would report a scorer artifact as an
+                # absent measurement — losing the one signal that says the
+                # scorer returned something impossible.
+                if leg is not None and leg.n_kd_draws and leg.kd_nonpositive_draws:
+                    pos_kd_nonpositive.append(key)
+                else:
+                    pos_kd_missing.append(key)
+                continue
+            pos_kd[key] = v
+            denom_draws.append(leg.n_kd_draws)
+            denom_gated.append(leg.ipsae_gated)
+
+        off_kd: dict[str, float] = {}
+        off_kd_missing: list[str] = []
+        for off in self.off_targets:
+            leg = self.legs.get((seq, off))
+            v = None if leg is None else leg.kd_value("mean")
+            if leg is None or v is None:
+                off_kd_missing.append(off)
+                continue
+            off_kd[off] = v
+
+        # ─── combine the positive legs, DIRECTION-AWARE ─────────────────────
+        agg_kd: float | None = None
+        limiting_kd: str | None = None
+        kd_rule: str | None = None
+        if pos_kd:
+            if not multi:
+                kd_rule = "single"
+                limiting_kd = next(iter(pos_kd))
+                agg_kd = next(iter(pos_kd.values()))
+            elif rule == "mean":
+                kd_rule = "mean"
+                # ⛔ GEOMETRIC across targets too, for the same reason it is
+                # geometric across draws. An arithmetic mean of 1 nM and 1 µM is
+                # 500 nM and reports a design that binds one target superbly as
+                # mediocre at both.
+                vals = list(pos_kd.values())
+                agg_kd = geometric_mean_kd(vals) if all(v > 0 for v in vals) else None
+                # The weakest leg — what the average hid, and the actionable half.
+                limiting_kd = max(pos_kd, key=lambda k: pos_kd[k])
+            else:
+                kd_rule = "worst_case"
+                # ⛔ 'lower_is_better' — worst_case over Kd is the MAX. Passing
+                # ipSAE's direction here returns an inverted verdict silently.
+                agg_kd, limiting_kd = worst_case(pos_kd, "lower_is_better")
+
+        # ─── the ratio: ONE implementation, in ligandai.thermo ──────────────
+        denom_leg = self.legs.get((seq, limiting_kd)) if limiting_kd else None
+        n_draws_denom = min(denom_draws) if denom_draws else 0
+        # ⛔ A non-positive denominator is never divided by. 0 nM is not a
+        # perfectly selective design, it is a scorer artifact, and thermo's
+        # selectivity_ratio would raise ZeroDivisionError on it — so it is never
+        # handed one. It is passed as an absent denominator and the row carries
+        # the sharper status below.
+        divisible = agg_kd is not None and agg_kd > 0.0
+        sel = selectivity_ratio(
+            on_target_kd_nm=agg_kd if divisible else None,
+            off_target_kd_nm=off_kd,
+            on_target_n_draws=n_draws_denom,
+            on_target_ci_nm=denom_leg.kd_ci() if denom_leg is not None else None,
+            on_target_gated=all(denom_gated) if denom_gated else False,
+        )
+
+        if (agg_kd is not None and not divisible) or (
+            agg_kd is None and pos_kd_nonpositive
+        ):
+            # ⛔ A 0 nM on-target Kd is not a perfectly selective design, and the
+            # ratio is None rather than inf. Nothing divided by it.
+            status = "on_target_nonpositive"
+        elif off_kd_missing and sel.ratio is not None:
+            # A ratio over a SUBSET of comparators can only FALL as the rest
+            # arrive: a bound, never a verdict.
+            status = "off_targets_partial"
+        else:
+            status = sel.reason
+        upper = sel.ratio if (off_kd_missing and sel.ratio is not None) else None
+
+        # ─── the ceiling, and the confound column ───────────────────────────
+        per_kd_pass: dict[str, bool] = {}
+        if kd_ceiling_nm is not None:
+            ceiling = float(kd_ceiling_nm)
+            per_kd_pass = {k: v <= ceiling for k, v in pos_kd.items()}
+
+        length_leg = denom_leg or next(
+            (self.legs.get((seq, k)) for k in self.targets if self.legs.get((seq, k))),
+            None,
+        )
+        return {
+            "per_target_kd_nm": {k: round(v, 6) for k, v in pos_kd.items()},
+            "off_target_kd_nm": {k: round(v, 6) for k, v in off_kd.items()},
+            "aggregate_kd_nm": None if agg_kd is None else round(agg_kd, 6),
+            "aggregate_kd_rule": kd_rule,
+            "limiting_target_by_kd": limiting_kd,
+            "per_target_kd_pass": per_kd_pass,
+            "selectivity": sel,
+            "kd_selectivity_status": status,
+            "kd_upper_bound": None if upper is None else round(upper, 4),
+            "kd_comparators_missing": tuple(sorted(set(off_kd_missing))),
+            "kd_targets_missing": tuple(
+                sorted(set(pos_kd_missing) | set(pos_kd_nonpositive))
+            ),
+            # ⛔ The confound. A within-target Kd ordering is not a validated
+            # affinity ordering (v10.2 macro Spearman -0.0736 vs measured pKd;
+            # LENGTH +0.1285 on the same rows), so length travels beside it.
+            "target_peptide_length": (
+                length_leg.peptide_length if length_leg is not None else None
+            ),
+            "kd_scorer": length_leg.kd_scorer if length_leg is not None else None,
+            "kd_scorer_version": (
+                length_leg.kd_scorer_version if length_leg is not None else None
+            ),
+            "kd_ipsae_gate": (
+                length_leg.kd_ipsae_gate if length_leg is not None else None
+            ),
+        }
+
     # ─── selection ──────────────────────────────────────────────────────────
 
     def deltas(
@@ -624,6 +1443,7 @@ class PanelResult:
         tie_tolerance: float = 0.011,
         exclude_scaffold_mediated: bool = True,
         aggregate: CrossTargetAggregate | None = None,
+        kd_ceiling_nm: float | None = None,
     ) -> tuple[
         list[SelectivityDelta] | list[MultiTargetDelta],
         list[PartialDelta] | list[MultiTargetPartial],
@@ -673,12 +1493,27 @@ class PanelResult:
         aggregate
             Override the panel's cross-target rule for this call. Required only
             if the panel somehow carries none and has several positive targets.
+        kd_ceiling_nm
+            Optional on-target Kd ceiling, in NANOMOLAR, recorded per positive
+            target as ``per_target_kd_pass``. Omitted means no thermodynamic
+            requirement was stated, and then ``per_target_kd_pass`` is empty
+            rather than vacuously true — nothing was asked, so nothing is
+            reported as met.
 
         Returns
         -------
         ``(complete, partial, summary)`` — ``complete`` sorted by Δ descending,
         ``partial`` bounds/indeterminates only, ``summary`` with the counts and
         the rule that produced them.
+
+        ⛔ STILL RANKED ON THE ipSAE Δ, AND DELIBERATELY SO. Every row now also
+        carries the DeltaForge Kd and the selectivity ratio, but the ORDER is
+        unchanged, because a within-target Kd ordering is not a validated
+        affinity ordering: deployed v10.2 scored macro within-target Spearman
+        −0.0736 against measured pKd over 11 targets, while binder LENGTH scored
+        +0.1285 on the same rows. Re-ranking on Kd would sort the panel partly by
+        peptide length and call the result affinity. The cross-target RATIO is
+        the legitimate Kd claim and it is reported, never sorted on.
         """
         if band is None:
             raise LigandAIValidationError(
@@ -756,6 +1591,11 @@ class PanelResult:
                 n_scaffold_excluded += 1
                 continue
 
+            # ─── the thermodynamic side, on EVERY surviving row ─────────────
+            kd = self._kd_side(
+                seq, rule=rule, multi=multi, kd_ceiling_nm=kd_ceiling_nm
+            )
+
             # ─── complete or not ─────────────────────────────────────────────
             if pos_missing or off_missing:
                 worst_present = (
@@ -789,6 +1629,7 @@ class PanelResult:
                     "bound_kind": bound_kind,
                     "delta_upper_bound": bound,
                     "worst_present": worst_present,
+                    **kd,
                 })
                 continue
 
@@ -845,6 +1686,7 @@ class PanelResult:
                 "delta_resolvable": abs(delta) >= band,
                 "quality_tier": tiers[0] if tiers else None,
                 "n_draws": primary_leg.n_draws if primary_leg else 0,
+                **kd,
             })
 
         # ⛔ ONE SORT for both arities. Ranked on Δ, never on a positive leg.
@@ -880,6 +1722,21 @@ class PanelResult:
                     delta_resolvable=r["delta_resolvable"],
                     quality_tier=r["quality_tier"],
                     n_draws=r["n_draws"],
+                    selectivity=r["selectivity"],
+                    per_target_kd_nm=r["per_target_kd_nm"],
+                    aggregate_kd_nm=r["aggregate_kd_nm"],
+                    aggregate_kd_rule=r["aggregate_kd_rule"],
+                    limiting_target_by_kd=r["limiting_target_by_kd"],
+                    per_target_kd_pass=r["per_target_kd_pass"],
+                    kd_selectivity_status=r["kd_selectivity_status"],
+                    kd_upper_bound=r["kd_upper_bound"],
+                    kd_comparators_missing=r["kd_comparators_missing"],
+                    kd_targets_missing=r["kd_targets_missing"],
+                    off_target_kd_nm=r["off_target_kd_nm"],
+                    target_peptide_length=r["target_peptide_length"],
+                    kd_scorer=r["kd_scorer"],
+                    kd_scorer_version=r["kd_scorer_version"],
+                    kd_ipsae_gate=r["kd_ipsae_gate"],
                 )
                 for r in complete_rows
             ]
@@ -895,6 +1752,12 @@ class PanelResult:
                     bound_kind=r["bound_kind"],  # type: ignore[arg-type]
                     delta_upper_bound=r["delta_upper_bound"],
                     worst_present=r["worst_present"],
+                    per_target_kd_nm=r["per_target_kd_nm"],
+                    off_target_kd_nm=r["off_target_kd_nm"],
+                    kd_upper_bound=r["kd_upper_bound"],
+                    kd_comparators_missing=r["kd_comparators_missing"],
+                    kd_targets_missing=r["kd_targets_missing"],
+                    target_peptide_length=r["target_peptide_length"],
                 )
                 for r in partial_rows
             ]
@@ -916,6 +1779,16 @@ class PanelResult:
                     delta_resolvable=r["delta_resolvable"],
                     quality_tier=r["quality_tier"],
                     n_draws=r["n_draws"],
+                    selectivity=r["selectivity"],
+                    target_kd_nm=r["aggregate_kd_nm"],
+                    off_target_kd_nm=r["off_target_kd_nm"],
+                    kd_selectivity_status=r["kd_selectivity_status"],
+                    kd_upper_bound=r["kd_upper_bound"],
+                    kd_comparators_missing=r["kd_comparators_missing"],
+                    target_peptide_length=r["target_peptide_length"],
+                    kd_scorer=r["kd_scorer"],
+                    kd_scorer_version=r["kd_scorer_version"],
+                    kd_ipsae_gate=r["kd_ipsae_gate"],
                 )
                 for r in complete_rows
             ]
@@ -930,6 +1803,11 @@ class PanelResult:
                         r["delta_upper_bound"] if r["delta_upper_bound"] is not None else 0.0
                     ),
                     worst_present=r["worst_present"] or "",
+                    target_kd_nm=r["aggregate_kd_nm"],
+                    off_target_kd_nm=r["off_target_kd_nm"],
+                    kd_upper_bound=r["kd_upper_bound"],
+                    kd_comparators_missing=r["kd_comparators_missing"],
+                    target_peptide_length=r["target_peptide_length"],
                 )
                 for r in partial_rows
                 # A single-positive panel with no comparator measured has no
@@ -1005,6 +1883,61 @@ class PanelResult:
             "n_all_targets_pass": sum(
                 1 for r in complete_rows if all(r["per_target_pass"].values())
             ),
+            # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ──
+            "kd_ceiling_nm": kd_ceiling_nm,
+            "kd_ipsae_gate": next(
+                (leg.kd_ipsae_gate for leg in self.legs.values()
+                 if leg.kd_ipsae_gate is not None),
+                None,
+            ),
+            # ⛔ How many complete rows may state a selectivity RATIO at all.
+            # On a screen-depth panel this is routinely 0 while n_complete is
+            # large, and that gap is the honest headline — not a bug.
+            "n_kd_selectivity_ok": sum(
+                1 for r in complete_rows if r["kd_selectivity_status"] == "ok"
+            ),
+            # ⛔ Rows whose Kd panel is incomplete. Their ratio can only FALL as
+            # the missing comparators arrive, so it is a bound and is counted
+            # apart from the verdicts — the Kd twin of
+            # n_partial_upper_bounds_not_verdicts.
+            "n_kd_upper_bounds_not_verdicts": sum(
+                1 for r in complete_rows if r["kd_upper_bound"] is not None
+            ),
+            "kd_selectivity_withheld_reasons": {
+                why: sum(
+                    1 for r in complete_rows
+                    if r["kd_selectivity_status"] == why
+                )
+                for why in dict.fromkeys(
+                    r["kd_selectivity_status"] for r in complete_rows
+                    if r["kd_selectivity_status"] != "ok"
+                )
+            },
+            # ⛔ Reading this is the difference between "nothing was selective"
+            # and "nothing was scored". Keyed by the platform's own kd_status
+            # code, never the free-text reason — one fact must not be counted
+            # under as many spellings as the server has used for it.
+            "kd_not_computed_reasons": {
+                why: sum(
+                    1 for leg in self.legs.values()
+                    if why in leg.kd_not_computed_statuses
+                )
+                for why in dict.fromkeys(
+                    w for leg in self.legs.values()
+                    for w in leg.kd_not_computed_statuses
+                )
+            },
+            "n_legs_with_kd": sum(
+                1 for leg in self.legs.values() if leg.n_kd_draws > 0
+            ),
+            "n_legs_kd_confirmed": sum(
+                1 for leg in self.legs.values() if leg.kd_confirmed
+            ),
+            # A leg whose Kd draws came from two calibrations is not one
+            # measurement; aggregating it reports model disagreement as noise.
+            "n_legs_kd_scorer_conflict": sum(
+                1 for leg in self.legs.values() if leg.kd_scorer_conflict
+            ),
         }
         return complete, partial, summary
 
@@ -1047,6 +1980,8 @@ class PanelResult:
         statistic: LegStatistic | None = None,
         aggregate: CrossTargetAggregate | None = None,
         require_all_targets: bool = True,
+        min_kd_fold_selectivity: float | None = None,
+        max_target_kd_nm: float | None = None,
     ) -> ReplicationReport:
         """How much of ``shortlist`` still passes in THIS panel.
 
@@ -1054,10 +1989,29 @@ class PanelResult:
         it here: what comes back is the fraction that held. Sequences with no
         complete row in this panel are ``untested``, never counted as lost — an
         absent measurement is not a negative one.
+
+        THE THERMODYNAMIC LEG
+        ---------------------
+        ``min_kd_fold_selectivity`` and/or ``max_target_kd_nm`` state what the Kd
+        had to do to count as held, and populate ``kd_held`` / ``kd_lost`` /
+        ``kd_untested`` alongside the ipSAE verdict. That separation is the
+        point: "it held on ipSAE and its Kd moved" is the most important thing a
+        replication can find, and one merged boolean cannot say it.
+
+        ⛔ NEITHER HAS A DEFAULT, and omitting both does not mean "the Kd
+        passed". With no threshold stated nothing was asked of the Kd, so every
+        sequence is ``kd_untested`` and ``thermo_criterion`` says so in words.
+        This module ships no thresholds: a ceiling that made sense on one
+        campaign is not a ceiling on yours.
+
+        ⛔ A sequence whose fresh panel carries no quotable ratio is
+        ``kd_untested``, never ``kd_lost`` — 47% of gated folds have no persisted
+        DeltaForge score, so scoring a coverage gap as a reproducibility failure
+        would make the hold rate a function of the backfill.
         """
         complete, _partial, summary = self.deltas(
             band=band, target_leg_min=target_leg_min, statistic=statistic,
-            aggregate=aggregate,
+            aggregate=aggregate, kd_ceiling_nm=max_target_kd_nm,
         )
         by_seq = {r.sequence: r for r in complete}
 
@@ -1073,6 +2027,56 @@ class PanelResult:
         lost = [s for s in want if s in by_seq and not _passes(by_seq[s])]
         untested = [s for s in want if s not in by_seq]
         rule = summary.get("positive_aggregate")
+
+        # ─── the thermodynamic leg ──────────────────────────────────────────
+        kd_held: list[str] = []
+        kd_lost: list[str] = []
+        kd_untested: list[str] = []
+        stated = min_kd_fold_selectivity is not None or max_target_kd_nm is not None
+        clauses: list[str] = []
+        if min_kd_fold_selectivity is not None:
+            clauses.append(f"kd_fold_selectivity >= {float(min_kd_fold_selectivity)}")
+        if max_target_kd_nm is not None:
+            clauses.append(f"on-target kd_nm <= {float(max_target_kd_nm)}")
+        if not stated:
+            thermo_criterion = (
+                "no thermo criterion supplied — the Kd objective was NOT tested. "
+                "Pass min_kd_fold_selectivity= and/or max_target_kd_nm= to test "
+                "it. There is no default: a ceiling measured on one campaign is "
+                "not a ceiling on yours."
+            )
+            kd_untested = list(want)
+        else:
+            thermo_criterion = " AND ".join(clauses)
+            for s in want:
+                row = by_seq.get(s)
+                if row is None:
+                    kd_untested.append(s)
+                    continue
+                ratio = row.kd_fold_selectivity
+                target_kd = getattr(row, "target_kd_nm", None)
+                if target_kd is None:
+                    target_kd = getattr(row, "aggregate_kd_nm", None)
+                # ⛔ AN UNMEASURED Kd IS UNTESTED, NEVER LOST. Only a Kd that was
+                # actually measured and misses the stated bar counts as lost;
+                # otherwise the hold rate becomes a function of DeltaForge
+                # coverage rather than of reproducibility.
+                checks: list[bool] = []
+                unmeasured = False
+                if min_kd_fold_selectivity is not None:
+                    if ratio is None:
+                        unmeasured = True
+                    else:
+                        checks.append(ratio >= float(min_kd_fold_selectivity))
+                if max_target_kd_nm is not None:
+                    if target_kd is None:
+                        unmeasured = True
+                    else:
+                        checks.append(float(target_kd) <= float(max_target_kd_nm))
+                if unmeasured or not checks:
+                    kd_untested.append(s)
+                    continue
+                (kd_held if all(checks) else kd_lost).append(s)
         if self.is_multi_target:
             positive = (
                 f"peptide_ipsae({rule} over {list(self.targets)}) >= {target_leg_min}"
@@ -1088,6 +2092,11 @@ class PanelResult:
             criterion=(
                 f"{positive} AND delta >= {band} over {list(self.off_targets)}"
             ),
+            kd_tested=tuple(kd_held + kd_lost),
+            kd_held=tuple(kd_held),
+            kd_lost=tuple(kd_lost),
+            kd_untested=tuple(kd_untested),
+            thermo_criterion=thermo_criterion,
         )
 
     def to_rows(self, *, statistic: LegStatistic | None = None) -> list[dict[str, Any]]:
@@ -1114,6 +2123,29 @@ class PanelResult:
                 "not_computed_draws": leg.not_computed,
                 "peptide_ipsae_status": list(leg.not_computed_reasons),
                 "fold_job_ids": list(leg.fold_job_ids),
+                # ─── the thermodynamic objective ─────────────────────────────
+                # ⛔ GEOMETRIC over draws, and the column name says the unit.
+                "kd_nm": leg.kd_value("mean"),
+                "kd_nm_draws": list(leg.kd_nm_draws),
+                "n_kd_draws": leg.n_kd_draws,
+                # log10, because a linear nM range is not comparable between a
+                # tight leg and a weak one.
+                "log10_kd_range": leg.log10_kd_spread(),
+                "kd_ci_nm": leg.kd_ci(),
+                "kd_confirmed": leg.kd_confirmed,
+                "delta_g": leg.delta_g_value(stat),
+                "kd_not_computed_draws": leg.kd_not_computed,
+                "kd_status": list(leg.kd_not_computed_statuses),
+                "kd_reason": list(leg.kd_not_computed_reasons),
+                "kd_scorer": leg.kd_scorer,
+                "kd_scorer_version": leg.kd_scorer_version,
+                "kd_scorer_conflict": leg.kd_scorer_conflict,
+                "kd_ipsae_gate": leg.kd_ipsae_gate,
+                "ipsae_gated": leg.ipsae_gated,
+                # ⛔ The confound column. Present on every exported row that
+                # carries a Kd, because a within-target Kd ordering is not a
+                # validated affinity ordering.
+                "peptide_length": leg.peptide_length,
             })
         return out
 
@@ -1651,6 +2683,8 @@ class Campaigns(Resource):
         self,
         panel: PanelResult,
         job_index: dict[str, tuple[str, str]],
+        *,
+        deltaforge_scores: list[dict[str, Any]] | None = None,
     ) -> None:
         """Fill every leg from the platform's own per-fold metric surface.
 
@@ -1660,6 +2694,19 @@ class Campaigns(Resource):
         The same surface returns the platform's ``quality_tier`` and the
         ``scaffold_mediated`` flag, so tiers are never re-derived here from
         hardcoded numbers.
+
+        ⛔ AND IT IS FREE. The Kd comes from this same response — the server
+        JOINs ``ptf_deltaforge_scores`` into the fold metrics — so hydrating a
+        panel's thermodynamics costs nothing and is always done. This method
+        NEVER reaches ``client.deltaforge.batch_score_fold``: that endpoint is
+        billed per successfully-scored fold, and calling it from the panel path
+        would make every ``fold_panel`` silently spend on top of the fold cost.
+        The paid backfill is :meth:`score_thermo`, and it is opt-in.
+
+        ``deltaforge_scores`` forwards a ``{fold_job_id, delta_g, kd_nm}`` list
+        for the server to merge OVER the joined value — the mechanism
+        :meth:`score_thermo` uses to land scores that
+        ``batch-score-fold`` does not persist.
         """
         evaluator = getattr(self._client, "evaluator", None)
         if evaluator is None or not job_index:
@@ -1667,8 +2714,17 @@ class Campaigns(Resource):
         ids = list(job_index)
         for i in range(0, len(ids), 400):
             chunk = ids[i:i + 400]
+            # ⛔ The kwarg is passed ONLY when there is something to merge. Sending
+            # `deltaforge_scores=None` would be semantically identical and would
+            # still break every evaluator shim that predates the parameter — a
+            # customer's mock, a vendored older SDK — turning a free, always-run
+            # hydration into a hard TypeError on the ordinary path. A caller who
+            # lacks the parameter now fails only when they ask for the merge.
+            extra: dict[str, Any] = (
+                {"deltaforge_scores": deltaforge_scores} if deltaforge_scores else {}
+            )
             try:
-                payload = evaluator.filter_folds(chunk, criteria={}) or {}
+                payload = evaluator.filter_folds(chunk, criteria={}, **extra) or {}
             except LigandAIError:
                 # A metrics read that fails must not be reported as a panel of
                 # zeros. Leave the legs empty; deltas() will treat them as
@@ -1682,41 +2738,340 @@ class Campaigns(Resource):
                 leg = panel.legs.get(key)
                 if leg is None:
                     continue
-                m = row.get("metrics") or {}
-                pi = m.get("peptide_ipsae")
-                if isinstance(pi, (int, float)):
-                    leg.peptide_ipsae_draws.append(float(pi))
-                else:
-                    leg.not_computed += 1
-                    # The platform says WHY, and it is the difference between
-                    # "not measurable" and "never measured". Observed live:
-                    # peptide_ipsae_status == "not_computed" on folds whose own
-                    # record carries interface_scores.ipsae. [bd-dre-if562]
-                    why = m.get("peptide_ipsae_status")
-                    if isinstance(why, str) and why.strip():
-                        leg.peptide_ipsae_statuses.append(why.strip())
-                for src, dest in (("iptm", leg.iptm_draws), ("plddt_mean", leg.plddt_draws)):
-                    v = m.get(src)
-                    if isinstance(v, (int, float)):
-                        dest.append(float(v))
-                # ⛔ VERIFIED against a live filter_folds response (2026-09-22):
-                # quality_tier is {"criterion": "great_plus", "verdict":
-                # "indeterminate", "coValidated": false, "summary": "..."}. It
-                # carries neither "tier" nor "name", so reading only those two
-                # keys made the tier silently None on EVERY real row — while the
-                # module's own docstring promises the platform's tier is used
-                # rather than re-derived. `verdict` is the judgement; `criterion`
-                # is only the bar it was judged against, so verdict wins.
-                tier = row.get("quality_tier")
-                if isinstance(tier, dict):
-                    tier = (
-                        tier.get("verdict")
-                        or tier.get("tier")
-                        or tier.get("name")
-                        or tier.get("criterion")
+                self._absorb_metrics_row(leg, jid, row)
+
+    @staticmethod
+    def _absorb_metrics_row(leg: PanelLeg, jid: str, row: dict[str, Any]) -> None:
+        """Land ONE ``filter_folds`` result row onto ONE leg.
+
+        ⛔ ONE IMPLEMENTATION, shared by the panel hydration and
+        :meth:`score_thermo`'s forward merge. Two readers of one wire shape is
+        how a field gets handled on one path and silently dropped on the other.
+
+        ⛔ IDEMPOTENT PER FOLD JOB. One fold job is ONE draw, and
+        :meth:`score_thermo` re-reads folds this method has already absorbed in
+        order to merge their Kd forward. Appending again on a re-read would give
+        the leg two ipSAE draws for one fold — inflating ``n_draws``, shrinking
+        the apparent noise band, and making a panel look more replicated after a
+        Kd backfill than before it.
+        """
+        m = row.get("metrics") or {}
+        pi = m.get("peptide_ipsae")
+        # A fold already absorbed: this is a RE-READ (the forward merge), so the
+        # structural draws stand and only the thermodynamics are updated.
+        reread = jid in leg.ipsae_by_job or jid in leg.kd_status_by_job
+        # ⛔ `isinstance(x, (int, float))` is TRUE for a bool, and True would
+        # land as a peptide_ipsae of 1.0 — a silent perfect score. Every
+        # numeric read on this path goes through _is_measure.
+        if reread:
+            pass
+        elif _is_measure(pi):
+            leg.peptide_ipsae_draws.append(float(pi))
+            leg.ipsae_by_job[jid] = float(pi)
+        else:
+            leg.not_computed += 1
+            # The platform says WHY, and it is the difference between
+            # "not measurable" and "never measured". Observed live:
+            # peptide_ipsae_status == "not_computed" on folds whose own
+            # record carries interface_scores.ipsae. [bd-dre-if562]
+            why = m.get("peptide_ipsae_status")
+            if isinstance(why, str) and why.strip():
+                leg.peptide_ipsae_statuses.append(why.strip())
+        if not reread:
+            for src, dest in (
+                ("iptm", leg.iptm_draws), ("plddt_mean", leg.plddt_draws)
+            ):
+                v = m.get(src)
+                if _is_measure(v):
+                    dest.append(float(v))
+            # ⛔ VERIFIED against a live filter_folds response (2026-09-22):
+            # quality_tier is {"criterion": "great_plus", "verdict":
+            # "indeterminate", "coValidated": false, "summary": "..."}. It
+            # carries neither "tier" nor "name", so reading only those two
+            # keys made the tier silently None on EVERY real row — while the
+            # module's own docstring promises the platform's tier is used
+            # rather than re-derived. `verdict` is the judgement; `criterion`
+            # is only the bar it was judged against, so verdict wins.
+            tier = row.get("quality_tier")
+            if isinstance(tier, dict):
+                tier = (
+                    tier.get("verdict")
+                    or tier.get("tier")
+                    or tier.get("name")
+                    or tier.get("criterion")
+                )
+            leg.quality_tiers.append(tier if isinstance(tier, str) else None)
+            leg.scaffold_mediated_draws.append(bool(m.get("scaffold_mediated")))
+
+        # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────
+        # Provenance and the confound are properties of the leg, not the draw,
+        # and are recorded whether or not this draw produced a number.
+        gate = m.get("kd_ipsae_gate")
+        if _is_measure(gate):
+            leg.kd_ipsae_gate = float(gate)
+        plen = m.get("peptide_length")
+        if isinstance(plen, int) and not isinstance(plen, bool):
+            leg.peptide_length = plen
+        status = m.get("kd_status")
+        status = status.strip() if isinstance(status, str) else ""
+        if status:
+            leg.kd_status_by_job[jid] = status
+        kd = m.get("kd_nm")
+
+        # ⛔ THE Kd MUST BE PAIRED TO THE ipSAE DRAW IT IS REPORTED BESIDE.
+        # A Kd recorded for a draw whose ipSAE was indeterminate would be
+        # aggregated over a different draw set than the ipSAE next to it, and
+        # nothing downstream could see the mismatch. The server contradicting
+        # itself must not be able to create one.
+        paired = jid in leg.ipsae_by_job
+        if status == "ok" and _is_measure(kd) and paired:
+            if jid in leg.kd_by_job:
+                # Already landed. A re-read of the same fold is the same
+                # measurement, not a second draw.
+                return
+            if reread:
+                # This draw was counted as having no Kd on the first pass; it
+                # now has one, so the indeterminate tally has to give it back or
+                # the leg reports the same draw in both columns.
+                leg.kd_not_computed = max(0, leg.kd_not_computed - 1)
+            leg.kd_nm_draws.append(float(kd))
+            leg.kd_by_job[jid] = float(kd)
+            dg = m.get("delta_g")
+            if _is_measure(dg):
+                leg.delta_g_draws.append(float(dg))
+            for src, sink in (
+                ("kd_scorer", leg.kd_scorers),
+                ("kd_scorer_version", leg.kd_scorer_versions),
+            ):
+                who = m.get(src)
+                if isinstance(who, str) and who.strip():
+                    sink.append(who.strip())
+            return
+        if reread:
+            # A re-read that still brings no Kd changes nothing: the leg already
+            # counted this draw as indeterminate.
+            return
+
+        # ⛔ Everything else is INDETERMINATE, and the platform's own words are
+        # kept verbatim: "below the interface gate" and "never scored" are
+        # different claims with different fixes, and only one of them is worth
+        # paying score_thermo to repair.
+        leg.kd_not_computed += 1
+        if status == "ok" and _is_measure(kd) and not paired:
+            leg.kd_statuses.append("ipsae_draw_indeterminate")
+            leg.kd_reasons.append(
+                f"the server returned kd_status='ok' with kd_nm={float(kd)!r} for "
+                f"fold {jid}, but no peptide_ipsae for the same fold. The Kd is "
+                f"dropped rather than paired to a different draw's ipSAE."
+            )
+            return
+        # ⛔ "kd_status_absent" is NOT one of the platform's codes and is
+        # deliberately spelled so it cannot be mistaken for one: it means this
+        # API surface returned no kd_status field at all.
+        leg.kd_statuses.append(status or "kd_status_absent")
+        reason = m.get("kd_reason")
+        if isinstance(reason, str) and reason.strip():
+            leg.kd_reasons.append(reason.strip())
+        elif not status:
+            # An older server that carries no Kd fields at all made NO claim
+            # about the Kd either way. Saying so is not the same as saying the
+            # fold has no affinity.
+            leg.kd_reasons.append(
+                "this API surface returned no kd_status for the fold: it predates "
+                "the Kd fields, so no claim was made about the Kd either way."
+            )
+
+    # ─── the paid thermodynamic backfill ────────────────────────────────────
+
+    #: ⛔ The server's own ``MAX_BATCH`` for ``POST /api/v1/deltaforge/
+    #: batch-score-fold``. A larger request is rejected outright with "Batch too
+    #: large"; it is not a tuning knob.
+    _THERMO_BATCH_MAX: ClassVar[int] = 200
+
+    def score_thermo(
+        self,
+        panel: PanelResult,
+        *,
+        only_gated: bool = True,
+        chunk: int = 200,
+        scorer: str = "auto",
+        aggregate_method: str = "boltzmann_parallel",
+        rehydrate: bool = True,
+    ) -> ThermoScoreReport:
+        """⛔ BILLED. DeltaForge-score a panel's unscored folds and merge them in.
+
+        ``POST /api/v1/deltaforge/batch-score-fold``, in chunks of at most
+        :data:`_THERMO_BATCH_MAX`.
+
+        ⛔ **THIS METHOD SPENDS CREDITS — PER SUCCESSFULLY-SCORED FOLD, on top of
+        what the folds themselves cost.** Charge-on-success: a fold that errors
+        is free, a fold that scores is billed even if the platform then WITHHOLDS
+        the number (see below). Check the spend before calling it, exactly as you
+        would before a large panel::
+
+            print(client.account.credits())
+            report = client.campaigns.score_thermo(panel)
+            print(report)      # what it sent, skipped, got, and withheld
+
+        ⛔ IT IS NEVER CALLED FOR YOU. :meth:`fold_panel` and
+        :meth:`_hydrate_metrics` do not reach this surface on any code path —
+        they read the Kd from the free ``filter_folds`` JOIN over
+        ``ptf_deltaforge_scores``, which covers 9,286 of the 17,649 ipSAE-gated
+        folds in the live DB at no cost. This method exists for the other 47%,
+        and only when you decide that gap is worth paying to close.
+
+        ``only_gated=True`` (the default) skips every fold below the platform's
+        ipSAE gate. ⛔ That is a COST control, not a convenience: below the gate
+        DeltaForge is scoring a non-interface, so the platform will decline to
+        quote it — paying for a number that must then be discarded is money for
+        nothing. The report says how many were skipped and why, per fold.
+
+        ⛔ AND IT DOES NOT PERSIST. ``batch-score-fold`` writes nothing to
+        ``ptf_deltaforge_scores``, so re-running ``fold_panel`` will NOT see
+        these scores and a caller who assumed otherwise would pay for them
+        twice. They are merged FORWARD instead: with ``rehydrate=True`` the
+        scores go back through
+        ``filter_folds(deltaforge_scores=[{fold_job_id, delta_g, kd_nm}])``,
+        which the server merges over the joined value, and land on the panel's
+        legs in one round trip. ``report.deltaforge_scores`` is that payload —
+        keep it if you intend to re-hydrate a different panel from the same
+        folds.
+
+        Returns a :class:`ThermoScoreReport`. ⛔ Read ``report.indeterminate``:
+        ``affinity_quotable == False`` means the interface-type gate WITHHELD the
+        number (TCR-pMHC, symmetric multimers — classes where the scorer does
+        not rank). That is a decision carrying the server's own
+        ``affinity_reason_code``, and it is neither a zero nor an error.
+        """
+        chunk = min(int(chunk), self._THERMO_BATCH_MAX)
+        if chunk < 1:
+            raise LigandAIValidationError("chunk must be >= 1")
+        deltaforge = getattr(self._client, "deltaforge", None)
+        batch = getattr(deltaforge, "batch_score_fold", None)
+        if batch is None:
+            raise LigandAIError(
+                "score_thermo needs client.deltaforge.batch_score_fold — build a "
+                "full LigandAI client rather than a bare Campaigns resource."
+            )
+
+        # ─── decide what is worth paying for ────────────────────────────────
+        submit: list[str] = []
+        below: dict[str, str] = {}
+        no_ipsae: dict[str, str] = {}
+        already: list[str] = []
+        job_index: dict[str, tuple[str, str]] = {}
+        for key, leg in panel.legs.items():
+            gate = leg.kd_ipsae_gate if leg.kd_ipsae_gate is not None else VALID_IPSAE
+            for jid in leg.fold_job_ids:
+                job_index[jid] = key
+                if jid in leg.kd_by_job:
+                    # Already measured. Paying again buys the same number.
+                    already.append(jid)
+                    continue
+                if not only_gated:
+                    submit.append(jid)
+                    continue
+                ipsae = leg.ipsae_by_job.get(jid)
+                if ipsae is None:
+                    # ⛔ NOT "below the gate" — unmeasured AGAINST it. The fix is
+                    # the ipSAE, not the Kd, and scoring this fold would buy a
+                    # number the platform cannot gate.
+                    no_ipsae[jid] = (
+                        f"peptide_ipsae was never computed for fold {jid}, so the "
+                        f"{gate} interface gate cannot be evaluated; not sent."
                     )
-                leg.quality_tiers.append(tier if isinstance(tier, str) else None)
-                leg.scaffold_mediated_draws.append(bool(m.get("scaffold_mediated")))
+                    continue
+                if ipsae < gate:
+                    below[jid] = (
+                        f"peptide_ipsae {ipsae:.4f} < gate {gate}: DeltaForge "
+                        f"scores an INTERFACE and there is none here, so the "
+                        f"platform would decline to quote. Not sent — paying for "
+                        f"a withheld number is money for nothing."
+                    )
+                    continue
+                submit.append(jid)
+
+        scored: dict[str, float] = {}
+        indeterminate: dict[str, str] = {}
+        errors: list[dict[str, Any]] = []
+        merge: list[dict[str, Any]] = []
+
+        for i in range(0, len(submit), chunk):
+            ids = submit[i:i + chunk]
+            try:
+                payload = batch(
+                    ids, scorer=scorer, aggregate_method=aggregate_method
+                ) or {}
+            except LigandAIError as exc:
+                # A failed chunk is not a chunk of zeros. Every fold in it is
+                # recorded as errored so the report's counts still add up.
+                errors.extend({"foldJobId": j, "error": str(exc)} for j in ids)
+                continue
+            for row in payload.get("results") or []:
+                # ⛔ `foldJobId`, camelCase — that is what PerBinderResult emits
+                # on this route (server/deltaforge-batch-routes.ts). Reading
+                # `fold_job_id` here yields "" for every row, so every paid
+                # result is silently dropped; `fold_job_id` is only accepted as a
+                # fallback in case the route is ever normalised.
+                jid = str(
+                    row.get("foldJobId") or row.get("fold_job_id") or ""
+                ).strip()
+                if not jid:
+                    errors.append({"error": "result row carried no fold job id",
+                                   "row_keys": sorted(row)})
+                    continue
+                if row.get("error"):
+                    errors.append({"foldJobId": jid, "error": row.get("error")})
+                    continue
+                if row.get("affinity_quotable") is False:
+                    # A WITHHELD number, carrying the server's own reason code.
+                    # ⛔ Flat on this route: `affinity_reason_code`, not nested
+                    # under `affinity_quoting` — that is the FastAPI-internal
+                    # shape and reading it returns the fallback on every row.
+                    indeterminate[jid] = str(
+                        row.get("affinity_reason_code")
+                        or "affinity_not_quotable"
+                    )
+                    continue
+                kd = row.get("kd_nm")
+                dg = row.get("delta_g")
+                if not _is_measure(kd):
+                    indeterminate[jid] = "no_kd_nm_on_a_quotable_result"
+                    continue
+                scored[jid] = float(kd)
+                merge.append({
+                    "fold_job_id": jid,
+                    "delta_g": float(dg) if _is_measure(dg) else None,
+                    "kd_nm": float(kd),
+                })
+
+        merged = False
+        if rehydrate and merge:
+            # ⛔ The ONLY way these scores reach the panel: the endpoint that
+            # produced them persists nothing. Re-read exactly the folds that
+            # scored, with the payload merged over the joined value.
+            scored_index = {j: job_index[j] for j in scored if j in job_index}
+            if scored_index:
+                # Absorption is idempotent per fold job, so re-reading these
+                # folds lands the Kd without adding a second ipSAE draw for a
+                # fold that was only ever submitted once.
+                self._hydrate_metrics(
+                    panel, scored_index, deltaforge_scores=merge
+                )
+                merged = True
+
+        return ThermoScoreReport(
+            submitted=tuple(submit),
+            skipped_below_gate=below,
+            skipped_no_ipsae=no_ipsae,
+            skipped_already_scored=tuple(already),
+            scored=scored,
+            indeterminate=indeterminate,
+            errors=errors,
+            deltaforge_scores=merge,
+            merged_into_panel=merged,
+            chunk_size=chunk,
+        )
 
     def replicate(
         self,
@@ -1730,6 +3085,8 @@ class Campaigns(Resource):
         replicates: int = 1,
         aggregate: CrossTargetAggregate | None = None,
         require_all_targets: bool = True,
+        min_kd_fold_selectivity: float | None = None,
+        max_target_kd_nm: float | None = None,
         **panel_kwargs: Any,
     ) -> tuple[PanelResult, ReplicationReport]:
         """Re-fold a shortlist at independent draws and report what held.
@@ -1747,6 +3104,18 @@ class Campaigns(Resource):
         the selecting panel's own cached batch and the "independent draw" is an
         echo of the measurement it was supposed to test. Pass
         ``force_fresh=False`` explicitly only when you want the cached handle.
+
+        ``min_kd_fold_selectivity`` / ``max_target_kd_nm`` add the THERMODYNAMIC
+        leg, so the report says whether a design held on ipSAE and moved on Kd
+        rather than leaving that invisible. Neither has a default; omitting both
+        leaves the Kd untested and the report says so. See
+        :meth:`PanelResult.hold_rate`.
+
+        ⛔ Measure the Kd band with :meth:`PanelResult.observed_kd_spread` /
+        :meth:`PanelResult.cross_draw_kd_band_log10`, both IN LOG10 SPACE, and
+        compare a claimed fold-selectivity against ``10 ** band``. A linear nM
+        range pools the panel's affinity distribution into what is supposed to
+        be its noise.
         """
         panel_kwargs.setdefault("force_fresh", True)
         panel = self.fold_panel(
@@ -1763,6 +3132,8 @@ class Campaigns(Resource):
             band=band,
             target_leg_min=target_leg_min,
             require_all_targets=require_all_targets,
+            min_kd_fold_selectivity=min_kd_fold_selectivity,
+            max_target_kd_nm=max_target_kd_nm,
         )
 
     # ─── the loop ───────────────────────────────────────────────────────────
@@ -1777,6 +3148,8 @@ class Campaigns(Resource):
         target_leg_min: float,
         aggregate: CrossTargetAggregate | None = None,
         require_all_targets: bool = True,
+        min_kd_fold_selectivity: float | None = None,
+        max_target_kd_nm: float | None = None,
         model: str = "v6.9.21",
         num_peptides: int = 200,
         length_range: tuple[int, int] = (12, 24),
@@ -1794,6 +3167,13 @@ class Campaigns(Resource):
         own pocket and, optionally, its own reference panel via
         ``contrastive_by_target``), the pools unioned, then ONE panel folded
         against every positive target and every off-target.
+
+        ``min_kd_fold_selectivity`` / ``max_target_kd_nm`` state the
+        THERMODYNAMIC half of the objective. Every round measures and reports
+        the Kd either way — it rides in free on the fold metrics — but with
+        neither threshold set nothing is REQUIRED of it, and each round says so
+        instead of implying the Kd passed. ⛔ Neither has a default: a ceiling
+        that was right on one campaign is not a ceiling on yours.
         """
         if (target is None) == (targets is None):
             raise LigandAIValidationError(
@@ -1833,6 +3213,8 @@ class Campaigns(Resource):
             band=float(band),
             target_leg_min=float(target_leg_min),
             require_all_targets=bool(require_all_targets),
+            min_kd_fold_selectivity=min_kd_fold_selectivity,
+            max_target_kd_nm=max_target_kd_nm,
             model=model,
             num_peptides=num_peptides,
             length_range=length_range,
@@ -1892,6 +3274,12 @@ class AsyncCampaigns(AsyncResource):
         "fold_panel",
         "replicate",
         "recursive",
+        # ⛔ score_thermo is BILLED and blocking. Reaching for it on the async
+        # client must say "sync only" rather than raise a bare AttributeError
+        # that reads like a typo — the more so here, because the caller who
+        # cannot find the paid backfill is the one most likely to reimplement it
+        # by hand and get the gate wrong.
+        "score_thermo",
     )
 
     def __getattr__(self, name: str) -> Any:
@@ -2008,11 +3396,22 @@ class CampaignRound:
     replication: ReplicationReport | None = None
     confirmed: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
+    kd_confirmed: list[str] = field(default_factory=list)
+    """Designs that held on ipSAE **AND** on Kd at the independent re-fold.
+
+    ⛔ A SUBSET of :attr:`confirmed`, reported separately rather than replacing
+    it. The deliverable is stated in molar units, so this is the list that
+    answers it — and the gap between the two lists is the finding.
+    """
+    kd_lost_at_replication: list[str] = field(default_factory=list)
+    """Held on ipSAE and MOVED on Kd. The thing a single objective cannot see."""
 
     def __repr__(self) -> str:  # pragma: no cover - repr only
         return (
             f"<CampaignRound {self.index}: {len(self.generated)} generated, "
-            f"{len(self.survivors)} survived, {len(self.confirmed)} confirmed>"
+            f"{len(self.survivors)} survived, {len(self.confirmed)} confirmed"
+            f"{f', {len(self.kd_confirmed)} on Kd too' if self.kd_confirmed else ''}>"
         )
 
 
@@ -2039,6 +3438,8 @@ class RecursiveCampaign:
         band: float,
         target_leg_min: float,
         require_all_targets: bool = True,
+        min_kd_fold_selectivity: float | None = None,
+        max_target_kd_nm: float | None = None,
         model: str = "v6.9.21",
         num_peptides: int = 200,
         length_range: tuple[int, int] = (12, 24),
@@ -2068,6 +3469,16 @@ class RecursiveCampaign:
         self.band = float(band)
         self.target_leg_min = float(target_leg_min)
         self.require_all_targets = bool(require_all_targets)
+        #: The THERMODYNAMIC half of the objective. Both optional and neither
+        #: defaulted — with both None the loop still measures and reports the Kd
+        #: on every round, but nothing is required of it, and every round's
+        #: report says so rather than implying the Kd passed.
+        self.min_kd_fold_selectivity = (
+            None if min_kd_fold_selectivity is None else float(min_kd_fold_selectivity)
+        )
+        self.max_target_kd_nm = (
+            None if max_target_kd_nm is None else float(max_target_kd_nm)
+        )
         self.model = model
         self.num_peptides = int(num_peptides)
         self.length_range = length_range
@@ -2120,10 +3531,29 @@ class RecursiveCampaign:
 
     @property
     def confirmed(self) -> list[str]:
-        """Designs that passed a panel AND held at an independent re-fold."""
+        """Designs that passed a panel AND held at an independent re-fold.
+
+        ⛔ ON ipSAE. This is the Δ verdict and nothing more; read
+        :attr:`kd_confirmed` for the list that answers a deliverable stated in
+        molar units.
+        """
         out: list[str] = []
         for rnd in self.rounds:
             out.extend(rnd.confirmed)
+        return list(dict.fromkeys(out))
+
+    @property
+    def kd_confirmed(self) -> list[str]:
+        """Designs that held on ipSAE **AND** on Kd at an independent re-fold.
+
+        A subset of :attr:`confirmed`. Empty when no thermodynamic threshold was
+        stated, or when no design's Kd was measurable — and those are different
+        facts, which each round's ``notes`` and ``replication.thermo_criterion``
+        distinguish.
+        """
+        out: list[str] = []
+        for rnd in self.rounds:
+            out.extend(rnd.kd_confirmed)
         return list(dict.fromkeys(out))
 
     @property
@@ -2208,7 +3638,8 @@ class RecursiveCampaign:
                 f"incomplete, not negative"
             )
         complete, partial, summary = panel.deltas(
-            band=self.band, target_leg_min=self.target_leg_min
+            band=self.band, target_leg_min=self.target_leg_min,
+            kd_ceiling_nm=self.max_target_kd_nm,
         )
         if self.co_optimization.is_multi:
             notes.append(
@@ -2277,8 +3708,52 @@ class RecursiveCampaign:
                 "Run replicates>=2 to measure it on this target."
             )
 
+        # ─── the thermodynamic side of this round ───────────────────────────
+        n_kd_ok = summary.get("n_kd_selectivity_ok") or 0
+        kd_why = summary.get("kd_not_computed_reasons") or {}
+        if complete and not n_kd_ok:
+            # ⛔ "No design was selective" and "no design's Kd was measurable"
+            # produce the same empty list, and only one of them is a result.
+            notes.append(
+                f"⛔ NO design in this round can state a Kd selectivity RATIO "
+                f"({dict(kd_why)}). The Δ verdicts above are ipSAE-only, and the "
+                f"deliverable is stated in molar units. Either the folds carry no "
+                f"persisted DeltaForge score — client.campaigns.score_thermo(panel) "
+                f"is the BILLED backfill — or the on-target denominator is "
+                f"unconfirmed at this depth (raise replicates)."
+            )
+        elif kd_why:
+            notes.append(
+                f"Kd unavailable on some legs (reasons {dict(kd_why)}); those rows "
+                f"are indeterminate on the thermo objective, not weak"
+            )
+        if summary.get("n_kd_upper_bounds_not_verdicts"):
+            notes.append(
+                f"⛔ {summary['n_kd_upper_bounds_not_verdicts']} row(s) have an "
+                f"INCOMPLETE off-target Kd panel: their ratio is an upper bound "
+                f"that can only fall as the missing comparators arrive. Read "
+                f"kd_upper_bound, never kd_fold_selectivity."
+            )
+        if summary.get("n_legs_kd_scorer_conflict"):
+            notes.append(
+                f"⛔ {summary['n_legs_kd_scorer_conflict']} leg(s) were scored by "
+                f"more than one DeltaForge calibration — that is not one "
+                f"measurement, and its spread is partly model disagreement"
+            )
+        kd_spread = panel.observed_kd_spread()
+        if kd_spread["median_log10_range"] is not None:
+            notes.append(
+                f"measured draw-to-draw Kd range (median over legs): "
+                f"{kd_spread['median_log10_range']:.3f} log10 "
+                f"(~{kd_spread['median_fold_range']:.1f}x); the band on a RATIO is "
+                f"~{panel.cross_draw_kd_band_log10():.3f} log10. A claimed "
+                f"fold-selectivity below that is not resolvable."
+            )
+
         replication: ReplicationReport | None = None
         confirmed: list[str] = []
+        kd_confirmed: list[str] = []
+        kd_lost: list[str] = []
         if confirm and survivors:
             fresh, replication = self._campaigns.replicate(
                 survivors,
@@ -2288,13 +3763,32 @@ class RecursiveCampaign:
                 target_leg_min=self.target_leg_min,
                 replicates=confirm_replicates,
                 require_all_targets=self.require_all_targets,
+                min_kd_fold_selectivity=self.min_kd_fold_selectivity,
+                max_target_kd_nm=self.max_target_kd_nm,
                 **panel_kwargs,
             )
             confirmed = list(replication.held)
+            # ⛔ THE THERMO VERDICT TRAVELS WITH THE ipSAE ONE. `confirmed` is
+            # the ipSAE hold and is unchanged; a design only answers the
+            # deliverable if it held on BOTH.
+            kd_confirmed = list(replication.held_both)
+            kd_lost = list(replication.held_ipsae_lost_kd)
             notes.append(
                 f"replication: {len(replication.held)}/{len(replication.tested)} held "
                 f"at an independent draw ({len(replication.untested)} untested)"
             )
+            notes.append(f"thermo criterion: {replication.thermo_criterion}")
+            if kd_lost:
+                notes.append(
+                    f"⛔ {len(kd_lost)} design(s) HELD on ipSAE and MOVED on Kd. "
+                    f"They are not confirmed against the deliverable: "
+                    f"{kd_lost[:5]}"
+                )
+            if replication.kd_untested:
+                notes.append(
+                    f"{len(replication.kd_untested)} design(s) had no measurable Kd "
+                    f"at the fresh draw — UNTESTED on the thermo objective, not lost"
+                )
             del fresh
 
         rnd = CampaignRound(
@@ -2308,6 +3802,8 @@ class RecursiveCampaign:
             survivors=survivors,
             replication=replication,
             confirmed=confirmed,
+            kd_confirmed=kd_confirmed,
+            kd_lost_at_replication=kd_lost,
             notes=notes,
         )
         self.rounds.append(rnd)
@@ -2406,8 +3902,20 @@ class RecursiveCampaign:
             "model": self.model,
             "band": self.band,
             "target_leg_min": self.target_leg_min,
+            # ⛔ THE THERMODYNAMIC HALF OF THE OBJECTIVE, always stated — None
+            # means nothing was required of the Kd, which is a different claim
+            # from the Kd having passed.
+            "min_kd_fold_selectivity": self.min_kd_fold_selectivity,
+            "max_target_kd_nm": self.max_target_kd_nm,
+            "thermo_objective_stated": (
+                self.min_kd_fold_selectivity is not None
+                or self.max_target_kd_nm is not None
+            ),
             "n_rounds": len(self.rounds),
             "confirmed": self.confirmed,
+            "confirmed_on": "peptide_ipsae delta",
+            # The list that answers a deliverable written in molar units.
+            "kd_confirmed": self.kd_confirmed,
             "hard_negatives": self.hard_negatives,
             "rounds": [
                 {
@@ -2418,6 +3926,14 @@ class RecursiveCampaign:
                     "n_survivors_single_panel": len(r.survivors),
                     "n_confirmed_at_fresh_draw": len(r.confirmed),
                     "hold_rate": None if r.replication is None else r.replication.hold_rate,
+                    "n_kd_confirmed_at_fresh_draw": len(r.kd_confirmed),
+                    "n_held_ipsae_lost_kd": len(r.kd_lost_at_replication),
+                    "kd_hold_rate": (
+                        None if r.replication is None else r.replication.kd_hold_rate
+                    ),
+                    "thermo_criterion": (
+                        None if r.replication is None else r.replication.thermo_criterion
+                    ),
                     "notes": r.notes,
                 }
                 for r in self.rounds

@@ -25,6 +25,7 @@ batch scorer are all stubbed, so the whole loop runs offline and burns nothing.
 from __future__ import annotations
 
 import math
+from typing import ClassVar
 
 import pytest
 
@@ -148,7 +149,7 @@ def _hydrate(rows: dict[str, dict], *, legs=None, job_index=None) -> PanelResult
     """Run ``_hydrate_metrics`` over a one-leg panel and hand it back."""
     legs = legs or {(A, "ENPP3"): PanelLeg(sequence=A, receptor="ENPP3",
                                            fold_job_ids=list(rows))}
-    job_index = job_index or {j: (A, "ENPP3") for j in rows}
+    job_index = job_index or dict.fromkeys(rows, (A, "ENPP3"))
     panel = PanelResult(
         target="ENPP3", off_targets=["ENPP1"], legs=legs, requested_draws=1,
     )
@@ -156,30 +157,44 @@ def _hydrate(rows: dict[str, dict], *, legs=None, job_index=None) -> PanelResult
     return panel
 
 
-def _panel(spec, *, target="ENPP3", off_targets=("ENPP1", "ENPP6"), draws=1):
-    """A PanelResult from ``{(seq, receptor): {...leg fields...}}``."""
+def _panel(spec, *, target="ENPP3", off_targets=("ENPP1", "ENPP6"), draws=2):
+    """A PanelResult from ``{(seq, receptor): {...leg fields...}}``.
+
+    ⛔ TWO DRAWS BY DEFAULT, and the Kd values are given per-leg as a single
+    number that is replicated across them. That is not fixture convenience: a
+    selectivity ratio's denominator must clear
+    :data:`~ligandai.thermo.CONFIRM_MIN_DRAWS`, because a screen-depth on-target
+    Kd runs ~22x optimistic and that error passes straight into the ratio. A
+    one-draw fixture would exercise only the withheld path.
+    """
     legs: dict[tuple[str, str], PanelLeg] = {}
     for (seq, recep), cell in spec.items():
-        ipsae = list(cell.get("ipsae", [0.80]))
-        kd = list(cell.get("kd", []))
+        ipsae = list(cell.get("ipsae", [0.80])) * draws
+        kd_one = cell.get("kd", None)
+        kd = [] if kd_one is None else list(kd_one) * draws
+        jobs = [f"{seq[:4]}|{recep}|{i}" for i in range(len(ipsae))]
         legs[(seq, recep)] = PanelLeg(
             sequence=seq,
             receptor=recep,
+            fold_job_ids=jobs,
             peptide_ipsae_draws=ipsae,
             scaffold_mediated_draws=[False] * len(ipsae),
+            ipsae_by_job=dict(zip(jobs, ipsae, strict=False)),
             kd_nm_draws=kd,
+            kd_by_job=dict(zip(jobs, kd, strict=False)),
             delta_g_draws=list(cell.get("delta_g", [])),
-            kd_not_computed=int(cell.get("kd_not_computed", 0)),
+            kd_not_computed=int(cell.get("kd_not_computed", 0)) * (0 if kd else 1),
             kd_statuses=list(cell.get("kd_statuses", [])),
             kd_reasons=list(cell.get("kd_reasons", [])),
             peptide_length=cell.get("peptide_length", len(seq)),
-            kd_scorers=list(cell.get("kd_scorers", ["deltaforge_v10_2_unified_parallel"] * len(kd))),
-            kd_scorer_versions=list(cell.get("kd_scorer_versions", ["10.2.0"] * len(kd))),
+            kd_scorers=["deltaforge_v10_2_unified_parallel"] * len(kd),
+            kd_scorer_versions=["10.2.0"] * len(kd),
             kd_ipsae_gate=cell.get("kd_ipsae_gate", GATE),
         )
     return PanelResult(
         target=target, off_targets=list(off_targets), legs=legs,
-        requested_draws=draws, statistic="median",
+        requested_draws=len(next(iter(legs.values())).peptide_ipsae_draws),
+        statistic="median",
     )
 
 
@@ -374,7 +389,7 @@ def test_a_missing_target_kd_is_not_a_selectivity_row_at_all():
     assert row.target_kd_nm is None
     assert row.kd_fold_selectivity is None
     assert row.kd_upper_bound is None
-    assert row.kd_selectivity_status == "no_target_kd"
+    assert row.kd_selectivity_status == "on_target_missing"
 
 
 def test_a_zero_target_kd_is_not_perfect_selectivity():
@@ -383,12 +398,18 @@ def test_a_zero_target_kd_is_not_perfect_selectivity():
         (A, "ENPP1"): {"ipsae": [0.70], "kd": [100.0]},
         (A, "ENPP6"): {"ipsae": [0.70], "kd": [20.0]},
     })
+    # The 0.0 draw IS recorded — the server measured it.
+    leg = panel.leg(A, "ENPP3")
+    assert leg is not None and leg.kd_nm_draws == [0.0, 0.0]
+    assert leg.kd_nonpositive_draws == 2
     row = panel.deltas(band=0.05, target_leg_min=0.66)[0][0]
-    assert row.target_kd_nm == pytest.approx(0.0)
     assert row.kd_fold_selectivity is None          # never inf
     assert row.log10_kd_selectivity is None
-    assert row.kd_selectivity_status == "target_kd_nonpositive"
+    # ⛔ And it is NOT reported as an absent measurement: the scorer returned
+    # something impossible, which is a different fact from never having run.
+    assert row.kd_selectivity_status == "on_target_nonpositive"
     assert row.kd_selectivity_resolvable is False
+    assert row.target_kd_nm is None                 # nothing divided by it
 
 
 def test_the_length_confound_travels_beside_every_kd_ordering():
@@ -484,7 +505,7 @@ def test_the_kd_noise_band_is_measured_in_log10_space():
         (A, "ENPP3"): {"ipsae": [0.90, 0.90], "kd": [1.0, 100.0]},
         (A, "ENPP1"): {"ipsae": [0.20, 0.20], "kd": [10.0, 100.0]},
         (A, "ENPP6"): {"ipsae": [0.20, 0.20], "kd": [10.0, 100.0]},
-    }, draws=2)
+    }, draws=1)
     spread = panel.observed_kd_spread()
     assert spread["n_legs"] == 3
     assert spread["median_log10_range"] == pytest.approx(1.0)
@@ -529,13 +550,68 @@ def test_score_thermo_never_pays_to_score_a_fold_below_the_gate():
     assert report.n_submitted == 1
 
 
-def test_score_thermo_is_never_called_implicitly_by_fold_panel():
-    # ⛔ Charge-on-success. The only way to spend here is to ask for it.
-    src = Campaigns.fold_panel.__doc__ or ""
-    assert "score_thermo" not in Campaigns._hydrate_metrics.__code__.co_names
-    assert "cost" in (Campaigns.score_thermo.__doc__ or "").lower()
-    assert "credits()" in (Campaigns.score_thermo.__doc__ or "")
-    assert src  # the fold-cost note is still there
+class _ExplodingDeltaForge:
+    """A batch scorer that FAILS THE TEST if anything touches it.
+
+    ⛔ THE GUARD IS THIS OBJECT, NOT A COMMENT. ``batch-score-fold`` is billed
+    per successfully-scored fold, so any implicit call from the panel path
+    spends Andre's credits on top of the fold cost, unasked and uncapped — and
+    a comment saying "never call this here" does not fail a build.
+    """
+
+    def batch_score_fold(self, *_a, **_kw):
+        raise AssertionError(
+            "fold_panel reached the BILLED DeltaForge batch scorer. The panel "
+            "path must read Kd from the free filter_folds JOIN; the paid "
+            "backfill is score_thermo() and it is opt-in."
+        )
+
+
+def test_fold_panel_never_touches_the_billed_batch_scorer():
+    ids = ["ENPP3|0|0", "ENPP1|0|0"]
+
+    class _Batch:
+        def __init__(self, recep, seqs):
+            self.jobs = [{"job_id": f"{recep}|0|{i}", "peptide_index": i,
+                          "sequence": s} for i, s in enumerate(seqs)]
+
+        def wait(self, **_kw):
+            return []
+
+    class _Peptides:
+        def fold_batch(self, *, peptides, **kw):
+            return _Batch(kw.get("target_gene") or kw.get("receptor_name"), peptides)
+
+    ev = _FakeEvaluator({j: _metrics() for j in ids})
+    client = _FakeClient(ev, _ExplodingDeltaForge())
+    client.peptides = _Peptides()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    panel = camp.fold_panel([A], target="ENPP3", off_targets=["ENPP1"])
+    # The Kd arrived anyway — free, off the filter_folds JOIN.
+    leg = panel.leg(A, "ENPP3")
+    assert leg is not None
+    assert leg.kd_nm_draws == [10.0]
+    assert ev.calls, "the free metrics surface was never read"
+
+
+def test_score_thermo_states_its_cost_and_where_to_check_the_balance():
+    doc = Campaigns.score_thermo.__doc__ or ""
+    assert "BILLED" in doc
+    assert "credits()" in doc
+    # ⛔ And it must say the endpoint does not persist, because a caller who
+    # assumes it does will pay for the same scores twice.
+    assert "persist" in doc.lower()
+
+
+def test_the_async_client_says_score_thermo_is_sync_only():
+    # A bare AttributeError on a BILLED surface reads like a typo, and the
+    # caller who cannot find it is the one most likely to hand-roll the gate.
+    from ligandai.errors import LigandAISurfaceNotInThisPackage
+    from ligandai.resources.campaigns import AsyncCampaigns
+
+    ac = AsyncCampaigns(transport=None, client=None)  # type: ignore[arg-type]
+    with pytest.raises(LigandAISurfaceNotInThisPackage, match="only on the SYNC"):
+        ac.score_thermo  # noqa: B018 - the attribute access IS the call
 
 
 def test_affinity_quotable_false_is_indeterminate_with_the_servers_own_code():
@@ -586,13 +662,17 @@ def test_score_thermo_chunks_at_the_servers_own_limit():
         (A, "ENPP3"): PanelLeg(
             sequence=A, receptor="ENPP3", fold_job_ids=ids,
             peptide_ipsae_draws=[0.90] * len(ids),
-            ipsae_by_job={j: 0.90 for j in ids},
+            ipsae_by_job=dict.fromkeys(ids, 0.90),
         )
     }
     panel = PanelResult(target="ENPP3", off_targets=["ENPP1"], legs=legs,
                         requested_draws=1)
-    df = _FakeDeltaForge({j: {"delta_g": -9.0, "kd_nm": 2.5,
-                              "affinity_quotable": True} for j in ids})
+    # A fresh dict per id: score_thermo mutates nothing, but a shared value
+    # object in a fixture is a footgun the next test would inherit.
+    df = _FakeDeltaForge({
+        j: {"delta_g": -9.0, "kd_nm": 2.5, "affinity_quotable": True}
+        for j in ids
+    })
     ev = _FakeEvaluator({j: _metrics(kd_nm=2.5) for j in ids})
     report = _camp(ev, df).score_thermo(panel, only_gated=True)
     assert [len(c) for c in df.calls] == [200, 5]
@@ -614,3 +694,102 @@ def test_score_thermo_does_not_re_pay_for_a_leg_that_already_has_a_kd():
     assert df.calls == []
     assert report.n_already_scored == 1
     assert report.n_submitted == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. The recursive loop carries the thermo verdict through every round
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _RoundBatch:
+    def __init__(self, recep, seqs, draw):
+        self.jobs = [{"job_id": f"{recep}|{draw}|{i}", "peptide_index": i,
+                      "sequence": s} for i, s in enumerate(seqs)]
+
+    def wait(self, **_kw):
+        return []
+
+
+class _RoundPeptides:
+    """ENPP3 binds tightly; the off-target binds weakly on both objectives."""
+
+    IPSAE: ClassVar[dict[str, float]] = {"ENPP3": 0.90, "ENPP1": 0.20}
+    # only 1.2x selective — deliberately below any sane thermo bar
+    KD: ClassVar[dict[str, float]] = {"ENPP3": 50.0, "ENPP1": 60.0}
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def fold_batch(self, *, peptides, **kw):
+        key = kw.get("target_gene") or kw.get("receptor_name")
+        draw = sum(1 for c in self.calls if c == key)
+        self.calls.append(key)
+        return _RoundBatch(key, peptides, draw)
+
+
+class _RoundEvaluator:
+    def filter_folds(self, ids, criteria=None, **_kw):
+        rows = []
+        for jid in ids:
+            recep = jid.split("|")[0]
+            rows.append({
+                "fold_job_id": jid,
+                "quality_tier": {"verdict": "great_plus"},
+                "metrics": _metrics(
+                    peptide_ipsae=_RoundPeptides.IPSAE[recep],
+                    kd_nm=_RoundPeptides.KD[recep],
+                ),
+            })
+        return {"results": rows}
+
+
+def _recursive(**kw):
+    client = _FakeClient(_RoundEvaluator(), _ExplodingDeltaForge())
+    client.peptides = _RoundPeptides()
+    camp = Campaigns(transport=None, client=client)  # type: ignore[arg-type]
+    return camp.recursive(
+        target="ENPP3", off_targets=["ENPP1"], band=0.05, target_leg_min=0.66, **kw
+    )
+
+
+def test_a_round_reports_the_thermo_verdict_beside_the_ipsae_one():
+    camp = _recursive(min_kd_fold_selectivity=10.0)
+    rnd = camp.run_round(sequences=[A], replicates=2, confirm_replicates=2)
+    # Held on ipSAE...
+    assert rnd.confirmed == [A]
+    # ...and MOVED on Kd: 60/50 is 1.2x, not the 10x that was required.
+    assert rnd.kd_confirmed == []
+    assert rnd.kd_lost_at_replication == [A]
+    assert camp.kd_confirmed == []
+    assert any("HELD on ipSAE and MOVED on Kd" in n for n in rnd.notes)
+    # ⛔ And the free JOIN supplied the Kd — the billed scorer was never touched.
+    assert rnd.summary["n_kd_selectivity_ok"] == 1
+
+
+def test_a_round_with_no_thermo_threshold_says_the_kd_was_not_tested():
+    camp = _recursive()
+    rnd = camp.run_round(sequences=[A], replicates=2, confirm_replicates=2)
+    assert rnd.confirmed == [A]
+    assert rnd.kd_confirmed == []          # nothing was asked of the Kd
+    assert rnd.kd_lost_at_replication == []
+    assert any("no thermo criterion supplied" in n for n in rnd.notes)
+    rep = camp.report()
+    assert rep["thermo_objective_stated"] is False
+    assert rep["confirmed_on"] == "peptide_ipsae delta"
+
+
+def test_a_round_quotes_the_kd_band_in_log10_and_the_ratio_band_beside_it():
+    camp = _recursive(min_kd_fold_selectivity=10.0)
+    rnd = camp.run_round(sequences=[A], replicates=2, confirm=False)
+    assert any("log10" in n and "fold-selectivity" in n for n in rnd.notes)
+
+
+def test_the_report_carries_the_thermo_half_of_every_round():
+    camp = _recursive(min_kd_fold_selectivity=10.0, max_target_kd_nm=100.0)
+    camp.run_round(sequences=[A], replicates=2, confirm_replicates=2)
+    r = camp.report()["rounds"][0]
+    assert r["n_kd_confirmed_at_fresh_draw"] == 0
+    assert r["n_held_ipsae_lost_kd"] == 1
+    assert r["kd_hold_rate"] == 0.0
+    assert "kd_fold_selectivity >= 10.0" in r["thermo_criterion"]
+    assert "on-target kd_nm <= 100.0" in r["thermo_criterion"]
