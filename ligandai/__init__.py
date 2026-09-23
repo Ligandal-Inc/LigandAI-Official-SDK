@@ -148,8 +148,17 @@ from ligandai.contrastive import (
     ContrastiveReference,
     PocketFeatureMatrix,
 )
+from ligandai.multitarget import (
+    CROSS_TARGET_AGGREGATES,
+    CoOptimization,
+    CrossTargetAggregate,
+    TargetSpec,
+    aggregate_across_targets,
+)
 from ligandai.resources.campaigns import (
     CampaignRound,
+    MultiTargetDelta,
+    MultiTargetPartial,
     PanelLeg,
     PanelResult,
     PartialDelta,
@@ -277,6 +286,14 @@ __all__ = [
     "ClientSessionUsageSummary",
     "ContrastiveGuidance",
     "ContrastiveReference",
+    # Multi-target co-optimization (N positive targets). bd-dre-if562.
+    "CoOptimization",
+    "TargetSpec",
+    "CrossTargetAggregate",
+    "CROSS_TARGET_AGGREGATES",
+    "MultiTargetDelta",
+    "MultiTargetPartial",
+    "aggregate_across_targets",
     "CostEstimate",
     "CovalentAttachment",
     "DashboardHandle",
