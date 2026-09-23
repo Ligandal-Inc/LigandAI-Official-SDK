@@ -42,20 +42,20 @@ from typing import Any, Literal
 from ligandai.errors import LigandAIParameterNotForwarded, LigandAIValidationError
 
 __all__ = [
+    "MAX_AVOID_PARALOGS",
+    "V6_5_POCKET_FEATURE_DIM",
+    "V6_9_22_POCKET_FEATURE_DIM",
+    "V6_9_POCKET_FEATURE_DIM",
+    "AvoidancePolicy",
     "CfgReference",
+    "CfgReferenceProvenance",
     "ContrastiveGuidance",
     "ContrastiveReference",
-    "AvoidancePolicy",
-    "PocketFeatureMatrix",
-    "V6_9_POCKET_FEATURE_DIM",
-    "V6_9_22_POCKET_FEATURE_DIM",
-    "V6_5_POCKET_FEATURE_DIM",
-    "MAX_AVOID_PARALOGS",
-    "normalize_avoid_paralogs",
-    "avoid_paralogs_to_wire",
-    "require_avoid_paralogs_model",
     "ParalogReferenceEntry",
-    "CfgReferenceProvenance",
+    "PocketFeatureMatrix",
+    "avoid_paralogs_to_wire",
+    "normalize_avoid_paralogs",
+    "require_avoid_paralogs_model",
 ]
 
 
@@ -139,7 +139,7 @@ def model_takes_cfg_reference(model_id: str | None) -> bool | None:
 MAX_AVOID_PARALOGS = 8
 
 
-def normalize_avoid_paralogs(genes: "Sequence[str] | None") -> tuple[str, ...] | None:
+def normalize_avoid_paralogs(genes: Sequence[str] | None) -> tuple[str, ...] | None:
     """Normalize ``avoid_paralogs=`` into the wire gene list, or None if unset.
 
     * HGNC-style uppercase normalisation (``"brd3"`` -> ``"BRD3"``), so the same
@@ -188,7 +188,7 @@ def normalize_avoid_paralogs(genes: "Sequence[str] | None") -> tuple[str, ...] |
     return tuple(cleaned)
 
 
-def avoid_paralogs_to_wire(genes: "Sequence[str]") -> dict[str, Any]:
+def avoid_paralogs_to_wire(genes: Sequence[str]) -> dict[str, Any]:
     """The exact request keys a named ``avoid_paralogs=`` panel puts on the wire.
 
     Both the snake and camel spelling, mirroring
@@ -809,7 +809,7 @@ class CfgReferenceProvenance:
         node: Any,
         *,
         caller_requested_hint: bool | None = None,
-    ) -> "CfgReferenceProvenance | None":
+    ) -> CfgReferenceProvenance | None:
         """Parse a persisted/relayed provenance payload, or None if absent.
 
         ``node`` is whatever the response carries at ``cfg_reference_provenance``

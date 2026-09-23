@@ -30,10 +30,23 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+# ⛔ Aliased: the bare name `Sequence` in this module is
+# ligandai.types.Sequence (a peptide-sequence business object, imported
+# below) — NOT collections.abc.Sequence. avoid_paralogs=[...] takes a
+# sequence OF GENE NAMES, so it needs the real generic container; using the
+# ambient `Sequence` name there would accept the wrong type silently.
+from collections.abc import Sequence as _StrSequence
 from typing import Any, Callable, Literal, Union
 
 from ligandai._targeting import validate_and_normalize_targeting
-from ligandai.contrastive import AvoidancePolicy, ContrastiveGuidance
+from ligandai.contrastive import (
+    AvoidancePolicy,
+    CfgReferenceProvenance,
+    ContrastiveGuidance,
+    avoid_paralogs_to_wire,
+    normalize_avoid_paralogs,
+    require_avoid_paralogs_model,
+)
 from ligandai.errors import (
     LigandAICreditError,
     LigandAIDiagnosticWarning,
@@ -1074,6 +1087,10 @@ def _generation_body(
     # receptor pockets at sampling time. See ligandai.contrastive.
     contrastive: "ContrastiveGuidance | None",
     allow_unforwarded_contrastive: bool,
+    # Name the off-target genes yourself instead of building/fetching a
+    # ContrastiveGuidance panel — the customer-reachable surface for the same
+    # capability. See ligandai.contrastive.normalize_avoid_paralogs.
+    avoid_paralogs: _StrSequence[str] | None = None,
     # SUPERADMIN-ONLY GPU routing. Emitted ONLY when true, so a body from a
     # caller who never heard of this flag is byte-identical to before.
     local: bool = False,
@@ -1493,6 +1510,29 @@ def _generation_body(
         )
         body.update(contrastive.to_wire())
 
+    # ── avoid_paralogs (bd-dre-siz9d) ───────────────────────────────────────
+    # The customer-reachable way to NAME the off-targets: restricts the
+    # server-side paralog reference producer to these genes instead of
+    # building/fetching a ContrastiveGuidance panel from raw pocket features
+    # (which needs an entitlement most callers do not have — see
+    # Campaigns.pocket_features). Emitted ONLY when supplied, under both
+    # spellings, mirroring ContrastiveGuidance.to_wire().
+    #
+    # ⛔ Two ways to name one panel. `contrastive=` already IS a chosen panel;
+    # accepting both and silently preferring one is how a caller ends up
+    # steered away from something they did not choose.
+    if avoid_paralogs is not None and contrastive is not None:
+        raise LigandAIValidationError(
+            "pass either avoid_paralogs=[...] or contrastive=ContrastiveGuidance(...), "
+            "not both — they are two ways of naming the same off-target panel, and "
+            "silently preferring one would steer generation away from receptors "
+            "the caller did not choose to name that way."
+        )
+    _normalized_avoid_paralogs = normalize_avoid_paralogs(avoid_paralogs)
+    if _normalized_avoid_paralogs is not None:
+        require_avoid_paralogs_model(generator_model_id)
+        body.update(avoid_paralogs_to_wire(_normalized_avoid_paralogs))
+
     # ── SUPERADMIN-ONLY local (on-prem) GPU routing [bd-LIGANDAI_ALPHA_V2-d7b23]
     # ⛔ EMITTED ONLY WHEN TRUE, and never as `false`. The platform's gate is
     # "falsy is a complete no-op" (fastapi_backend/middleware/local_execution.py
@@ -1845,15 +1885,48 @@ def _public_parameters(params: Any) -> Any:
     return {k: v for k, v in params.items() if k not in _NON_PUBLIC_PARAMETER_KEYS}
 
 
+def _parse_cfg_reference_provenance(
+    payload: dict[str, Any], parameters: Any
+) -> CfgReferenceProvenance | None:
+    """Read ``cfg_reference_provenance`` off a job payload, or None if absent.
+
+    ⛔ None means "this server build did not report it" — NEVER "no
+    conditioning happened". As of 2026-09-23 no production job record carries
+    this field yet (Express's relay — bd-dre-lknrx — has not landed), so every
+    run parsed today gets None here regardless of whether it was genuinely
+    CFG-conditioned. See :class:`CfgReferenceProvenance` for why the two must
+    never render the same way.
+
+    ``caller_requested`` falls back to whether THIS request's echoed
+    parameters named a panel (``cfg_reference_genes`` / ``cfgReferenceGenes``)
+    when the provenance payload itself carries no explicit flag — the only
+    other place that fact survives once the request has been sent.
+    """
+    node = payload.get("cfg_reference_provenance")
+    if node is None:
+        node = payload.get("cfgReferenceProvenance")
+    named_panel = False
+    if isinstance(parameters, dict):
+        named_panel = bool(
+            parameters.get("cfg_reference_genes") or parameters.get("cfgReferenceGenes")
+        )
+    return CfgReferenceProvenance.from_wire(node, caller_requested_hint=named_panel)
+
+
 def _parse_generation(payload: dict[str, Any]) -> GenerationResult:
     """Coerce a server result payload into :class:`GenerationResult`."""
+    _parameters = _public_parameters(payload.get("parameters") or payload.get("config"))
     out: dict[str, Any] = {
         "jobId": payload.get("jobId") or payload.get("id") or payload.get("session_id") or "",
         "sessionId": payload.get("sessionId") or payload.get("session_id"),
         "gene": payload.get("gene") or _first_target_gene(payload) or "",
         "peptides": _extract_peptides(payload),
         "totalGenerated": payload.get("totalGenerated") or payload.get("total"),
-        "parameters": _public_parameters(payload.get("parameters") or payload.get("config")),
+        "parameters": _parameters,
+        # Extra field (GenerationResult / _LGModel is extra="allow") — a typed,
+        # read-only CfgReferenceProvenance instance, or None when this server
+        # build does not report it. See ligandai.contrastive.CfgReferenceProvenance.
+        "cfg_reference_provenance": _parse_cfg_reference_provenance(payload, _parameters),
     }
     return GenerationResult.model_validate(out)
 
@@ -4169,6 +4242,20 @@ class Peptides(Resource):
         contrastive: "ContrastiveGuidance | None" = None,
         avoidance: "AvoidancePolicy | None" = None,
         allow_unforwarded_contrastive: bool = False,
+        # Name the off-target genes yourself — the customer-reachable surface
+        # for paralog-conditioned generation (bd-dre-siz9d). Sends
+        # cfg_reference_genes (and cfgReferenceGenes) on the wire, restricting
+        # the server-side paralog reference producer to these genes instead of
+        # requiring the raw (entitlement-gated) pocket-feature width that
+        # contrastive=ContrastiveGuidance(...) needs. Requires a CFG-capable
+        # model (model='v6.9.21' or 'v6.9.22') — raises LigandAIValidationError
+        # naming them otherwise. Mutually exclusive with contrastive=: they are
+        # two ways of naming one panel, and preferring one silently is how a
+        # caller ends up steered away from something they did not choose.
+        # None (default): with a CFG-capable model, the platform still derives
+        # and applies its own real paralog references — you are just not
+        # choosing which ones.
+        avoid_paralogs: _StrSequence[str] | None = None,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
@@ -4735,6 +4822,7 @@ class Peptides(Resource):
             cascade_gate_top_n=cascade_gate_top_n,
             contrastive=contrastive,
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
+            avoid_paralogs=avoid_paralogs,
             local=local,
             extra=extra,
         )
@@ -4772,6 +4860,8 @@ class Peptides(Resource):
         self,
         targets: Iterable[_MultiTargetSpec],
         num_peptides: int | None = None,
+        *,
+        avoid_paralogs: _StrSequence[str] | None = None,
         **kwargs: Any,
     ) -> Job[GenerationResult]:
         """Generate against **N receptors in one concurrent run**.
@@ -4794,6 +4884,10 @@ class Peptides(Resource):
             num_peptides: Peptides **per target** (not the total). The bill and
                 the volume discount are computed on ``len(targets) *
                 num_peptides`` — see :func:`estimate_multi_cost`.
+            avoid_paralogs: Name the off-target genes to steer every target's
+                generation away from, session-wide — see :meth:`generate` for
+                the full contract (CFG-capable model required, mutually
+                exclusive with ``contrastive=``).
             **kwargs: Every other :meth:`generate` keyword, applied session-wide.
 
         Returns:
@@ -4839,6 +4933,7 @@ class Peptides(Resource):
             gene=first_gene,
             num_peptides=num_peptides,
             targets=wire_targets,
+            avoid_paralogs=avoid_paralogs,
             **kwargs,
         )
         _attach_multi_target_helpers(job, [str(t["gene"]) for t in wire_targets])
@@ -7316,6 +7411,20 @@ class AsyncPeptides(AsyncResource):
         contrastive: "ContrastiveGuidance | None" = None,
         avoidance: "AvoidancePolicy | None" = None,
         allow_unforwarded_contrastive: bool = False,
+        # Name the off-target genes yourself — the customer-reachable surface
+        # for paralog-conditioned generation (bd-dre-siz9d). Sends
+        # cfg_reference_genes (and cfgReferenceGenes) on the wire, restricting
+        # the server-side paralog reference producer to these genes instead of
+        # requiring the raw (entitlement-gated) pocket-feature width that
+        # contrastive=ContrastiveGuidance(...) needs. Requires a CFG-capable
+        # model (model='v6.9.21' or 'v6.9.22') — raises LigandAIValidationError
+        # naming them otherwise. Mutually exclusive with contrastive=: they are
+        # two ways of naming one panel, and preferring one silently is how a
+        # caller ends up steered away from something they did not choose.
+        # None (default): with a CFG-capable model, the platform still derives
+        # and applies its own real paralog references — you are just not
+        # choosing which ones.
+        avoid_paralogs: _StrSequence[str] | None = None,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
@@ -7474,6 +7583,7 @@ class AsyncPeptides(AsyncResource):
             cascade_gate_top_n=cascade_gate_top_n,
             contrastive=contrastive,
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
+            avoid_paralogs=avoid_paralogs,
             local=local,
             extra=extra,
         )
@@ -7508,6 +7618,8 @@ class AsyncPeptides(AsyncResource):
         self,
         targets: Iterable[_MultiTargetSpec],
         num_peptides: int | None = None,
+        *,
+        avoid_paralogs: _StrSequence[str] | None = None,
         **kwargs: Any,
     ) -> AsyncJob[GenerationResult]:
         """Generate against **N receptors in one concurrent run**.
@@ -7530,6 +7642,10 @@ class AsyncPeptides(AsyncResource):
             num_peptides: Peptides **per target** (not the total). The bill and
                 the volume discount are computed on ``len(targets) *
                 num_peptides`` — see :func:`estimate_multi_cost`.
+            avoid_paralogs: Name the off-target genes to steer every target's
+                generation away from, session-wide — see :meth:`generate` for
+                the full contract (CFG-capable model required, mutually
+                exclusive with ``contrastive=``).
             **kwargs: Every other :meth:`generate` keyword, applied session-wide.
 
         Returns:
@@ -7575,6 +7691,7 @@ class AsyncPeptides(AsyncResource):
             gene=first_gene,
             num_peptides=num_peptides,
             targets=wire_targets,
+            avoid_paralogs=avoid_paralogs,
             **kwargs,
         )
         _attach_multi_target_helpers(job, [str(t["gene"]) for t in wire_targets])
