@@ -52,6 +52,7 @@ passthrough this generalises).
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -59,6 +60,13 @@ from typing import Any, Literal
 
 from ligandai.errors import LigandAIValidationError
 from ligandai.species import normalize_species
+from ligandai.thermo import (
+    VALID_IPSAE,
+    MetricDirection,
+    clears_floor,
+    geometric_mean_kd,
+    worst_case,
+)
 
 __all__ = [
     "CrossTargetAggregate",
@@ -66,8 +74,11 @@ __all__ = [
     "TargetSpec",
     "CoOptimization",
     "aggregate_across_targets",
+    "dual_objective_pass",
     "coerce_target",
     "DEFAULT_ORGANISM",
+    "MetricDirection",
+    "VALID_IPSAE",
 ]
 
 #: How a design's per-positive-target scores become ONE number.
@@ -94,16 +105,32 @@ DEFAULT_ORGANISM = "human"
 def aggregate_across_targets(
     per_target: Mapping[str, float],
     rule: CrossTargetAggregate,
+    *,
+    direction: MetricDirection = "higher_is_better",
 ) -> tuple[float, str | None]:
     """Combine per-positive-target scores under ``rule``.
 
-    Returns ``(value, limiting_target)``. ``limiting_target`` is the argmin —
-    present under BOTH rules, because "which target is holding this design
-    back" is the actionable half of the answer even when the rule averaged it
-    away.
+    Returns ``(value, limiting_target)``. ``limiting_target`` is the weakest leg
+    under ``direction`` — present under BOTH rules, because "which target is
+    holding this design back" is the actionable half of the answer even when the
+    rule averaged it away.
+
+    ⛔ ``direction`` IS PART OF THE METRIC AND IS NOT INFERRED. ipSAE is
+    ``higher_is_better`` (the default, so every existing caller is unchanged);
+    DeltaForge Kd and ΔG are ``lower_is_better``. Under ``worst_case`` that
+    flips ``min`` to ``max``: the worst Kd across a panel is the LOOSEST one.
+    Passing a Kd mapping in without saying so returns a confidently inverted
+    verdict — it names the tightest leg as the limiting one — and no field in
+    the result contradicts it.
+
+    ⛔ Under ``mean`` a ``lower_is_better`` metric is combined GEOMETRICALLY.
+    Kd spans orders of magnitude and its within-cell distribution is symmetric
+    in log space, so an arithmetic mean is dominated by the loosest leg and is
+    not the average affinity of anything.
 
     ⛔ Raises on an empty mapping rather than returning 0.0. No measurement is
-    not a score of zero.
+    not a score of zero — and for Kd, 0 nM is infinitely tight binding, so the
+    default would manufacture the best row in the set.
     """
     if not per_target:
         raise LigandAIValidationError(
@@ -118,10 +145,130 @@ def aggregate_across_targets(
             f"positive targets (what 'binds both' means); 'mean' averages them "
             f"and lets one strong leg mask a failed one."
         )
-    limiting = min(per_target, key=lambda k: per_target[k])
+    _agg_value, limiting = worst_case(per_target, direction)
     if rule == "worst_case":
         return float(per_target[limiting]), limiting
+    if direction == "lower_is_better":
+        # Geometric mean: Kd is a log-scale quantity.
+        return geometric_mean_kd(list(per_target.values())), limiting
     return float(statistics.fmean(per_target.values())), limiting
+
+
+def dual_objective_pass(
+    *,
+    per_target_ipsae: Mapping[str, float],
+    per_target_kd_nm: Mapping[str, float],
+    ipsae_gate: float = VALID_IPSAE,
+    kd_ceiling_nm: float | None,
+    aggregate: CrossTargetAggregate,
+) -> tuple[bool, dict[str, Any]]:
+    """The objective Andre asked for: **thermo AND ipSAE**, in that order.
+
+    ipSAE GATES and Kd SCORES. The order is not stylistic — DeltaForge scores an
+    interface, so below ``ipsae_gate`` there is no interface and the Kd it
+    returns is a number about noise. A tight Kd on an ungated leg is the single
+    most dangerous output this pipeline can produce, so the gate runs first and
+    the Kd of an ungated leg is **withheld**, not reported and then ignored.
+
+    Returns ``(passes, detail)``. ``detail`` always carries every leg's gate
+    verdict, every admissible Kd, the aggregate and the limiting leg, so a
+    ``mean``-rule pass carried by one strong leg is visible rather than inferred.
+
+    ⛔ A leg that cleared the gate but has no Kd makes the row INCOMPLETE
+    (``detail["complete"] is False``, ``aggregate_kd_nm is None``) — never a Kd
+    of zero, which is infinitely tight binding and would sort the row first.
+
+    ``kd_ceiling_nm=None`` means no thermodynamic requirement was stated: the
+    result is ipSAE-only and ``detail["objective"]`` says so, so an ipSAE-only
+    verdict can never be mistaken for a dual one.
+    """
+    if not per_target_ipsae:
+        raise LigandAIValidationError(
+            "dual_objective_pass got no per-target ipSAE. An absent measurement "
+            "is not a score of zero — the row is incomplete."
+        )
+    if aggregate not in CROSS_TARGET_AGGREGATES:
+        raise LigandAIValidationError(
+            f"unknown cross-target aggregate {aggregate!r}; use one of "
+            f"{list(CROSS_TARGET_AGGREGATES)}"
+        )
+
+    per_gate = {k: v >= ipsae_gate for k, v in per_target_ipsae.items()}
+    ungated = tuple(sorted(k for k, ok in per_gate.items() if not ok))
+    if aggregate == "worst_case":
+        gate_pass = all(per_gate.values())
+    else:
+        agg_ipsae_for_gate, _ = aggregate_across_targets(
+            per_target_ipsae, aggregate, direction="higher_is_better"
+        )
+        gate_pass = agg_ipsae_for_gate >= ipsae_gate
+    agg_ipsae, limiting_ipsae = aggregate_across_targets(
+        per_target_ipsae, aggregate, direction="higher_is_better"
+    )
+
+    # ⛔ Kd is admissible ONLY on a gated leg. Everything else is withheld with
+    # its leg named, so the absence is legible instead of silent.
+    admissible: dict[str, float] = {}
+    withheld_ungated: list[str] = []
+    for k, ok in per_gate.items():
+        v = per_target_kd_nm.get(k)
+        if not ok:
+            if v is not None:
+                withheld_ungated.append(k)
+            continue
+        if isinstance(v, (int, float)) and math.isfinite(float(v)) and float(v) > 0:
+            admissible[k] = float(v)
+    kd_missing = tuple(sorted(
+        k for k, ok in per_gate.items() if ok and k not in admissible
+    ))
+
+    agg_kd: float | None = None
+    limiting_kd: str | None = None
+    per_kd_pass: dict[str, bool] = {}
+    kd_pass: bool | None = None
+    complete = not kd_missing and bool(admissible)
+    if complete:
+        agg_kd, limiting_kd = aggregate_across_targets(
+            admissible, aggregate, direction="lower_is_better"
+        )
+        if kd_ceiling_nm is not None:
+            per_kd_pass = {
+                k: clears_floor(v, float(kd_ceiling_nm), "lower_is_better")
+                for k, v in admissible.items()
+            }
+            kd_pass = (
+                all(per_kd_pass.values()) if aggregate == "worst_case"
+                else clears_floor(agg_kd, float(kd_ceiling_nm), "lower_is_better")
+            )
+
+    objective = "ipsae_gate_then_kd" if kd_ceiling_nm is not None else "ipsae_only"
+    passes = bool(gate_pass) if kd_ceiling_nm is None else bool(gate_pass and kd_pass)
+
+    return passes, {
+        "objective": objective,
+        "aggregate_rule": aggregate,
+        "ipsae_gate": float(ipsae_gate),
+        "kd_ceiling_nm": None if kd_ceiling_nm is None else float(kd_ceiling_nm),
+        "kd_estimator": "geometric_mean",
+        "per_target_ipsae": dict(per_target_ipsae),
+        "per_target_gate": per_gate,
+        "gate_pass": bool(gate_pass),
+        "ungated_targets": ungated,
+        "aggregate_ipsae": agg_ipsae,
+        "limiting_ipsae_target": limiting_ipsae,
+        # Ungated legs appear here as None: the key exists so the leg is not
+        # forgotten, the value is absent because it is not an affinity.
+        "per_target_kd_nm": {
+            k: admissible.get(k) for k in per_target_ipsae
+        },
+        "per_target_kd_pass": per_kd_pass,
+        "kd_pass": kd_pass,
+        "aggregate_kd_nm": agg_kd,
+        "limiting_kd_target": limiting_kd,
+        "kd_missing": kd_missing,
+        "kd_withheld_ungated": tuple(sorted(withheld_ungated)),
+        "complete": complete,
+    }
 
 
 def _clean_resnums(value: Any, label: str) -> tuple[int, ...] | None:
@@ -688,10 +835,42 @@ class CoOptimization:
         )
 
     def aggregate_scores(
-        self, per_target: Mapping[str, float]
+        self,
+        per_target: Mapping[str, float],
+        *,
+        direction: MetricDirection = "higher_is_better",
     ) -> tuple[float, str | None]:
-        """Combine measured per-target scores under this object's own rule."""
-        return aggregate_across_targets(per_target, self.aggregate)
+        """Combine measured per-target scores under this object's own rule.
+
+        ⛔ Pass ``direction="lower_is_better"`` for Kd or ΔG. The default is
+        ipSAE's direction, so a Kd mapping handed in without it comes back with
+        the TIGHTEST leg named as the limiting one — an inverted verdict that no
+        other field in the result contradicts.
+        """
+        return aggregate_across_targets(per_target, self.aggregate, direction=direction)
+
+    def dual_objective(
+        self,
+        *,
+        per_target_ipsae: Mapping[str, float],
+        per_target_kd_nm: Mapping[str, float],
+        ipsae_gate: float = VALID_IPSAE,
+        kd_ceiling_nm: float | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Thermo AND ipSAE under this object's own aggregation rule.
+
+        The co-optimization answer to "does this design bind every positive
+        target": ipSAE gates each leg, then DeltaForge Kd scores the legs that
+        cleared. See :func:`dual_objective_pass` for the rules; this method only
+        supplies ``aggregate`` so the rule can never drift from the object's.
+        """
+        return dual_objective_pass(
+            per_target_ipsae=per_target_ipsae,
+            per_target_kd_nm=per_target_kd_nm,
+            ipsae_gate=ipsae_gate,
+            kd_ceiling_nm=kd_ceiling_nm,
+            aggregate=self.aggregate,
+        )
 
     def target_leg_passes(
         self, per_target: Mapping[str, float], target_leg_min: float

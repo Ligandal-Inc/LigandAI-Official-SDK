@@ -259,6 +259,16 @@ class PanelLegRow(TypedDict, total=False):
     total_poses: int
     gated_poses: int
     unscored_poses: int
+    inherited_metric_poses: int
+    """Poses whose binder metric was INHERITED from the primary trajectory.
+
+    ⛔ Not measured for that pose, and excluded from ``gated_poses`` on purpose.
+    The server has always returned this field and the typed surface omitted it,
+    so a caller reading ``total_poses`` against ``gated_poses`` could not see
+    that part of the difference is copied rather than absent — which is the
+    difference between a leg that needs deepening and one that only looks like
+    it does. [bd-LIGANDAI_ALPHA_V2-jb73b.2]
+    """
     kd_poses: int
     geomean_kd_gated: float | None
     sd_log10_kd_observed: float | None
@@ -267,6 +277,15 @@ class PanelLegRow(TypedDict, total=False):
     max_peptide_ipsae: float | None
     max_sample_idx: int | None
     distinct_structures: int
+    receptor_length: int | None
+    """Receptor chain length, or None when the fold never recorded chainLengths.
+
+    ⛔ NULL on most rows (748 of 28,381 recent folds carry it) and reported as
+    null rather than guessed. It is the companion to
+    ``statistics.length_comparability``: the gate metric is length-normalised
+    and a panel varies receptor length by construction, so the confound is
+    structural and has to be readable per leg.
+    """
     session_ids: list[str]
     job_ids: list[str]
     first_fold_at: str | None
@@ -288,8 +307,21 @@ class PanelDesignRow(TypedDict, total=False):
 
 
 class PanelResult(TypedDict, total=False):
-    """Return shape of :meth:`Folds.panel`."""
+    """Return shape of :meth:`Folds.panel`.
 
+    ⛔ Not :class:`ligandai.resources.campaigns.PanelResult`, which is a CLASS
+    over locally-folded legs. This one is the wire shape of
+    ``GET /api/folding/panels`` — an already-thermodynamic surface: its legs
+    carry ``kd_poses`` / ``geomean_kd_gated`` / ``sd_log10_kd_observed``
+    because the server aggregates persisted DeltaForge scores itself. The
+    campaigns panel had to grow that surface; this one always had it.
+    """
+
+    query: dict[str, Any]
+    """The resolved query — ``session_id``, ``peptide``, ``gene``,
+    ``on_target``, ``gate``, ``target_fold_change``. Echoed back because
+    ``gate`` and ``on_target`` decide what every number below MEANS, and a
+    default that was applied server-side is otherwise invisible."""
     gate: float
     on_target: str | None
     on_target_source: str
