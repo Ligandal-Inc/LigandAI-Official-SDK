@@ -2629,12 +2629,41 @@ class Campaigns(Resource):
         "designs": "GET /api/campaign/{campaign_id}/leaderboard",
     }
 
+    #: ⛔ [bd-dre-rp11j.9.1] WHERE EACH SURFACE ACTUALLY LIVES NOW. The platform
+    #: maturation client SHIPPED as `client.maturation` (ligandai/resources/
+    #: maturation.py), so the old advice — "drive it over the raw transport" —
+    #: is no longer true for most of this map and would send a customer to build
+    #: by hand something the package already does correctly, gates included.
+    #:
+    #: These methods are NOT aliased onto this namespace on purpose. The other
+    #: five methods here are LOCAL: they compose fold/score primitives in your
+    #: process and never call /api/campaign/*. Making one of the five secretly
+    #: drive a server-side campaign would give this namespace two unrelated
+    #: behaviours and make the name collision permanent instead of pointing out
+    #: of it. So this raises, and it raises with a destination.
+    _PLATFORM_CAMPAIGN_REMEDY: ClassVar[dict[str, str]] = {
+        "mature": "client.maturation.start(spec)",
+        "maturation": "client.maturation.readout(campaign_id)",
+        "status": "client.maturation.status(campaign_id)",
+        "leaderboard": "client.maturation.leaderboard(campaign_id)",
+        "designs": "client.maturation.iter_designs(campaign_id)",
+        "structure": "client.maturation.structure(campaign_id, design_id)",
+        "stop": "client.maturation.stop(campaign_id)",
+        "stream": "client.maturation.stream(campaign_id)",
+        "list": "client.maturation.list()",
+    }
+
     def __getattr__(self, name: str) -> Any:
         route = self._PLATFORM_CAMPAIGN_SURFACE.get(name)
         if route is None:
             raise AttributeError(
                 f"{type(self).__name__!r} object has no attribute {name!r}"
             )
+        remedy = self._PLATFORM_CAMPAIGN_REMEDY.get(name) or (
+            "drive the endpoint over the SDK transport, which carries your auth, "
+            "retries and error mapping: "
+            'client.transport.request("POST", "/api/campaign/start", json={...})'
+        )
         raise LigandAISurfaceNotInThisPackage(
             f"client.campaigns.{name}() does not exist in the `ligandai` package, "
             f"but the platform endpoint it maps to DOES exist.\n"
@@ -2642,14 +2671,18 @@ class Campaigns(Resource):
             f"  server endpoint : {route}\n"
             f"  the situation   : `client.campaigns` here is a LOCAL panel-folding "
             f"helper (pocket_features, contrastive_references, fold_panel, "
-            f"replicate, recursive). It is NOT a client for the platform "
-            f"campaign/maturation API — the two only share a name.\n"
+            f"replicate, recursive) that never calls /api/campaign/*. It is NOT a "
+            f"client for the platform campaign/maturation API — the two only "
+            f"share a name.\n"
             f"  this is not a typo on your part, and it is not a transient "
-            f"failure: no version of this package has ever carried that surface.\n"
-            f"  what to do      : drive the endpoint directly over the SDK's own "
-            f"transport, which carries your auth, retries and error mapping:\n"
-            f"      client.transport.request(\"POST\", \"/api/campaign/start\", json={{...}})\n"
-            f"  tracking        : bd-dre-rp11j.9",
+            f"failure: no method of THIS namespace has ever driven that "
+            f"endpoint, in any version.\n"
+            f"  what to do      : {remedy}\n"
+            f"  note            : `client.maturation` is the PUBLISHED client for "
+            f"the platform maturation loop (start/status/readout/leaderboard/"
+            f"structure/stop/stream). It is a DIFFERENT capability from this "
+            f"namespace, not a rename of it.\n"
+            f"  tracking        : bd-dre-rp11j.9, bd-dre-rp11j.9.1",
             surface=name,
             namespace="client.campaigns",
             server_routes=tuple(sorted(set(self._PLATFORM_CAMPAIGN_SURFACE.values()))),
@@ -3710,6 +3743,30 @@ class AsyncCampaigns(AsyncResource):
         "designs": "GET /api/campaign/{campaign_id}/leaderboard",
     }
 
+    #: ⛔ [bd-dre-rp11j.9.1] WHERE EACH SURFACE ACTUALLY LIVES NOW. The platform
+    #: maturation client SHIPPED as `client.maturation` (ligandai/resources/
+    #: maturation.py), so the old advice — "drive it over the raw transport" —
+    #: is no longer true for most of this map and would send a customer to build
+    #: by hand something the package already does correctly, gates included.
+    #:
+    #: These methods are NOT aliased onto this namespace on purpose. The other
+    #: five methods here are LOCAL: they compose fold/score primitives in your
+    #: process and never call /api/campaign/*. Making one of the five secretly
+    #: drive a server-side campaign would give this namespace two unrelated
+    #: behaviours and make the name collision permanent instead of pointing out
+    #: of it. So this raises, and it raises with a destination.
+    _PLATFORM_CAMPAIGN_REMEDY: ClassVar[dict[str, str]] = {
+        "mature": "client.maturation.start(spec)",
+        "maturation": "client.maturation.readout(campaign_id)",
+        "status": "client.maturation.status(campaign_id)",
+        "leaderboard": "client.maturation.leaderboard(campaign_id)",
+        "designs": "client.maturation.iter_designs(campaign_id)",
+        "structure": "client.maturation.structure(campaign_id, design_id)",
+        "stop": "client.maturation.stop(campaign_id)",
+        "stream": "client.maturation.stream(campaign_id)",
+        "list": "client.maturation.list()",
+    }
+
     #: Surfaces that exist on the SYNC :class:`Campaigns` and deliberately have
     #: no async facade (see the class docstring). Named here so reaching for one
     #: says "sync only" instead of raising a bare AttributeError that reads like
@@ -3752,6 +3809,11 @@ class AsyncCampaigns(AsyncResource):
             raise AttributeError(
                 f"{type(self).__name__!r} object has no attribute {name!r}"
             )
+        remedy = self._PLATFORM_CAMPAIGN_REMEDY.get(name) or (
+            "drive the endpoint over the SDK transport, which carries your auth, "
+            "retries and error mapping: "
+            'client.transport.request("POST", "/api/campaign/start", json={...})'
+        )
         raise LigandAISurfaceNotInThisPackage(
             f"client.campaigns.{name}() does not exist in the `ligandai` package, "
             f"but the platform endpoint it maps to DOES exist.\n"
@@ -3759,14 +3821,18 @@ class AsyncCampaigns(AsyncResource):
             f"  server endpoint : {route}\n"
             f"  the situation   : `client.campaigns` here is a LOCAL panel-folding "
             f"helper (pocket_features, contrastive_references, fold_panel, "
-            f"replicate, recursive). It is NOT a client for the platform "
-            f"campaign/maturation API — the two only share a name.\n"
+            f"replicate, recursive) that never calls /api/campaign/*. It is NOT a "
+            f"client for the platform campaign/maturation API — the two only "
+            f"share a name.\n"
             f"  this is not a typo on your part, and it is not a transient "
-            f"failure: no version of this package has ever carried that surface.\n"
-            f"  what to do      : drive the endpoint directly over the SDK's own "
-            f"transport, which carries your auth, retries and error mapping:\n"
-            f"      client.transport.request(\"POST\", \"/api/campaign/start\", json={{...}})\n"
-            f"  tracking        : bd-dre-rp11j.9",
+            f"failure: no method of THIS namespace has ever driven that "
+            f"endpoint, in any version.\n"
+            f"  what to do      : {remedy}\n"
+            f"  note            : `client.maturation` is the PUBLISHED client for "
+            f"the platform maturation loop (start/status/readout/leaderboard/"
+            f"structure/stop/stream). It is a DIFFERENT capability from this "
+            f"namespace, not a rename of it.\n"
+            f"  tracking        : bd-dre-rp11j.9, bd-dre-rp11j.9.1",
             surface=name,
             namespace="client.campaigns",
             server_routes=tuple(sorted(set(self._PLATFORM_CAMPAIGN_SURFACE.values()))),
