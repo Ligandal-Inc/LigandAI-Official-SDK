@@ -51,6 +51,7 @@ what host an AI agent is actually talking to.
 quickstart
 authentication
 resources
+named_targets
 maturation
 api_reference
 workflows

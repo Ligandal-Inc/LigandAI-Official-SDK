@@ -14,6 +14,7 @@
 | `client.synthesis` | Quote, cart, Adaptyv orders |
 | `client.memory` | Episodic memory |
 | `client.programs` | Programs, projects, sessions |
+| `client.targets` | **Your own uploads, addressed by a name you chose.** `list()`, `resolve(name)`, `candidates(name)`, and `choose/choice/choices/clear_choice` when one name means several structures — see [named targets](named_targets.md) |
 | `client.charts` | Chart generation |
 | `client.reports` | PDF reports |
 | `client.jobs` | List, cancel, stream |

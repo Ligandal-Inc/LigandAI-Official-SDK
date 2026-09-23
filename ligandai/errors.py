@@ -533,6 +533,85 @@ class LigandAILegalAcceptanceRequired(LigandAIForbidden):
         self.needs_eula = needs_eula
 
 
+class LigandAIAmbiguousTarget(LigandAIError):
+    """409 — the name you passed matches SEVERAL of your own uploaded structures.
+
+    [bd-LIGANDAI_ALPHA_V2-etbo3]
+
+    The platform refuses rather than picking one, and that refusal is the point:
+    a silently-chosen conformer folds, scores and lands in a results table
+    looking *exactly* like a correct answer, so "most recent upload wins" would
+    be indistinguishable from working. What changed is that the refusal is now
+    **answerable without a second call** — it carries the candidates.
+
+    A customer who uploaded three conformational states of the BRD4 ET domain
+    and named them all ``BRD4ET``::
+
+        try:
+            job = client.peptides.generate(gene="BRD4ET", num_peptides=200)
+        except LigandAIAmbiguousTarget as e:
+            for c in e.candidates:
+                print(c.upload_id, c.name, c.residue_count, c.size_bytes)
+            # userprotein_7   Brd4ET_closed                  67  44388
+            # userprotein_42  Brd4ET_closed_state_form       67 117719
+            # userprotein_598 Brd4ET_isoform_target_state    68  43296
+            job = client.peptides.generate(
+                gene="BRD4ET", user_pdb_id=e.candidates[2].upload_id, num_peptides=200,
+            )
+
+    Or decide once and stop being asked — the choice is visible and reversible,
+    never an invisible default::
+
+        client.targets.choose("BRD4ET", e.candidates[2].upload_id)
+        client.targets.choice("BRD4ET")        # show me what I picked
+        client.targets.clear_choice("BRD4ET")  # and change my mind
+
+    ⛔ Never retry this call unchanged. It will refuse identically forever; only
+    a *different* call — a chosen ``user_pdb_id``, or a saved choice — resolves.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        target_name: str | None = None,
+        candidates: list[Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        #: The ambiguous name, exactly as sent.
+        self.target_name = target_name
+        # Imported lazily: ligandai.resources.targets imports from this module,
+        # so a top-level import here would close the cycle.
+        from ligandai.resources.targets import TargetCandidate
+
+        #: One entry per DISTINCT structure — never one per duplicate row.
+        #: Byte-identical re-uploads are collapsed and counted on
+        #: :attr:`TargetCandidate.duplicate_count`.
+        self.candidates: list[TargetCandidate] = [
+            c if isinstance(c, TargetCandidate) else TargetCandidate(c)
+            for c in (candidates or [])
+        ]
+
+    @property
+    def upload_ids(self) -> list[str]:
+        """Just the ids, for a caller that only needs to pick one."""
+        return [c.upload_id for c in self.candidates if c.upload_id]
+
+    def __str__(self) -> str:  # pragma: no cover - formatting only
+        base = super().__str__()
+        if not self.candidates:
+            return base
+        lines = [
+            f"  {c.upload_id}  {c.name or '(unnamed)'}"
+            + (f"  {c.residue_count} res" if c.residue_count is not None else "")
+            + (f"  {c.size_bytes} B" if c.size_bytes is not None else "")
+            + (f"  (+{c.duplicate_count} identical re-uploads)" if c.duplicate_count else "")
+            for c in self.candidates
+        ]
+        return base + "\n" + "\n".join(lines)
+
+
 class LigandAINotFoundError(LigandAIError):
     """404 — resource (gene, complex, job, etc.) not found."""
 
@@ -1508,6 +1587,19 @@ def error_from_response(
             content_type=content_type,
             body_excerpt=excerpt,
             reason=f"{edge}_edge_block",
+            **common,
+        )
+
+    # ⛔ [bd-LIGANDAI_ALPHA_V2-etbo3] AMBIGUOUS TARGET NAME. Checked before the
+    # status dispatch because a bare 409 would otherwise fall through to the
+    # generic conflict handling and the `candidates` array — the only thing that
+    # makes this refusal answerable — would be thrown away at the raise.
+    if (payload.get("error") == "ambiguous_target_name"
+            or payload.get("code") == "ambiguous_target_name"):
+        return LigandAIAmbiguousTarget(
+            message,
+            target_name=payload.get("targetName") or payload.get("target_name"),
+            candidates=payload.get("candidates") or [],
             **common,
         )
 

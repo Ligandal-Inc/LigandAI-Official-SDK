@@ -53,6 +53,7 @@ from ligandai.diagnostics import (
     known_codes,
 )
 from ligandai.errors import (
+    LigandAIAmbiguousTarget,
     LigandAIAuthError,
     LigandAIConcurrencyLimit,
     LigandAIConnectionError,
@@ -359,6 +360,7 @@ __all__ = [
     "Job",
     "Legal",
     "LigandAI",
+    "LigandAIAmbiguousTarget",
     "LigandAIAnalysisNotComputed",
     "LigandAIAuthError",
     "LigandAIConcurrencyLimit",
