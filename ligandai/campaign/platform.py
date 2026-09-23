@@ -23,6 +23,7 @@ from __future__ import annotations
 import glob
 import os
 import statistics
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
@@ -261,6 +262,32 @@ class SDKPlatform:
             kwargs["target_residues"] = list(g.target_residues)
         if g.avoid_residues:
             kwargs["avoid_residues"] = list(g.avoid_residues)
+        # ⛔ EVERY campaign generate call is a DELIBERATE NEW BATCH — say so on
+        # the wire [bd-dre-c80f4.4].
+        #
+        # The platform reuses an existing session when a later request looks like
+        # a repeat of an earlier one: a 60 s idempotency cache (built to stop
+        # double-DEBITS on a transport retry) and a gene/variant reuse window.
+        # Neither can tell "the client retried the same HTTP call" from "the
+        # engine has come round the loop and wants another 150 designs of this
+        # class", because from the body alone those are identical.
+        #
+        # This is NOT ``allow_reused_session`` and must never become it. That
+        # flag ACCEPTS someone else's peptides under this call's label. These two
+        # say the opposite: run it for real.
+        #   * ``additionalBatch`` — the server's own name for "generate more",
+        #     the exact intent of an iteration step.
+        #   * ``requestNonce`` — distinguishes a new logical call from a retry.
+        #     An HTTP retry re-sends this same body, and therefore this same
+        #     nonce, so double-debit protection is preserved exactly.
+        #
+        # ``Peptides.generate`` collects unknown keywords into ``**extra`` and
+        # the body builder does ``body.update(extra)``, so these two reach the
+        # wire verbatim — they are set as plain kwargs, not under an ``extra=``
+        # key, which that signature would treat as a wire field literally named
+        # "extra".
+        kwargs["additionalBatch"] = True
+        kwargs["requestNonce"] = uuid.uuid4().hex
         kwargs.update(g.extra)
         kwargs.update(pc.generator_overrides)
         kwargs.pop("model", None)
@@ -311,15 +338,80 @@ class SDKPlatform:
                 "msa_enabled": f.msa_receptor,
             }
             if cofactors:
-                kwargs["cofactors"] = list(cofactors)
+                # ⛔ bd-dre-c80f4.7 — `fold_batch` HAS NO COFACTOR PARAMETER.
+                # `cofactors=` was passed here and would have died on a TypeError
+                # deep in the SDK; worse, quietly dropping it would fold a
+                # cofactor-dependent interface WITHOUT its cofactor and report
+                # the result as if the cofactor had been there. Cofactor co-fold
+                # lives on the ensemble surface (ligandai/resources/ensemble.py),
+                # and that module records that the DEPLOYED co-fold route cannot
+                # express a cofactor at all. Say so, here, before any credit is
+                # spent, instead of producing a number nobody can trust.
+                raise RuntimeError(
+                    f"construct {construct.name!r} declares cofactors "
+                    f"{list(cofactors)} but peptides.fold_batch() has no cofactor "
+                    f"parameter — this fold would silently run WITHOUT them. "
+                    f"A cofactor-dependent interface folded cofactor-free is not "
+                    f"the same measurement. Remove the cofactor declaration to "
+                    f"run an explicitly apo campaign, or fold this arm through "
+                    f"the ensemble co-fold surface."
+                )
             if construct.gene:
-                kwargs["target_gene"] = construct.gene
+                # ⛔ bd-dre-c80f4.7 — NOT `target_gene=`.
+                #
+                # `_build_batch_fold_body()` requires EXACTLY ONE of target_gene=
+                # / receptor_pdb= / receptor_sequence=, so passing the gene next
+                # to the construct sequence raised
+                #   ValueError: Pass exactly one of target_gene=, receptor_pdb=,
+                #               or receptor_sequence=
+                # before a single pose existed. Every real spec sets a gene on
+                # its constructs — including the shipped worked example
+                # examples/campaign/ca12_selective_binders.yaml — so the fold
+                # stage could not run at all.
+                #
+                # receptor_sequence is AUTHORITATIVE: it carries the exact
+                # construct and residue range the spec declares, which is the
+                # whole point of declaring a construct rather than a gene name.
+                # The gene is still worth sending — as `msa_source_gene=`, which
+                # is exactly "derive this arbitrary sequence's MSA from that
+                # gene's cached, homolog-rich MSA" (bd-dre-h0cuo.1). Folding a
+                # receptor without an MSA produces garbage ipSAE, and a fresh
+                # fragment search on a construct slice is often degenerate, so
+                # dropping the gene entirely would trade a hard error for a
+                # quietly worse fold.
+                if f.msa_receptor:
+                    kwargs["msa_source_gene"] = construct.gene
             job = self.client.peptides.fold_batch(list(sequences), **kwargs)
             payload = job.wait(timeout=self.timeout, poll_interval=self.poll_interval)
             for row in _iter_folds(payload):
                 seq = _seq_of(row)
                 if not seq:
                     continue
+                # ⛔ bd-dre-c80f4.7 — A COMPLEX FOLD THAT CAME BACK AS ONE CHAIN
+                # IS NOT A COMPLEX FOLD.
+                #
+                # Asking for a receptor and getting a monomer back is SILENT:
+                # the job succeeds, the row looks normal, and the pdb header
+                # reads "Boltz-2 Single Chain Prediction ... CHAIN: A; LENGTH:
+                # 10". No interface exists on that output, so every interface
+                # metric downstream is absent — and "absent" is then read as
+                # "this design scored badly" rather than "nobody folded a
+                # complex". Reproduced 2026-09-23 folding GnRH QHWSYGLRPG with
+                # target_gene= and no receptor_sequence=.
+                #
+                # Checked by PARSING the coordinates, never by a status field.
+                # Absent coordinates leave the frame UNVERIFIED — which is not a
+                # pass and not a failure, so it does not raise here; it is
+                # recorded so a caller can tell the two apart.
+                _chains = _pdb_chain_ids(row)
+                if _chains is not None and len(_chains) < 2:
+                    raise RuntimeError(
+                        f"fold[{label}] asked for {seq} against construct "
+                        f"{construct.name!r} ({len(construct.sequence)} aa) but the "
+                        f"returned structure has ONE chain {sorted(_chains)} — it is a "
+                        f"single-chain prediction of the peptide alone, not a complex. "
+                        f"No interface metric can exist on it; do not score this batch."
+                    )
                 results.append(PoseResult(
                     design_id=ReplayPlatform._h(seq)[:12], sequence=seq,
                     seed_unit=f"{label}:u{unit}", identity=None,
@@ -359,28 +451,39 @@ class SDKPlatform:
 
 # -- payload helpers -------------------------------------------------------
 
-def _iter_peptides(result: Any) -> Iterable[Any]:
-    for attr in ("peptides", "designs", "results", "items"):
-        v = getattr(result, attr, None)
-        if v:
+# ⛔ bd-dre-c80f4.7 — A DICT IS CHECKED FIRST, AND "items" IS NEVER AN ATTRIBUTE
+# LOOKUP.
+#
+# Both helpers used to try `getattr(payload, "items")` BEFORE the dict branch.
+# Every dict has an `.items` METHOD, so `getattr({"folds": [...]}, "items")` is
+# truthy and the helper returned the bound method instead of the rows — the
+# caller then raised `TypeError: 'builtin_function_or_method' object is not
+# iterable`, or, on the peptide side, silently iterated nothing. The dict shape
+# is the one the JSON API actually returns.
+
+
+def _rows_from(payload: Any, keys: Sequence[str]) -> Iterable[Any]:
+    """Pull the row list out of a dict payload or a response object."""
+    if isinstance(payload, dict):
+        for k in keys:
+            v = payload.get(k)
+            if v:
+                return v
+        return []
+    for attr in (*keys, "items"):
+        v = getattr(payload, attr, None)
+        # A bound method is an attribute that EXISTS, not a row list.
+        if v and not callable(v):
             return v
-    if isinstance(result, dict):
-        for k in ("peptides", "designs", "results"):
-            if result.get(k):
-                return result[k]
-    return result if isinstance(result, (list, tuple)) else []
+    return payload if isinstance(payload, (list, tuple)) else []
+
+
+def _iter_peptides(result: Any) -> Iterable[Any]:
+    return _rows_from(result, ("peptides", "designs", "results"))
 
 
 def _iter_folds(payload: Any) -> Iterable[Any]:
-    for attr in ("folds", "results", "items"):
-        v = getattr(payload, attr, None)
-        if v:
-            return v
-    if isinstance(payload, dict):
-        for k in ("folds", "results"):
-            if payload.get(k):
-                return payload[k]
-    return payload if isinstance(payload, (list, tuple)) else []
+    return _rows_from(payload, ("folds", "results"))
 
 
 def _get(row: Any, *keys: str) -> Any:
@@ -396,6 +499,33 @@ def _get(row: Any, *keys: str) -> Any:
 def _seq_of(row: Any) -> str | None:
     v = _get(row, "sequence", "peptide_sequence", "peptideSequence", "seq")
     return str(v).strip().upper() if v else None
+
+
+def _pdb_chain_ids(row: Any) -> set[str] | None:
+    """Chain IDs actually present in a fold row's COORDINATES.
+
+    ⛔ bd-dre-c80f4.7 — read from ATOM/HETATM records, never from a status
+    field, a chain count, or a header line. A fold that was asked to be against
+    a receptor and came back single-chain is otherwise indistinguishable from a
+    successful complex: same ``status``, same row shape, metrics merely absent.
+
+    Returns ``None`` when the row carries no coordinates at all. That is
+    UNVERIFIED, not "one chain" — a missing file is not a measurement, and
+    collapsing the two would turn "I could not look" into "I looked and it was
+    wrong". The caller must treat ``None`` as indeterminate.
+    """
+    pdb = _get(row, "pdb_content", "pdbContent", "pdb_data", "pdbData", "pdb")
+    if not isinstance(pdb, str) or not pdb.strip():
+        return None
+    chains: set[str] = set()
+    for line in pdb.splitlines():
+        if line.startswith(("ATOM  ", "HETATM")) and len(line) > 21:
+            cid = line[21].strip()
+            if cid:
+                chains.add(cid)
+    # Coordinates present but unparseable is also "could not look", not "one
+    # chain" — an empty set must never read as a single-chain verdict.
+    return chains or None
 
 
 def _metric(row: Any, *keys: str) -> Measured:
