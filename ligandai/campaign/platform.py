@@ -262,6 +262,49 @@ class SDKPlatform:
             kwargs["target_residues"] = list(g.target_residues)
         if g.avoid_residues:
             kwargs["avoid_residues"] = list(g.avoid_residues)
+
+        # ⛔ generation.heads MUST reach the generator [bd-dre-c80f4.5].
+        #
+        # spec.py VALIDATES this field -- it refuses four stacked heads and caps
+        # immuno at 0.5 -- which makes a spec author reasonably believe it is
+        # applied. It was never read here, so every campaign declaring
+        # `heads: {proteolytic: true, halflife: true}` ran with those modules
+        # OFF while its own record claimed otherwise. Validating a field and
+        # then discarding it is worse than not having the field.
+        #
+        # The head names are the campaign vocabulary; these are the kwargs the
+        # SDK actually exposes. Note `halflife` is deliberately mapped to
+        # residue_composition: the SDK's own `halflife=` is a DEPRECATED ALIAS
+        # for the residue-composition knob and predicts nothing (no N-end rule,
+        # no PEST term). The learned half-life head is a separate POST-HOC
+        # scorer, not a generation-time control.
+        _heads = dict(g.heads or {})
+        _strength = lambda v, d: (float(v) if isinstance(v, (int, float))
+                                  and not isinstance(v, bool) else d)
+        if _heads.get("proteolytic"):
+            kwargs["serum_stability"] = True
+            kwargs["stability_strength"] = _strength(_heads["proteolytic"], 1.0)
+            kwargs["stability_mode"] = g.extra.get("proteolytic_mode", "resist")
+            if g.extra.get("stability_modules"):
+                kwargs["stability_modules"] = dict(g.extra["stability_modules"])
+        if _heads.get("halflife") or _heads.get("residue_composition"):
+            kwargs["residue_composition"] = True
+            kwargs["residue_composition_strength"] = _strength(
+                _heads.get("residue_composition", _heads.get("halflife")), 1.0)
+        if _heads.get("immuno"):
+            kwargs["immunogenicity"] = True
+            kwargs["immuno_strength"] = _strength(_heads["immuno"], 0.3)
+        if _heads.get("cellfree"):
+            kwargs["cellfree"] = True
+            kwargs["cellfree_strength"] = _strength(_heads["cellfree"], 1.0)
+        # Record what was actually asked for, so a record can be audited without
+        # re-deriving this mapping.
+        _heads_sent = {k: kwargs[k] for k in
+                       ("serum_stability", "stability_strength", "stability_mode",
+                        "stability_modules", "residue_composition",
+                        "residue_composition_strength", "immunogenicity",
+                        "immuno_strength", "cellfree", "cellfree_strength")
+                       if k in kwargs}
         # ⛔ EVERY campaign generate call is a DELIBERATE NEW BATCH — say so on
         # the wire [bd-dre-c80f4.4].
         #
@@ -306,6 +349,8 @@ class SDKPlatform:
                 peptide_class=pc.name, topology=pc.topology,
                 molecule_class=pc.molecule_class or pc.topology,
                 provenance={"model": model, "job": getattr(job, "id", None),
+                            "heads_requested": dict(_heads),
+                            "heads_sent_as_kwargs": _heads_sent,
                             "generator_kwargs": {k: v for k, v in kwargs.items()
                                                  if k != "num_peptides"}}))
         # Length is sampled PER BATCH on this platform; a collapsed range has
