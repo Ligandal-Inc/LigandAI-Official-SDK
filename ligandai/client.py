@@ -75,6 +75,7 @@ from ligandai.resources.ensemble import AsyncEnsemble, Ensemble
 from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
 from ligandai.resources.folds import AsyncFolds, Folds
 from ligandai.resources.goals import AsyncGoals, Goals
+from ligandai.resources.gut_stability import AsyncGutStability, GutStability
 from ligandai.resources.jobs import AsyncJobs, Jobs
 from ligandai.resources.legal import AsyncLegal, Legal
 from ligandai.resources.ligands import AsyncLigands, Ligands
@@ -684,6 +685,12 @@ class LigandAI(_ClientCommon):
         self.ensemble: Ensemble = Ensemble(self._transport, client=self)
         self.jobs: Jobs = Jobs(self._transport)
         self.goals: Goals = Goals(self._transport, client=self)
+        # GI / gut-stability developability triage [bd-dre-c80f4.1]. ⛔ Rule
+        # counts normalized by length — NOT measured rates, NOT a survival
+        # probability, NOT an oral bioavailability prediction, NOT a neural
+        # network. Enterprise module, default_enabled=False; see
+        # client.gut_stability.entitlement() for why a value may be absent.
+        self.gut_stability: GutStability = GutStability(self._transport, client=self)
         # Programmatic ToS/EULA review + acceptance (client.legal).
         self.legal: Legal = Legal(self._transport, client=self)
         # Small-molecule Kd scoring — free-tier accessible.
@@ -1142,6 +1149,10 @@ class AsyncLigandAI(_ClientCommon):
         self.ensemble: AsyncEnsemble = AsyncEnsemble(self._transport, client=self)
         self.jobs: AsyncJobs = AsyncJobs(self._transport)
         self.goals: AsyncGoals = AsyncGoals(self._transport, client=self)
+        # See the sync client for the declaration contract. [bd-dre-c80f4.1]
+        self.gut_stability: AsyncGutStability = AsyncGutStability(
+            self._transport, client=self
+        )
         # Programmatic ToS/EULA review + acceptance (client.legal).
         self.legal: AsyncLegal = AsyncLegal(self._transport, client=self)
         # Small-molecule Kd scoring — free-tier accessible.

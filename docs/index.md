@@ -55,6 +55,7 @@ named_targets
 contrastive
 campaigns
 maturation
+gut_stability
 api_reference
 workflows
 error_codes

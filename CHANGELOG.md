@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `client.gut_stability`: GI / SGF–SIF developability triage
+
+- **`client.gut_stability`** exposes the GI peptide-stability module
+  (`gi_peptide_stability`) that shipped to production with no SDK surface.
+  `score_local()` evaluates the SGF/SIF protease-motif rule set in-process — no
+  credits, no round trip — and every record it returns carries
+  `computed_by="ligandai_sdk_local_ruleset"` plus a `ruleset_version`, so a
+  locally scored design can never be mistaken for a platform-computed one.
+  `score()` is the platform path (`POST /api/scoring/gut-stability`).
+- ⛔ **Everything this namespace emits is a RULE COUNT NORMALIZED BY LENGTH.**
+  Copied from the module's own `declaration` block, which rides on every
+  record: `quantity: rule_count_normalized`, `not_a_measured_rate: true`,
+  `not_a_survival_probability: true`,
+  `not_an_oral_bioavailability_prediction: true`, `not_a_neural_network: true`.
+  `sgf_risk` 0.86 is not 86% of anything. Nothing here predicts whether a
+  peptide survives the gut.
+- **`scores.sgf_stable_probability` / `sif_stable_probability` are declared by
+  the platform schema and are deliberately ABSENT.** The only model that could
+  produce one is a 200-RDKit-descriptor logistic baseline (ROC-AUC 0.8112
+  gastric / 0.7435 intestinal, figshare `10.6084/m9.figshare.25941580.v1`),
+  and the source dataset has no amino-acid-sequence column — so it cannot be
+  evaluated on a bare designed sequence. It is carried as
+  `descriptor_logistic_baseline_not_applied` and never run. The matching
+  `classes.sgf_stability_class` / `sif_stability_class` stay absent too: a
+  measured stability class needs a real SGF/SIF assay.
+- **Absent is absent.** An empty or sub-2-residue sequence returns an explicit
+  `{"status": "absent", "reason": ...}` record with no score fields at all,
+  never a zero — a 0.0 would read as a clean bill of health for a design that
+  was never scorable.
+- **`entitlement()`** explains why a value is missing: superadmin OR tier
+  `enterprise` OR an explicit `module_access` grant, `default_enabled` false
+  for everyone. It answers `"indeterminate"`, never `"denied"`, for a
+  non-enterprise account, because `GET /api/auth/user` does not publish
+  `module_access` and an explicit grant is exactly what would flip the answer.
+- **`read_sidecar()`** pulls the sidecar off a platform peptide record across
+  all four key spellings and returns an absent record rather than `None` —
+  "the module was not run" and "you are not entitled" are different facts.
+- **`generation_settings()`** builds the canonical `gi_stability_enabled`
+  guidance block, and **refuses by default**. The generation worker reads the
+  key; no API hop in front of it sends one, so passing it would report the knob
+  ON and run the job with it OFF. It raises `LigandAIParameterNotForwarded`
+  naming the layer that reads it and the layer that drops it;
+  `allow_unforwarded=True` overrides for a build where the plumbing has landed.
+
 ### Added — an ambiguous target name is now ANSWERABLE, and can be decided once
 
 - **`LigandAIAmbiguousTarget` carries the candidates.** A name that matches

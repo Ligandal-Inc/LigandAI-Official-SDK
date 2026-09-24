@@ -10,6 +10,7 @@
 | `client.diseases` | Disease search, mutations |
 | `client.peptides` | Generate, fold, score. `generate(...)`/`generate_multi(...)` take `avoid_paralogs=[...]` for paralog-conditioned (contrastive) generation — see [contrastive](contrastive.md) |
 | `client.maturation` | **Server-side binder maturation** — improve sequences you already have, with same-cycle parent controls. ⛔ NOT `client.campaigns`; see [maturation](maturation.md) |
+| `client.gut_stability` | **GI / gut-stability triage** — SGF & SIF protease-motif burden (`score_local`, `score`, `generation_settings`, `entitlement`, `read_sidecar`). ⛔ RULE COUNTS NORMALIZED BY LENGTH: not a measured degradation rate, not a probability of surviving the gut, not an oral bioavailability prediction, not a neural network. Enterprise module, default off — see [gut stability](gut_stability.md) |
 | `client.bivalent` | Bispecific design (pro+) |
 | `client.synthesis` | Quote, cart, Adaptyv orders |
 | `client.memory` | Episodic memory |

@@ -138,6 +138,23 @@ from ligandai.receptordb import AsyncReceptorDBClient, ReceptorDBClient
 from ligandai.resources import legal
 from ligandai.resources.legal import AsyncLegal, Legal
 
+# GI / gut-stability developability triage — reachable as `client.gut_stability`,
+# and as a top-level module for the pure functions:
+# `from ligandai import gut_stability` / `from ligandai import score_gut_design`.
+#
+# ⛔ Everything this module emits is a RULE COUNT NORMALIZED BY LENGTH: not a
+# measured degradation rate, not a probability of surviving the gut, not an
+# oral bioavailability prediction, not a neural-network output. The declaration
+# block travels on every record — do not strip it. [bd-dre-c80f4.1]
+from ligandai.resources import gut_stability
+from ligandai.resources.gut_stability import (
+    AsyncGutStability,
+    GutStability,
+    gut_stability_declaration,
+    protease_motif_counts,
+    score_gut_design,
+)
+
 # bd-dre-if562 — the recursive selectivity campaign. Every OTHER object a user
 # touches to drive `client.campaigns` was importable as `from ligandai import X`;
 # these were not, so the one workflow whose docstrings say "build this object and
@@ -286,6 +303,8 @@ __all__ = [
     "AdaptyvTarget",
     "ApiCallLogEntry",
     "AsyncBatchFoldJob",
+    "AsyncGutStability",
+    "GutStability",
     "AsyncJob",
     "AsyncLegal",
     "AsyncLigandAI",
@@ -446,6 +465,12 @@ __all__ = [
     "get_latest_pypi_version",
     "get_update_notice",
     "guide",
+    # GI / gut-stability developability triage [bd-dre-c80f4.1] — rule counts
+    # normalized by length, never a measured rate or a survival probability.
+    "gut_stability",
+    "gut_stability_declaration",
+    "protease_motif_counts",
+    "score_gut_design",
     "is_mouse",
     "is_outdated",
     "known_codes",
