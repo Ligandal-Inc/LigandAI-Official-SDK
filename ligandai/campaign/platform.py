@@ -464,12 +464,25 @@ class SDKPlatform:
                     f"not re-queue on it."
                 )
             _dropped_no_seq = 0
+            _drop_reasons: dict[str, int] = {}
             for row in _rows:
                 # Platform fold rows carry no sequence field; read it from the
                 # coordinates [bd-dre-c80f4.21]. _seq_of is tried first so a
                 # future sequence-bearing row still works.
                 seq = _seq_of(row) or _seq_from_coords(row)
                 if not seq:
+                    # Attribute the drop [bd-dre-c80f4.22]. A row with
+                    # status != 'ok' is a FAILED FOLD and is real data for the
+                    # reliability rate; a row that is merely unparseable is
+                    # not. Dropping both into one bucket biases the Wilson
+                    # failure rate OPTIMISTIC, which is the direction that makes
+                    # a campaign look more certifiable than it is.
+                    _st = _get(row, "status", "peptide_ipsae_status")
+                    _has_coords = _pdb_chain_ids(row) is not None
+                    _drop_reasons[
+                        f"status={_st!r},coords={'yes' if _has_coords else 'no'}"
+                    ] = _drop_reasons.get(
+                        f"status={_st!r},coords={'yes' if _has_coords else 'no'}", 0) + 1
                     _dropped_no_seq += 1
                     continue
                 # ⛔ bd-dre-c80f4.7 — A COMPLEX FOLD THAT CAME BACK AS ONE CHAIN
@@ -533,7 +546,9 @@ class SDKPlatform:
                 self.progress(
                     f"fold[{label}] unit {unit + 1}: WARNING {_dropped_no_seq} of "
                     f"{_dropped_no_seq + len(results)} rows dropped (no recoverable "
-                    f"sequence)")
+                    f"sequence) — {_drop_reasons}. A row with status != 'ok' is a "
+                    f"FAILED FOLD and is reliability data; excluding it biases the "
+                    f"failure rate optimistic.")
         return results
 
     def score_developability(self, spec, sequences):
