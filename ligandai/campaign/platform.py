@@ -428,9 +428,30 @@ class SDKPlatform:
                     kwargs["msa_source_gene"] = construct.gene
             job = self.client.peptides.fold_batch(list(sequences), **kwargs)
             payload = job.wait(timeout=self.timeout, poll_interval=self.poll_interval)
-            for row in _iter_folds(payload):
-                seq = _seq_of(row)
+            _rows = list(_iter_folds(payload))
+            # ⛔ ZERO ROWS FOR A NON-EMPTY REQUEST IS A FAILURE, NOT A RESULT
+            # [bd-dre-c80f4.21]. fold_batch returns a bare list; an empty one is
+            # indistinguishable from "nothing scored well" unless we say so
+            # here. Measured 2026-09-24: fold_batch(2 sequences vs FSHR ECD)
+            # returned [] with no exception, and the campaign engine read that
+            # as an empty result, re-queued, and reported "0 designs, 0 poses"
+            # for four iterations while paying for every generation and fold.
+            if sequences and not _rows:
+                raise RuntimeError(
+                    f"fold[{label}] unit {unit + 1}: asked to fold "
+                    f"{len(sequences)} sequence(s) against {construct.name!r} "
+                    f"and the platform returned ZERO rows. That is a failed "
+                    f"fold, not an empty result — the batch was paid for. Do "
+                    f"not re-queue on it."
+                )
+            _dropped_no_seq = 0
+            for row in _rows:
+                # Platform fold rows carry no sequence field; read it from the
+                # coordinates [bd-dre-c80f4.21]. _seq_of is tried first so a
+                # future sequence-bearing row still works.
+                seq = _seq_of(row) or _seq_from_coords(row)
                 if not seq:
+                    _dropped_no_seq += 1
                     continue
                 # ⛔ bd-dre-c80f4.7 — A COMPLEX FOLD THAT CAME BACK AS ONE CHAIN
                 # IS NOT A COMPLEX FOLD.
@@ -470,6 +491,30 @@ class SDKPlatform:
                     cofactors_present=tuple(c.upper() for c in cofactors),
                     pose_path=row.get("pdb_path") if isinstance(row, dict) else None,
                     source="ligandai"))
+            # ⛔ A FOLD THAT RECORDS NOTHING MUST NOT LOOK LIKE A FOLD THAT
+            # FOUND NOTHING [bd-dre-c80f4.21].
+            #
+            # Dropping every row silently is indistinguishable, from the
+            # engine's side, from "this batch simply had no usable poses": both
+            # yield an empty list, the loop re-queues, and the campaign reports
+            # "0 designs, 0 poses" while paying full price for generation AND
+            # folding. Measured: three campaigns x three peptide classes ran to
+            # the no_progress guard over four iterations having recorded zero
+            # designs, because rows carry no sequence field.
+            if _dropped_no_seq and not results:
+                raise RuntimeError(
+                    f"fold[{label}] unit {unit + 1}: every one of "
+                    f"{_dropped_no_seq} returned rows was dropped because no "
+                    f"peptide sequence could be recovered — neither a sequence "
+                    f"field nor parseable CA coordinates. The batch was folded "
+                    f"and paid for; nothing was recorded. Do not treat this as "
+                    f"an empty result."
+                )
+            if _dropped_no_seq:
+                self.progress(
+                    f"fold[{label}] unit {unit + 1}: WARNING {_dropped_no_seq} of "
+                    f"{_dropped_no_seq + len(results)} rows dropped (no recoverable "
+                    f"sequence)")
         return results
 
     def score_developability(self, spec, sequences):
@@ -544,6 +589,64 @@ def _get(row: Any, *keys: str) -> Any:
 def _seq_of(row: Any) -> str | None:
     v = _get(row, "sequence", "peptide_sequence", "peptideSequence", "seq")
     return str(v).strip().upper() if v else None
+
+
+_AA3TO1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q",
+    "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K",
+    "MET": "M", "PHE": "F", "PRO": "P", "SER": "S", "THR": "T", "TRP": "W",
+    "TYR": "Y", "VAL": "V",
+}
+
+
+def _seq_from_coords(row: Any) -> str | None:
+    """The PEPTIDE chain's sequence, read from the fold's own coordinates.
+
+    ⛔ bd-dre-c80f4.21 — fold rows on this platform carry NO sequence field.
+    Their attributes are peptide_ipsae / ipsae / iptm / plddt /
+    peptide_chain_id / receptor_chains / scores / per_chain, and nothing else.
+    ``_seq_of`` therefore returned None for every row, the loop ``continue``d,
+    and EVERY fold produced zero PoseResults while spending full compute. Three
+    campaigns ran generate+fold across three peptide classes and recorded
+    "0 designs, 0 poses" for four iterations before stopping on no_progress.
+
+    Reading it from the coordinates is also the RIGHT source, not merely an
+    available one: guard 7 requires a pose's identity to come from its atoms,
+    never from an arm name or a request-order index. If the platform later adds
+    a sequence field, the coordinates remain authoritative when they disagree.
+
+    Returns None when there are no coordinates, or no residues on the peptide
+    chain — both are "could not look", never an empty sequence.
+    """
+    pdb = _get(row, "pdb_content", "pdbContent", "pdb_data", "pdbData", "pdb")
+    if not isinstance(pdb, str) or not pdb.strip():
+        return None
+    want = _get(row, "peptide_chain_id", "peptideChainId")
+    want = str(want).strip() if want else None
+    # Fall back to the SHORTEST chain: in a peptide-receptor complex the binder
+    # is the short one. Never guess "B" — chain lettering is not guaranteed.
+    per_chain: dict[str, list[tuple[int, str]]] = {}
+    for line in pdb.splitlines():
+        if not line.startswith("ATOM  ") or len(line) < 27:
+            continue
+        if line[12:16].strip() != "CA":
+            continue
+        cid = line[21].strip()
+        res3 = line[17:20].strip().upper()
+        try:
+            num = int(line[22:26])
+        except ValueError:
+            continue
+        per_chain.setdefault(cid, []).append((num, _AA3TO1.get(res3, "X")))
+    if not per_chain:
+        return None
+    if want and want in per_chain:
+        chain = want
+    else:
+        chain = min(per_chain, key=lambda c: len(per_chain[c]))
+    residues = sorted(set(per_chain[chain]))
+    seq = "".join(aa for _, aa in residues)
+    return seq or None
 
 
 def _pdb_chain_ids(row: Any) -> set[str] | None:
