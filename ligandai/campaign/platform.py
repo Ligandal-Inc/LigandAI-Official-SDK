@@ -381,6 +381,25 @@ class SDKPlatform:
                 "recycling_steps": f.recycling_steps,
                 "use_potentials": f.use_potentials,
                 "msa_enabled": f.msa_receptor,
+                # ⛔ EVERY SEED UNIT IS A DELIBERATE REPEAT [bd-dre-c80f4.21].
+                #
+                # An independent seed unit folds the SAME sequences again — that
+                # is the definition. The platform's fold dedup treats a repeat as
+                # already-done and returns ZERO ROWS rather than the cached
+                # result, so unit 2..N silently vanish. Measured 2026-09-24
+                # against FSHR_ECD_18_366: a repeat of two sequences returned
+                # rows=0 with no exception, while the SAME call with
+                # force_resubmit=True on novel sequences returned rows=2 with
+                # coordinates and peptide_ipsae=0.685.
+                #
+                # This is not an optimisation to skip: the Wilson certification
+                # in ReliabilityBlock counts INDEPENDENT SEED UNITS, so a
+                # silently deduped replicate does not make certification
+                # conservative — it makes it uncomputable while looking normal.
+                "force_resubmit": True,
+                # Distinct seed per unit so the replicate is genuinely
+                # independent rather than the same trajectory recomputed.
+                "seed": unit + 1,
             }
             if cofactors:
                 # ⛔ bd-dre-c80f4.7 — `fold_batch` HAS NO COFACTOR PARAMETER.
