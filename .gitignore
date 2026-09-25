@@ -59,4 +59,10 @@ secrets.json
 
 # Snapshot backups (local archive only)
 backups/
-CLAUDE.md
+# ⛔ CLAUDE.md is NOT ignored here. It is FORCE-INCLUDED into both build targets
+# ([tool.hatch.build.targets.wheel.force-include] -> ligandai/CLAUDE.md and
+# [tool.hatch.build.targets.sdist.force-include] -> CLAUDE.md), so ignoring it
+# meant a clean checkout of HEAD lacked a file the build requires, and the
+# released artifact depended on a file no reviewer of the release commit could
+# see. Its sibling AGENTS.md, force-included the same way, was tracked all
+# along -- the asymmetry is what gave it away. [bd-dre-a8p6m]

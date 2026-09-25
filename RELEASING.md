@@ -73,15 +73,50 @@ that regressing build. None of them compare against what users already have.
    a `CHANGELOG.md` entry under the real version number. Never reuse a version
    number that already exists on PyPI for a different set of changes.
 
-5. Build, check, upload:
+5. Build and check:
 
    ```bash
    python3 -m build
    twine check dist/*
+   ```
+
+6. **⛔ PREFLIGHT THE BUILT WHEEL — BEFORE UPLOAD, NOT AFTER.**
+
+   ```bash
+   ./scripts/preflight_wheel_import.sh          # newest dist/*.whl, or pass a path
+   ```
+
+   **Do not upload if this fails.** `ligandai 0.15.0` was published unimportable
+   (`ImportError: cannot import name 'normalize_avoid_paralogs' from
+   'ligandai.contrastive'`) and every gate above it passed on that artifact:
+   `twine check` reads metadata and never imports; the 1528-test suite imports the
+   SOURCE TREE, where a concurrent session's uncommitted `contrastive.py` was
+   sitting next to the committed file that imported from it; and
+   `check_published_superset.py` AST-scans files without executing an import. The
+   only step that imported the built package was step 8, and it ran **after**
+   upload — by which time the version number is burned, because PyPI does not
+   allow re-uploading it.
+
+   The preflight installs the wheel into a throwaway venv, runs from a directory
+   that is not the repo (inside the repo, `import ligandai` finds `./ligandai` and
+   succeeds on a wheel that cannot import), asserts the imported module lives in
+   `site-packages`, resolves every name in `__all__`, constructs a client offline,
+   and imports every shipped submodule — `__all__` only covers what the top level
+   re-exports, and a broken module nothing re-exports still ships broken.
+
+   Validated against the real artifacts: it FAILS on the wheel actually published
+   as 0.15.0 (downloaded from PyPI) with that exact ImportError, and PASSES on
+   0.14.0. Note the local `dist/ligandai-0.15.0-py3-none-any.whl` is **not** the
+   file that was uploaded — 719,397 bytes locally vs 729,144 on PyPI, same version
+   number, which is the drift this document warns about at the top.
+
+7. Upload:
+
+   ```bash
    twine upload dist/ligandai-<v>*
    ```
 
-6. **Tag the commit and push the tag.** Absent tags are what let the 0.7.5/0.7.6
+8. **Tag the commit and push the tag.** Absent tags are what let the 0.7.5/0.7.6
    drift go unnoticed for a month.
 
    ```bash
@@ -89,7 +124,7 @@ that regressing build. None of them compare against what users already have.
    git push origin <branch> v<version>
    ```
 
-7. Re-verify from a clean venv against the real index, then re-run the gate — it
+9. Re-verify from a clean venv against the real index, then re-run the gate — it
    now compares your tree against what you just shipped:
 
    ```bash
