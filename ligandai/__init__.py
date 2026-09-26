@@ -146,10 +146,16 @@ from ligandai.resources.legal import AsyncLegal, Legal
 # measured degradation rate, not a probability of surviving the gut, not an
 # oral bioavailability prediction, not a neural-network output. The declaration
 # block travels on every record — do not strip it. [bd-dre-c80f4.1]
+# ⛔ The two sibling scorers on the same namespace [bd-dre-c80f4.26.2]:
+# chameleonicity applies ONLY to macrocycles (a linear construct yields
+# applicable=False / index=None, never 0.0), and full-protein gut stability
+# returns INDETERMINATE_NO_STRUCTURE with accessible_* ABSENT when no structure
+# is supplied. Absence is never a zero in either.
 from ligandai.resources import gut_stability
 from ligandai.resources.gut_stability import (
     AsyncGutStability,
     GutStability,
+    LigandAIPlatformModuleUnavailable,
     gut_stability_declaration,
     protease_motif_counts,
     score_gut_design,
@@ -399,6 +405,9 @@ __all__ = [
     "LigandAINotFoundError",
     "LigandAIPaidTierRequired",
     "LigandAIParameterNotForwarded",
+    # A LOCAL scorer's platform module is absent — an explicit ImportError-shaped
+    # absence, never a degraded score. [bd-dre-c80f4.26.2]
+    "LigandAIPlatformModuleUnavailable",
     "LigandAIRateLimitError",
     "LigandAIReceptorMsaUnavailable",
     "LigandAIReusedSessionError",
