@@ -770,3 +770,83 @@ for d in client.check_compatibility():
 
 Returns `[]` when the client is current, and also `[]` against a server
 that has no such endpoint.
+
+## Receptor construct: the domain, not the whole protein
+
+**The receptor is whatever sequence you put on the receptor entity.** Nothing infers a
+domain for you, and a gene name does not select one.
+
+If you submit a job with only a gene name and no explicit receptor sequence, the gene
+resolves to the **canonical full-length** sequence. For a BET family target that is
+947 residues (BRDT) or 1362 (BRD4) instead of the 67-residue ET domain you probably
+meant. The fold succeeds and the structure is valid — the **interface scores become
+uninterpretable**, because ipTM and ipSAE are computed over the whole complex and a
+full-length receptor is dominated by inter-domain linker that has nothing to do with
+the binding site.
+
+Measured on BRD folds, stratified by user so construct is not confounded with design
+quality:
+
+| construct | mean ipTM | mean peptide ipSAE |
+|---|---|---|
+| isolated domain (67–69 aa) | 0.75–0.82 | **0.38–0.52** |
+| full-length (726–1362 aa) | 0.18–0.32 | **0.002–0.006** |
+
+peptide ipSAE at or near zero on full-length for every user who has tried it. A low
+score there is evidence about the construct, not about the design.
+
+### Submit both chains explicitly
+
+```json
+POST /api/folding/batch
+{
+  "jobs": [{
+    "entities": [
+      { "type": "protein", "chainId": "A",
+        "sequence": "<isolated domain sequence>", "geneName": "Brd4ET" },
+      { "type": "protein", "chainId": "B",
+        "sequence": "<your peptide>", "isPeptide": true, "use_msa": false }
+    ]
+  }],
+  "model": "boltz2", "numTrajectories": 4, "samplingSteps": 50
+}
+```
+
+- **Chain A carries an explicit `sequence`.** `geneName` is metadata; the sequence is
+  what gets folded. If you are reading the domain out of a PDB file, slice the domain
+  residue range rather than taking all of chain A — a full-protein model has a
+  full-length chain A even when the file is named for the domain.
+- **Chain B is declared `isPeptide` with `use_msa: false`.** A de novo design has no
+  homologs, so an MSA request on it fails several minutes in and reads like an MSA
+  outage rather than a declaration problem.
+
+### The platform now tells you
+
+When a declared de novo peptide is paired with a receptor chain over 300 residues and
+more than 5× the binder length, the job still runs and the response carries a
+`warnings[]` entry:
+
+```json
+{
+  "success": true,
+  "jobs": [ ... ],
+  "warnings": [{
+    "code": "OVERSIZED_RECEPTOR_FOR_PEPTIDE_FOLD",
+    "message": "This fold pairs a de novo peptide with a full-length receptor: chain(s) A (947 aa, 41.2x the 23 aa binder). ...",
+    "findings": [{ "chainId": "A", "receptorLength": 947, "peptideLength": 23, "ratio": 41.2 }]
+  }]
+}
+```
+
+It warns rather than refuses, because folding against a full protein is sometimes
+deliberate. Branch on `warnings?.length` and print them — the field is absent when
+there is nothing wrong.
+
+### Client-side assertion worth keeping
+
+```python
+assert len(receptor_seq) < 300, f"receptor is {len(receptor_seq)} aa — full-length?"
+```
+
+After a job returns, chain A length in the returned structure is the check that it
+folded what you meant.
