@@ -47,6 +47,26 @@ MSA_FILES = {
                         "pairtrunk/msa/EGFR.a3m"),
     "ERBB2_ECD_23_652": ("/home/dre/research_work/peptune_ncaa_fold_20260824/"
                          "data/msa_cache/ERBB2_ECD_NP_33130c43af2d93be.a3m"),
+    # ⛔ THE SCOPE-MATCHED ERBB2 COMPARATOR. Inert until the spec declares this
+    # construct (build_platform skips any name the spec does not carry), and
+    # registered here so adopting it is a one-line spec change.
+    #
+    # The margin in aggregate.py is on_med - off_med, where the on-target leg is
+    # spec.target.construct. That is EGFR domain III (205 aa) while the declared
+    # ERBB2 off-target is a full ECD (630 aa), so the two legs differ in
+    # CONSTRUCT SCOPE and not only in paralog identity: a positive margin is
+    # then consistent with "the ECD is a bigger, harder fold with different
+    # per-position MSA depth" and not only with real discrimination.
+    #
+    # ERBB2 UniProt 339-543 is the domain-III equivalent by the same BLOSUM62
+    # alignment, and it is 205 aa -- the same length as EGFR domIII. The six
+    # Patch A residues land at local positions 83/88/174/186/189/201, which are
+    # the SAME local positions they occupy in the EGFR domIII construct frame,
+    # so the two epitopes are positionally superimposed.
+    #
+    # It also fits on a 12 GiB card, which the 630 aa ECD does not, so the
+    # erbb2_margin stop metric becomes reachable without a second GPU host.
+    "ERBB2_domIII_339_543": os.path.join(HERE, "fold", "ERBB2_domIII.a3m"),
 }
 
 # ---------------------------------------------------------------------------
