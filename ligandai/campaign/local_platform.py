@@ -87,6 +87,11 @@ DEFAULT_BOLTZ_SITE_PACKAGES = "/home/dre/boltz2_local/lib/python3.11/site-packag
 # 8C2E value and refuses to run if it has moved.
 DEFAULT_IPSAE_DIR = ("/mnt/backup/LIGANDAI_ALPHA_V2/archive/"
                      "modal_workers_pre_org_scoping_20260312")
+# The newer copy of the SAME scorer. It is NOT the gate source -- it is loaded
+# only for ipsae_d0ref / d0res_clamped_frac / ipae, which the pinned copy
+# predates, and every use cross-checks that both still agree on ipsae_d0res.
+DEFAULT_IPSAE_DIAGNOSTIC = "/mnt/backup/LIGANDAI_ALPHA_V2/modal_workers/ipsae_scoring.py"
+
 IPSAE_REFERENCE = {
     "pdb": ("/home/dre/research_work/boltz_ref_v1/fold1/pred/boltz_results_in/"
             "predictions/8C2E/8C2E_model_0.pdb"),
@@ -843,12 +848,37 @@ class IPSAEScorer:
     ``chain_pairs[<receptor>-<peptide>]["ipsae_d0res"]`` and nothing else.
     """
 
-    def __init__(self, ipsae_dir: str = DEFAULT_IPSAE_DIR) -> None:
+    def __init__(self, ipsae_dir: str = DEFAULT_IPSAE_DIR,
+                 diagnostic_path: str | None = DEFAULT_IPSAE_DIAGNOSTIC) -> None:
         if ipsae_dir not in sys.path:
             sys.path.insert(0, ipsae_dir)
         import ipsae_scoring                                    # noqa: PLC0415
         self.mod = ipsae_scoring
         self.ipsae_dir = ipsae_dir
+        # ⛔ THE GATE VALUE STILL COMES FROM THE PINNED COPY. The diagnostic copy
+        # is loaded ONLY to compute terms the pinned one predates, and every call
+        # cross-checks that the two still agree on ipsae_d0res itself. Measured
+        # 2026-09-29: bit-identical (max |diff| = 0.0) on 8C2E and on 12 campaign
+        # poses. If either copy is ever edited and they drift, that is a silent
+        # re-scaling of every gate calibrated on this metric, so it raises.
+        #
+        # Both files are named ipsae_scoring.py, so the diagnostic one is loaded
+        # by PATH under its own module name -- a plain import returns whichever
+        # is already in sys.modules, which is the bug that hid this comparison
+        # the first time it was attempted.
+        self.diag = None
+        self.diagnostic_path = diagnostic_path
+        if diagnostic_path and os.path.exists(diagnostic_path):
+            import importlib.util                               # noqa: PLC0415
+            spec = importlib.util.spec_from_file_location(
+                "_ipsae_diagnostic", diagnostic_path)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                try:
+                    spec.loader.exec_module(mod)
+                    self.diag = mod
+                except Exception:                               # noqa: BLE001
+                    self.diag = None
 
     def score(self, pdb_path: str, pae_path: str, *, peptide_chain: str = "B",
               receptor_chain: str = "A") -> dict[str, Any]:
@@ -870,13 +900,58 @@ class IPSAEScorer:
         if not isinstance(pair, dict):
             return {"error": f"no {key} chain pair in ipSAE result "
                              f"(pairs: {sorted(pairs)})"}
-        return {"peptide_ipsae": pair.get("ipsae_d0res"),
-                "ipsae_d0ref": pair.get("ipsae_d0ref"),
-                "d0res_clamped_frac": pair.get("d0res_clamped_frac"),
-                "ipae": pair.get("ipae"), "pdockq": pair.get("pdockq"),
-                "pdockq2": pair.get("pdockq2"), "lis": pair.get("lis"),
-                "n_contacts": pair.get("n_contacts"),
-                "overall_ipsae": res.get("overall_ipsae"), "pair_key": key}
+        out = {"peptide_ipsae": pair.get("ipsae_d0res"),
+               "ipsae_d0ref": pair.get("ipsae_d0ref"),
+               "d0res_clamped_frac": pair.get("d0res_clamped_frac"),
+               "ipae": pair.get("ipae"), "pdockq": pair.get("pdockq"),
+               "pdockq2": pair.get("pdockq2"), "lis": pair.get("lis"),
+               "n_contacts": pair.get("n_contacts"),
+               "overall_ipsae": res.get("overall_ipsae"), "pair_key": key}
+        if out["d0res_clamped_frac"] is None and self.diag is not None:
+            out.update(self._diagnostics(pdb_path, pae, peptide_chain, out))
+        return out
+
+    def _diagnostics(self, pdb_path: str, pae: Any,
+                     peptide_chain: str, pinned: Mapping[str, Any]) -> dict[str, Any]:
+        """``ipsae_d0ref`` and ``d0res_clamped_frac``, which the pinned copy predates.
+
+        ⛔ WHY THIS IS WORTH COMPUTING. The scorer's own note: ``ipsae_d0ref`` is
+        the term to use "for any absolute threshold or any cross-length ranking",
+        and a ``d0res_clamped_frac`` near 1.0 makes an absolute gate on
+        ``ipsae_d0res`` MEANINGLESS for that complex.
+
+        A campaign gate like ``peptide_ipsae_median >= 0.66`` is exactly an
+        absolute threshold, and a spec with several peptide-length classes ranks
+        across lengths. Measured on this campaign's first 12 poses: every peptide
+        of 23 aa or shorter came back FULLY clamped (frac 1.000) while the 28-29
+        aa ones were barely clamped (0.034-0.213) -- so the clamp, and therefore
+        the comparability of the gate, tracks peptide length.
+
+        Recording it does not change any gate. It makes the confound VISIBLE in
+        the campaign record instead of invisible, which is the only thing that
+        lets someone decide about it on evidence.
+        """
+        try:
+            r = self.diag.score_boltz2_prediction(
+                pdb_content=open(pdb_path, encoding="utf-8").read(),
+                cif_content=None, pae_matrix=pae, plddt=None,
+                peptide_chain_ids=[peptide_chain])
+            pep = r.get("peptide") or {}
+        except Exception as exc:                               # noqa: BLE001
+            return {"diagnostic_error": f"{type(exc).__name__}: {exc}"}
+        # ⛔ The two copies must still agree on the GATE metric itself.
+        got, want = pep.get("ipsae"), pinned.get("peptide_ipsae")
+        if got is not None and want is not None and abs(float(got) - float(want)) > 1e-9:
+            raise RuntimeError(
+                f"ipSAE scorers DISAGREE on {pdb_path}: pinned "
+                f"{self.ipsae_dir} gives ipsae_d0res={want!r}, diagnostic "
+                f"{self.diagnostic_path} gives {got!r}. Every gate calibrated on "
+                f"this metric is silently re-scaled by that difference. Refusing "
+                f"to record either value until the two copies are reconciled.")
+        return {"ipsae_d0ref": pep.get("ipsae_d0ref"),
+                "d0res_clamped_frac": pep.get("d0res_clamped_frac"),
+                "ipae": pep.get("ipae"),
+                "diagnostic_scorer": self.diagnostic_path}
 
     def selftest(self) -> dict[str, Any]:
         """Re-derive a validated value on a REAL complex before trusting a gate."""
@@ -1181,10 +1256,21 @@ class LocalPlatform:
                     peptide_ipsae = Measured.failed(
                         f"peptide ipSAE could not be computed: {ips['error']}")
                 else:
+                    # ⛔ The clamp fraction rides along on the NOTE so it reaches
+                    # the campaign record. A d0res_clamped_frac near 1.0 means an
+                    # ABSOLUTE gate on this pose's ipsae_d0res is not comparable
+                    # with a pose whose frac is near 0 -- and on this campaign the
+                    # frac tracks peptide length, while the spec ranks across
+                    # three length classes. Recording it changes no gate; it stops
+                    # the confound from being invisible.
+                    _cl = ips.get("d0res_clamped_frac")
+                    _note = f"n_contacts={ips.get('n_contacts')}"
+                    if _cl is not None:
+                        _note += (f"; d0res_clamped_frac={float(_cl):.3f}"
+                                  f"; ipsae_d0ref={ips.get('ipsae_d0ref')}")
                     peptide_ipsae = Measured(
                         float(ips["peptide_ipsae"]), Status.MEASURED, n=1,
-                        method=f"ipsae_d0res[{ips['pair_key']}]",
-                        note=f"n_contacts={ips.get('n_contacts')}")
+                        method=f"ipsae_d0res[{ips['pair_key']}]", note=_note)
 
                 conf = fo.confidence
                 iptm = _conf_metric(conf, "iptm")

@@ -185,3 +185,36 @@ def test_local_platform_is_exported_lazily_from_the_package():
     assert c.LocalPlatform.name == "local"
     with pytest.raises(AttributeError):
         c.NoSuchPlatform
+
+
+# -- the two copies of the scorer must not drift ---------------------------
+
+@pytest.mark.skipif(not os.path.exists(IPSAE_REFERENCE["pdb"]),
+                    reason="8C2E reference pose not present on this host")
+def test_pinned_and_diagnostic_scorers_agree_on_the_gate_metric():
+    """The diagnostic copy adds terms; it must not change ipsae_d0res itself.
+
+    If these drift, every gate calibrated on the metric is silently re-scaled,
+    which is precisely the failure the pin exists to prevent.
+    """
+    from ligandai.campaign.local_platform import IPSAEScorer
+    s = IPSAEScorer()
+    if s.diag is None:
+        pytest.skip("diagnostic scorer copy not present on this host")
+    got = s.score(IPSAE_REFERENCE["pdb"], IPSAE_REFERENCE["pae"],
+                  receptor_chain="A", peptide_chain="B")
+    # score() raises on disagreement; reaching here means they matched, and the
+    # diagnostic-only terms must now be populated rather than silently absent.
+    assert got["peptide_ipsae"] == pytest.approx(IPSAE_REFERENCE["expected"],
+                                                 abs=IPSAE_REFERENCE["tolerance"])
+    assert got["d0res_clamped_frac"] is not None
+    assert got["ipsae_d0ref"] is not None
+
+
+def test_scorer_survives_a_missing_diagnostic_copy():
+    """The gate must not depend on the optional diagnostic module existing."""
+    from ligandai.campaign.local_platform import IPSAEScorer
+    s = IPSAEScorer(diagnostic_path="/nonexistent/ipsae_scoring.py")
+    assert s.diag is None
+    assert s.selftest()["observed"] == pytest.approx(IPSAE_REFERENCE["expected"],
+                                                     abs=IPSAE_REFERENCE["tolerance"])
