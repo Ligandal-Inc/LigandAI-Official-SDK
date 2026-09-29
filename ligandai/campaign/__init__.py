@@ -55,6 +55,11 @@ from .spec import (CampaignSpec, Target, OffTarget, Construct, Cofactor, Peptide
 from .stopmetrics import StopMetricResult, StopReport, evaluate_all
 from .planner import (Action, ActionKind, BudgetLedger, IterationPlan, StopReason,
                       plan_iteration)
+# LocalPlatform is imported LAZILY via __getattr__ below: it pulls in numpy and
+# the platform's own local modules, which a customer using SDKPlatform has no
+# reason to need and may not have. Importing it here would make `from
+# ligandai.campaign import CampaignSpec` fail on a machine that is perfectly
+# able to run a hosted campaign.
 from .platform import (Platform, SDKPlatform, ReplayPlatform, DryRunPlatform,
                        PoseResult, GeneratedDesign)
 from .aggregate import build_records, AggregationReport
@@ -63,6 +68,7 @@ from .engine import CampaignEngine, CampaignResult, IterationRecord
 __all__ = [
     "CampaignSpec", "CampaignEngine", "CampaignResult", "SDKPlatform",
     "ReplayPlatform", "DryRunPlatform", "Platform", "PoseResult", "GeneratedDesign",
+    "LocalPlatform",
     "DesignRecord", "Measured", "Status", "Verdict", "Outcome", "WilsonInterval",
     "wilson", "runs_needed_for_upper_bound", "all_of", "any_of", "count_at_least",
     "fraction_at_least", "PoseIdentity", "ChainRecord", "identify_pose",
@@ -83,3 +89,17 @@ __all__ = [
     "IterationPlan", "StopReason", "plan_iteration", "build_records",
     "AggregationReport", "IterationRecord",
 ]
+
+
+def __getattr__(name):                                    # PEP 562
+    """Lazy re-export of the local-compute platform.
+
+    ``LocalPlatform`` runs a campaign entirely on our own hardware — local
+    LigandForge, local Boltz-2, local scoring — instead of submitting to the
+    hosted API.  It is optional: importing it drags in numpy and the local
+    model runtime, so it is resolved only when actually asked for.
+    """
+    if name == "LocalPlatform":
+        from .local_platform import LocalPlatform          # noqa: PLC0415
+        return LocalPlatform
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
