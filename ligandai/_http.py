@@ -21,6 +21,7 @@ from tenacity import (
     AsyncRetrying,
     RetryCallState,
     Retrying,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
@@ -58,6 +59,26 @@ logger = logging.getLogger("ligandai")
 # *did* land server-side but whose response was lost must not be silently
 # re-submitted (double credit charge, double GPU job) by the retry wrapper.
 _IDEMPOTENT_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
+
+
+def _request_never_sent(exc: BaseException) -> bool:
+    """True when the failure happened BEFORE any request byte left this process.
+
+    ⛔ A refused connection (``httpx.ConnectError``) or a connect-phase timeout
+    (``httpx.ConnectTimeout``) means the TCP/TLS handshake never completed, so
+    the server cannot have seen, let alone applied, the request. Retrying it is
+    safe for ANY method — the duplicate-submission hazard the POST/PATCH rule
+    above exists for (a response lost AFTER the effect landed) cannot occur.
+    Without this a generate / fold / cofold POST sent during a server restart
+    failed hard with ``Connection refused`` while a GET ten milliseconds later
+    rode the same restart out. Measured 2026-10-02: a ``peptides.fold`` POST hit
+    the ~15 s gap while production blue was being redeployed.
+    A read timeout or a reset mid-response is NOT in this set: those may have
+    been applied. [bd-dre-3imtv.4]
+    """
+    return isinstance(exc, LigandAIConnectionError) and bool(
+        getattr(exc, "request_not_sent", False)
+    )
 
 
 class _BackoffWait:
@@ -504,7 +525,10 @@ def _wrap_transport_error(exc: httpx.TransportError, method: str, url: str) -> L
                 f"  * Set LIGANDAI_BASE_URL={DEFAULT_BASE_URL} to override."
             )
 
-    return LigandAIConnectionError(msg, original_error=repr(exc))
+    err = LigandAIConnectionError(msg, original_error=repr(exc))
+    # Handshake never completed -> nothing was transmitted. See _request_never_sent.
+    err.request_not_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+    return err
 
 
 # -- Sync transport ----------------------------------------------------------
@@ -609,12 +633,14 @@ class HTTPTransport:
 
         can_retry = method.upper() in _IDEMPOTENT_METHODS or idempotency_key is not None
         retrying = Retrying(
-            stop=stop_after_attempt(self._max_retries if can_retry else 1),
+            # A non-idempotent call is still retried when the failure proves the
+            # request was never sent (refused / connect-timeout); nothing else.
+            stop=stop_after_attempt(self._max_retries),
             wait=self._wait,
             retry=(
                 retry_if_exception_type((LigandAIRateLimitError, LigandAIServerError, LigandAIConnectionError))
                 if can_retry
-                else retry_if_exception_type(())
+                else retry_if_exception(_request_never_sent)
             ),
             reraise=True,
         )
@@ -801,12 +827,14 @@ class AsyncHTTPTransport:
 
         can_retry = method.upper() in _IDEMPOTENT_METHODS or idempotency_key is not None
         retrying = AsyncRetrying(
-            stop=stop_after_attempt(self._max_retries if can_retry else 1),
+            # A non-idempotent call is still retried when the failure proves the
+            # request was never sent (refused / connect-timeout); nothing else.
+            stop=stop_after_attempt(self._max_retries),
             wait=self._wait,
             retry=(
                 retry_if_exception_type((LigandAIRateLimitError, LigandAIServerError, LigandAIConnectionError))
                 if can_retry
-                else retry_if_exception_type(())
+                else retry_if_exception(_request_never_sent)
             ),
             reraise=True,
         )

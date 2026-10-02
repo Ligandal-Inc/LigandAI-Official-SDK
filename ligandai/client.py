@@ -385,6 +385,20 @@ class _ClientCommon:
         if required is None:
             # Unknown feature — assume allowed; server will gate.
             return True
+        if self._tier is None and (self._api_key or "").strip():
+            # ⛔ A credential WAS supplied but its prefix is not one this SDK maps
+            # to a tier (a service/agent token, an on-prem deployment's own
+            # prefix, or a prefix newer than this release). The tier is UNKNOWN,
+            # not "below free". `_validate_api_key_shape` documents that tier
+            # detection FAILS OPEN here and lets the server — which is
+            # authoritative — decide, and `_require_paid_tier` does exactly
+            # that; this gate did not, so `peptides.generate` raised
+            # "requires free tier or higher" on a client that had a key,
+            # before a single request left the process. Measured 2026-10-02 in a
+            # fresh venv against production blue with the loopback agent token.
+            # Only a client with NO key at all is below every tier.
+            # [bd-dre-3imtv.4]
+            return True
         return _tier_at_least(self._tier, required)
 
     # ─── Local dedupe + credit-ledger access ─────────

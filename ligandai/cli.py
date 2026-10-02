@@ -642,11 +642,30 @@ def cmd_legal_status(args: argparse.Namespace) -> int:
         f"  EULA : {'accepted' if eula_ok else 'NOT accepted':<13} "
         f"(current v{current.get('eula')}, yours v{accepted.get('eula') or '-'})"
     )
-    if status.get("needsReAcceptance"):
+    if _needs_reacceptance(status):
         print("  A newer version is available. Run `ligandai legal accept`.")
     elif not (tos_ok and eula_ok):
         print("  Run `ligandai legal accept` to accept.")
     return 0
+
+
+def _needs_reacceptance(status: dict) -> bool:
+    """Whether ``GET /api/legal/status`` says a NEWER document needs accepting.
+
+    ⛔ The server answers ``needsReAcceptance`` as a DICT —
+    ``{"tos": false, "eula": false}`` — not a boolean. A non-empty dict is truthy
+    whatever its values, so ``if status.get("needsReAcceptance")`` was true for an
+    account that had accepted everything: ``ligandai legal status`` printed "A
+    newer version is available" under two ``accepted`` lines at the current
+    versions, and ``ligandai legal accept`` skipped its "Already accepted"
+    early-exit and opened the browser acceptance flow for nothing. Measured
+    2026-10-02 against production blue. A bare bool (older servers) still works.
+    [bd-dre-3imtv.4]
+    """
+    flag = status.get("needsReAcceptance")
+    if isinstance(flag, dict):
+        return any(bool(v) for v in flag.values())
+    return bool(flag)
 
 
 def cmd_legal_accept(args: argparse.Namespace) -> int:
@@ -672,7 +691,7 @@ def cmd_legal_accept(args: argparse.Namespace) -> int:
 
     tos_ok = bool(status.get("tosAccepted"))
     eula_ok = bool(status.get("eulaAccepted"))
-    if tos_ok and eula_ok and not status.get("needsReAcceptance"):
+    if tos_ok and eula_ok and not _needs_reacceptance(status):
         print("Already accepted — nothing to do.")
         return 0
 

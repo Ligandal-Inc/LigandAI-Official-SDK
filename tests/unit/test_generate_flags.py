@@ -380,9 +380,31 @@ def test_tier_gate_free_key_blocks_logits_output() -> None:
     assert exc_info.value.required_tier == "academia"
 
 
-def test_tier_gate_unknown_key_prefix_raises_ligandai_tier_error() -> None:
-    """Unrecognized key prefix → tier=None → below all tiers → LigandAITierError."""
-    c = LigandAI(api_key="unknown_prefix_key", base_url=BASE, max_retries=1)
+def test_tier_gate_unknown_key_prefix_defers_to_the_server(httpx_mock: HTTPXMock) -> None:
+    """Unrecognized key prefix → tier is UNKNOWN, not "below every tier".
+
+    This used to assert the opposite (``LigandAITierError`` for any key without a
+    known prefix). That refused a client that HAD a key — a service/agent token,
+    an on-prem prefix, a prefix newer than this release — before one request left
+    the process, even for ``generate_peptides`` (a free-tier feature), although
+    ``_validate_api_key_shape`` documents that tier detection fails OPEN and
+    lets the server decide. The server is authoritative; it still answers 402/403
+    when the key is not entitled. [bd-dre-3imtv.4]
+    """
+    httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
+    with pytest.warns(Warning):  # the malformed-shape warning is unchanged
+        c = LigandAI(api_key="unknown_prefix_key", base_url=BASE, max_retries=1)
+    c.peptides.generate(gene="EGFR", cyclic_mode="disulfide")  # reaches the wire
+    assert httpx_mock.get_request() is not None
+
+
+def test_tier_gate_no_key_at_all_raises_ligandai_tier_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No credential at all → below every tier → LigandAITierError, client-side."""
+    for var in ("LIGANDAI_API_KEY", "LIGANDAL_API_KEY", "LIGANDAI_TEST_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    c = LigandAI(base_url=BASE, max_retries=1)
     with pytest.raises(LigandAITierError):
         c.peptides.generate(gene="EGFR", cyclic_mode="disulfide")
 
