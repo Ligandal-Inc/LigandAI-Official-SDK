@@ -106,10 +106,13 @@ fold:
   use_potentials: true
   msa: { receptor: true, peptide: false }
   seeds_per_unit: 2          # 2 INDEPENDENT seed units per fold action
-  # Ledger MEDIANS, not a price list (server/campaign-economics.ts). The mean
-  # fold rate is 504.73 only because <1% of ledger rows are bulk reconciliations
-  # bundling generation and folding into one line.
-  credits_per_fold: 100
+  # credits_per_fold is the published price of ONE fold at the default 4
+  # trajectories / 50 steps: 10 credits ($0.10) — see ligandai.pricing. Omit it
+  # and the runner derives it from diffusion_samples / sampling_steps above.
+  # Generation and scoring are ledger MEDIANS, not a price list
+  # (server/campaign-economics.ts); the ledger MEAN is distorted by <1% of rows
+  # that are bulk reconciliations bundling generation and folding into one line.
+  credits_per_fold: 10
   credits_per_generated_peptide: 100
   credits_per_scored_design: 25
 

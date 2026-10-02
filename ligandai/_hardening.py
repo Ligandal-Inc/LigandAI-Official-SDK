@@ -23,7 +23,6 @@ GPU slots without producing new results.
 from __future__ import annotations
 
 import logging
-import math
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ligandai._constants import (
@@ -33,6 +32,7 @@ from ligandai._constants import (
     REJECTED_GPU_TYPES,
     TIER_GPU_SLOTS,
 )
+from ligandai.pricing import fold_batch_credits, fold_credits
 from ligandai.errors import (
     LigandAIConcurrencyLimit,
     LigandAIInsufficientCredits,
@@ -141,13 +141,14 @@ def estimate_fold_batch_credits(
     trajectories: int,
     sampling_steps: int,
 ) -> int:
-    """Mirror the platform's batch-fold cost estimate.
+    """Local estimate of a batch fold, for the pre-flight balance check only.
 
-    The platform is authoritative for the final credit cost; this local
-    estimate is used only for the pre-flight balance check.
+    The platform is authoritative for the final credit cost (``total_cost_credits``
+    on the submitted batch). The price lives in :mod:`ligandai.pricing` — ONE
+    constant, 10 credits for a default 4-trajectory fold — and the minimum
+    applies per fold, so this is ``peptide_count * fold_credits(...)``.
     """
-    multiplier = max(1.0, float(sampling_steps) / 50.0)
-    return int(math.ceil(peptide_count * trajectories * 100 * multiplier))
+    return fold_batch_credits(peptide_count, trajectories, sampling_steps)
 
 
 def estimate_single_fold_credits(
@@ -156,9 +157,7 @@ def estimate_single_fold_credits(
     sampling_steps: int | None,
 ) -> int:
     """Estimate cost of a single ``/api/folding/predict`` submission."""
-    steps = int(sampling_steps) if sampling_steps else 50
-    multiplier = max(1.0, float(steps) / 50.0)
-    return int(math.ceil(trajectories * 100 * multiplier))
+    return fold_credits(trajectories, sampling_steps)
 
 
 def _read_balance_for_preflight(client: "_ClientCommon | None") -> int | None:

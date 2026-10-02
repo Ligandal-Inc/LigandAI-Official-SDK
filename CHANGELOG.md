@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-02
+
+### Changed — a fold costs 10 credits ($0.10) at the default 4 trajectories (was 100 credits, $1.00)
+
+- **One module states the price: `ligandai.pricing`.** `CREDITS_PER_FOLD_DEFAULT = 10`,
+  `TRAJECTORIES_DEFAULT = 4`, `CREDITS_PER_TRAJECTORY = 2.5` (derived, not typed),
+  `FOLD_MIN_CREDITS = 10`, plus `fold_credits()`, `fold_batch_credits()`,
+  `fold_step_multiplier()` and `credits_to_usd()`. 1 credit = 1 cent; that
+  conversion did not change. Peptide GENERATION (100 credits per peptide) and
+  scoring (25 per design) did not change.
+- **Structure carried over, base reduced.** Proportional per trajectory (2.5
+  credits), a per-fold floor equal to the default price (a 1-trajectory fold is
+  still 10), and `ceil(sampling_steps / 50)` as the step multiplier (100 steps =
+  2x). Fractional results round UP locally — a pre-flight check should over-state
+  by a credit, never under-state.
+- ⛔ **The platform is authoritative.** The constants are a LOCAL FALLBACK for the
+  offline pre-flight balance check and for `CampaignSpec` budget arithmetic.
+  `client.peptides.estimate_cost()`, `client.ensemble.estimate()` and a submitted
+  batch's `total_cost_credits` come from the server and are what is charged.
+- **The local pre-flight estimate was wrong before this change, not just old.**
+  `estimate_fold_batch_credits` / `estimate_single_fold_credits` multiplied by
+  100 PER TRAJECTORY — 400 credits for a default fold against the platform's 100
+  — so the balance check could refuse a submission the account could afford. They
+  now read `ligandai.pricing`. The step multiplier is the server's
+  `ceil(steps / 50)` rather than a fractional `steps / 50`.
+- **`CampaignSpec` budgets scale with fold settings.** `fold.credits_per_fold`
+  defaults to the published price; a spec that sets `diffusion_samples` or
+  `sampling_steps` and does not state `credits_per_fold` is priced at THAT setting
+  (8 trajectories = 20 credits a fold). One certified design at a 0.15 bar is now
+  100 + 22 x 10 + 25 = **345** credits (was 2,325) and 25 of them 8,625 (was
+  58,125). A spec that states `credits_per_fold` explicitly is unchanged. The old
+  default was a median of ledger rows that pre-date the repricing; generation and
+  scoring remain measured ledger medians.
+- README, `examples/23_fold_batch.py` (its estimates are now computed from
+  `ligandai.pricing`, not hand-typed), `examples/campaign/*` and the bundled
+  skills state the new figures; `tests/unit/test_fold_pricing.py` fails when the
+  prose and the constants disagree.
+- Not changed, and flagged: ensemble co-fold (`client.ensemble`) is priced
+  per engine by the server and the SDK holds no engine rate. Whether the
+  relative per-engine rates (e.g. protenix and opendde against boltz2) are kept
+  or flattened is the platform's call; the SDK follows whatever
+  `POST /api/v1/cofold/estimate` returns. `MATURATION_MIN_CREDITS` (2,000) is a
+  server admission floor used only as a message fallback and was left alone.
+
+### Fixed — `client.ensemble` against the hosted co-fold route's real contract
+
+- **Per-engine scores were `None` live.** `_pick_metric` looked for a top-level
+  `peptide_ipsae` on each engine record; the route nests every score under
+  `best` (and `trajectories[]`) with the keys `iPSAE` / `ipTM` / `pTM` / `pLDDT`.
+  It now reads `best.iPSAE` for `peptide_ipsae`, `best.ipTM` for `iptm`, and so
+  on. `best` is the engine's best structure by ipTM, not the maximum over its
+  trajectories. `iptm_complex` (the whole-complex ipTM, contaminated by
+  receptor-receptor contacts) is reachable only by asking for it, and the
+  whole-complex `ipsae` metric is `None` rather than served the peptide-interface
+  value. Tested against the server's own fixture shape.
+- **`estimate()` sent keys the server never reads.** `perEngineTrajectories` /
+  `perEngineSettings` were silently ignored, so a caller who asked for 8
+  trajectories was quoted the default and charged for 8. The estimate now sends
+  `per_engine` — the one key the handler reads — translating
+  `per_engine_trajectories={"boltz2": 8}` into each engine's own knob
+  (`diffusion_samples` / `sample` / `seeds`). `run()` passes the `per_engine` it is
+  going to run with into its own estimate, so the spend-ceiling check no longer
+  quotes defaults. `estimate(per_engine=...)` is new.
+- **Cofactors reach the hosted route.** `Peptides.cofold` / `AsyncPeptides.cofold`
+  gain `cofactors=` and `allow_cofactor_absent=` (sent as the route's `cofactors`
+  / `allow_cofactor_absent`), and `client.ensemble.run(cofactors=...)` forwards them.
+  `COFACTORS_REACHABLE_VIA_HOSTED_COFOLD` is now `True`: the server added
+  `CofoldStartRequest.cofactors` (bd-dre-3jqok), so `boltz2`, `esmfold2`,
+  `protenix` and `openfold3` are no longer refused client-side. `opendde` and
+  `promera` cannot carry one and still raise unless `allow_cofactor_absent=True`.
+  ⛔ `cofactor_honoured` is now the SERVER's statement
+  (`engines[e].cofactor.honoured`), never the SDK's expectation: a deployment that
+  ignores the field returns no such block and the arm is labelled not honoured.
+- `EnsembleEstimate.__str__` printed the per-complex engine cost next to "x N";
+  it now shows the N-complex figure.
+
 ### Added — `client.gut_stability`: GI / SGF–SIF developability triage
 
 - **`client.gut_stability`** exposes the GI peptide-stability module

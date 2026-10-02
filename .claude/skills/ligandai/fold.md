@@ -102,15 +102,20 @@ est = client.ensemble.estimate(
 )
 print(est)
 # ensemble co-fold: 25 complexes x 3 engines = 75 folds
-#   projected 14,175 credits (~$141.75), 10% bundle discount
-#     boltz2      5 traj x 25 = 6250 cr
-#     esmfold2    5 traj x 25 = 2125 cr
-#     protenix    3 traj x 25 = 4800 cr
+#   projected 750 credits (~$7.50), 0% bundle discount
+#     boltz2     5 traj x 25 = 250 cr
+#     esmfold2   5 traj x 25 = 250 cr
+#     protenix   3 traj x 25 = 250 cr
 ```
 
-The rates come from the platform's own pricing endpoint
-(`POST /api/v1/cofold/estimate`) — the SDK never re-derives them, so the
-estimate cannot drift from the invoice.
+That is 25 peptides x 3 engines x 10 credits ($0.10 per default fold). The
+figures above are illustrative; the numbers you get are the platform's own,
+from its pricing endpoint (`POST /api/v1/cofold/estimate`). The SDK holds no
+engine rate — it multiplies the server's quote for one complex by your peptide
+count — so a price change on the platform reaches this estimate without an SDK
+release, and the estimate cannot drift from the invoice. Pass the same
+`per_engine={...}` you will run with and the quote reflects your trajectory
+counts.
 
 ### Run it, with a ceiling
 
@@ -120,7 +125,7 @@ result = client.ensemble.run(
     peptides=my_candidate_sequences,       # 25 designs
     engines=["boltz2", "esmfold2", "protenix"],
     bar=0.67,                               # your shortlist threshold
-    max_credits=15_000,                     # hard ceiling; raises before submitting
+    max_credits=1_000,                      # hard ceiling; raises before submitting
 )
 
 print(result.consensus_histogram())
@@ -159,16 +164,18 @@ client.ensemble.cofactor_support(["boltz2", "esmfold2", "protenix", "opendde"])
 ```
 
 `engine_can_carry` is what the model can do. `reachable_today` is whether the
-hosted co-fold route can currently express it. They are reported separately so
-you are never told "unsupported" when the real answer is "the model supports
-it, the route does not carry it yet".
+hosted co-fold route can express it for that engine (it can for `boltz2`,
+`esmfold2`, `protenix`, `openfold3`; `opendde` and `promera` take no ligand
+entity). They are reported separately so you are never told "unsupported" when
+the real answer is "the model supports it, the route does not carry it".
 
 Asking for a cofactor an arm cannot honour **raises**:
 
 ```python
-client.ensemble.run(receptor=..., peptides=..., cofactors=["ZN", "ZN"])
-# LigandAIInvalidConfig: cofactor(s) ZN requested, but no engine in
-# ['boltz2','esmfold2','protenix'] can receive them through the hosted co-fold
+client.ensemble.run(receptor=..., peptides=..., engines=["boltz2", "opendde"],
+                    cofactors=["ZN", "ZN"])
+# LigandAIInvalidConfig: cofactor(s) ZN requested, but engine(s) ['opendde']
+# in ['boltz2','opendde'] cannot receive them through the hosted co-fold
 # route ... These folds would run WITHOUT the cofactor, which on a
 # cofactor-dependent target scores a different molecule. Pass
 # allow_cofactor_absent=True to run them anyway; every affected arm is then
@@ -215,7 +222,7 @@ result = client.ensemble.run(
     cofactors=["ZN"],
     gene="CA2",
     bar=0.67,
-    max_credits=20_000,
+    max_credits=2_000,
 )
 
 # 4. The deliverable: who does every engine agree on?
@@ -235,7 +242,7 @@ for a kinase, `cofactors=[{"smiles": "..."}]` for anything without a CCD code.
 | `unanimous()` | designs every engine that returned a score put above the bar |
 | `row.contested` | some engines above the bar, some below — the ones to look at |
 | `row.n_engines_scored` | the DENOMINATOR. An engine that failed is not counted as a vote against |
-| `row.cofactor_honoured` | per engine, whether the cofactor you asked for actually reached that fold |
+| `row.cofactor_honoured` | per engine, whether the platform CONFIRMED the cofactor reached that fold (`engines[e].cofactor.honoured` in its own record) — never just that you asked for it |
 | `rank_agreement()` | pairwise Spearman rho between engines, each with its own n |
 | `failures` | every fold that did not return, with its error. Nothing is imputed |
 
@@ -243,16 +250,15 @@ for a kinase, `cofactors=[{"smiles": "..."}]` for anything without a CCD code.
 not evidence of a bad interface, and it never counts toward or against the
 consensus.
 
-### Today's limitation, stated plainly
+### Cofactors on the hosted route
 
-The multi-engine ensemble route cannot carry a cofactor yet — its chain spec
-accepts protein chains only, for every engine. Three of the engines
-(`boltz2`, `esmfold2`, `protenix`) and `openfold3` can each carry a ligand in
-their own worker; the shared route in front of them cannot express one. That is
-tracked as `bd-dre-3jqok.23`.
-
-Until it lands, the way to get a **cofactor-bearing** fold through the SDK is
-the single-engine Boltz-2 batch surface, which does support ligand partners:
+`client.ensemble.run(..., cofactors=[...])` and `client.peptides.cofold(...,
+cofactors=[...])` send the cofactor to the platform's co-fold route
+(`cofactors`, server `bd-dre-3jqok.23`). Each engine's record then says whether
+it carried it. An arm the platform did not confirm is marked
+`cofactor_honoured=False`, so a deployment that ignored the field cannot be read
+as a cofactor-bearing result. `opendde` and `promera` cannot carry a ligand; the
+single-engine Boltz-2 batch surface also carries one:
 
 ```python
 client.peptides.fold_batch(
@@ -261,11 +267,6 @@ client.peptides.fold_batch(
     partners=[{"type": "ligand", "ccd": "ZN", "copies": 1}],
 )
 ```
-
-So the honest workflow on a cofactor-dependent target right now is: Boltz-2
-**with** the cofactor for the number you act on, and the ensemble for the
-agreement check — reading the ensemble as cofactor-absent, which
-`cofactor_support()` and `row.cofactor_honoured` both say out loud.
 
 ### What an ensemble is and is not worth
 

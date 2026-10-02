@@ -102,12 +102,15 @@ means the interval's upper bound sits at or below `reliability.certification_bar
 With ZERO failures: 8 runs bound the rate no tighter than 0.32, 16 at 0.19, 22 at
 0.149. So a bar of 0.15 needs **22 clean runs per design**.
 
-Cost defaults are medians measured from the credit ledger, not a price list:
-100 credits per fold, 100 per peptide generated, 25 per design scored — 225
-all-in per design. So 25 certified designs at zero failures is roughly 58,000
-credits. The spec validator computes this for your spec and refuses a budget that
-cannot buy one certified design. Override the rates in `fold:` if your account
-prices differently.
+Cost defaults: a fold is 10 credits ($0.10 at the default 4 trajectories —
+`ligandai.pricing`; a spec that raises `diffusion_samples` or `sampling_steps`
+without stating `credits_per_fold` is priced at that setting). Generation (100
+per peptide) and scoring (25 per design) are medians measured from the credit
+ledger. So one certified design at a 0.15 bar is 100 + 22 x 10 + 25 = 345
+credits, and 25 certified designs at zero failures is roughly 8,625 credits. The
+spec validator computes this for your spec and refuses a budget that cannot buy
+one certified design. Override the rates in `fold:` if your account prices
+differently.
 
 Never count the diffusion samples inside one seed as independent runs. The runner
 does not, and `reliability.count_unit` will not accept anything else.

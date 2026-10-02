@@ -27,36 +27,37 @@ from ligandai.errors import LigandAIInsufficientCredits
 class TestCostEstimation:
     """Local cost-estimation helpers mirror the server formula."""
 
+    # Fold price: 10 credits ($0.10) per default 4-trajectory fold
+    # (ligandai.pricing). It was 100 credits ($1.00).
+
     def test_fold_batch_simple(self) -> None:
-        # 10 peptides × 4 trajectories × 100 cr × max(1, 50/50) = 4000
+        # 10 peptides × 10 cr (4 trajectories, 50 steps) = 100
         assert estimate_fold_batch_credits(
             peptide_count=10, trajectories=4, sampling_steps=50,
-        ) == 4000
+        ) == 100
 
     def test_fold_batch_with_higher_sampling(self) -> None:
-        # 10 × 4 × 100 × max(1, 100/50) = 10 × 4 × 100 × 2 = 8000
+        # 100 steps = ceil(100/50) = 2x: 10 × 10 × 2 = 200
         assert estimate_fold_batch_credits(
             peptide_count=10, trajectories=4, sampling_steps=100,
-        ) == 8000
+        ) == 200
 
     def test_fold_batch_below_50_steps_does_not_discount(self) -> None:
-        # 10 × 4 × 100 × max(1, 25/50) = 10 × 4 × 100 × 1 = 4000
-        # (no discount for fewer steps; floor is 1.0)
+        # (no discount for fewer steps; the multiplier floor is 1)
         assert estimate_fold_batch_credits(
             peptide_count=10, trajectories=4, sampling_steps=25,
-        ) == 4000
+        ) == 100
 
     def test_single_fold(self) -> None:
-        # 4 × 100 × 1 = 400
         assert estimate_single_fold_credits(
             trajectories=4, sampling_steps=50,
-        ) == 400
+        ) == 10
 
     def test_single_fold_default_steps(self) -> None:
-        # 4 × 100 × 1 = 400 (None → 50)
+        # None → 50 steps
         assert estimate_single_fold_credits(
             trajectories=4, sampling_steps=None,
-        ) == 400
+        ) == 10
 
 
 class TestPreflightRejectsInsufficientBalance:
@@ -71,14 +72,14 @@ class TestPreflightRejectsInsufficientBalance:
     ) -> None:
         with respx.mock(base_url=client.base_url, assert_all_called=False) as rmock:
             rmock.get("/api/credits").mock(return_value=httpx.Response(
-                200, json={"balance": 100, "is_unlimited": False},
+                200, json={"balance": 50, "is_unlimited": False},
             ))
             posted = rmock.post("/api/v1/folding/predict-batch").mock(
                 return_value=httpx.Response(200, json={"batch_id": "n/a"}),
             )
             # Warm the cache so the pre-flight has a real balance to check
             _ = client.credits
-            # 10 × 4 × 100 = 4000 cr needed; only 100 available
+            # 10 × 10 = 100 cr needed; only 50 available
             with pytest.raises(LigandAIInsufficientCredits) as ei:
                 client.fold_batch(
                     peptides=["ACDE"] * 10,
@@ -86,9 +87,9 @@ class TestPreflightRejectsInsufficientBalance:
                     diffusion_samples=4,
                     sampling_steps=50,
                 )
-            assert ei.value.required == 4000
-            assert ei.value.available == 100
-            assert ei.value.shortfall == 3900
+            assert ei.value.required == 100
+            assert ei.value.available == 50
+            assert ei.value.shortfall == 50
             assert not posted.called, (
                 "credit pre-flight must block POST before submission"
             )
@@ -104,7 +105,7 @@ class TestPreflightRejectsInsufficientBalance:
                 return_value=httpx.Response(200, json={
                     "batch_id": "batch-ok",
                     "jobs": [{"job_id": "sub-0", "peptide_index": 0, "sequence": "ACDE"}],
-                    "total_cost_credits": 4000,
+                    "total_cost_credits": 100,
                     "peptide_count": 10,
                     "trajectories_per_peptide": 4,
                     "receptor": {"gene": "EGFR"},
@@ -164,7 +165,7 @@ class TestPreflightRejectsInsufficientBalance:
                 return_value=httpx.Response(200, json={
                     "batch_id": "batch-skip-preflight",
                     "jobs": [{"job_id": "sub-0", "peptide_index": 0, "sequence": "ACDE"}],
-                    "total_cost_credits": 4000,
+                    "total_cost_credits": 100,
                     "peptide_count": 10,
                     "trajectories_per_peptide": 4,
                     "receptor": {"gene": "EGFR"},
@@ -198,7 +199,7 @@ class TestSuperadminBypass:
                 return_value=httpx.Response(200, json={
                     "batch_id": "batch-sa",
                     "jobs": [{"job_id": "sub-0", "peptide_index": 0, "sequence": "ACDE"}],
-                    "total_cost_credits": 4000,
+                    "total_cost_credits": 100,
                     "peptide_count": 10,
                     "trajectories_per_peptide": 4,
                     "receptor": {"gene": "EGFR"},

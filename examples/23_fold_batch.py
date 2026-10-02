@@ -15,10 +15,12 @@ inspect contacts before synthesis ordering.
 
 Billing
 -------
-25 credits per fold per trajectory, floored at a 100-credit minimum per
-fold (= $1 per fold at that floor, unchanged). Sampling steps >50 apply a
-`max(1.0, sampling_steps / 50)` multiplier. The full cost is charged
-UPFRONT before any GPU work starts — be sure the credit balance covers
+10 credits ($0.10) per fold at the default 4 trajectories — 2.5 credits per
+trajectory, floored at a 10-credit minimum per fold. Sampling steps above 50
+multiply the cost by `ceil(sampling_steps / 50)`. The figures come from
+`ligandai.pricing` (a local fallback — the platform is authoritative, and
+`job.total_cost_credits` below is what is actually charged). The full cost is
+charged UPFRONT before any GPU work starts — be sure the credit balance covers
 the whole batch.
 
 Run with:
@@ -36,6 +38,7 @@ from pathlib import Path
 
 from ligandai import LigandAI
 from ligandai.errors import LigandAIError
+from ligandai.pricing import fold_batch_credits
 
 
 # A handful of real EGFR peptides from the v6.5_ET autoresearch
@@ -80,7 +83,7 @@ def _progress_callback(snapshot: dict) -> None:
 def demo_gene(client: LigandAI) -> None:
     print("== client.peptides.fold_batch(target_gene='EGFR') ==")
     print(f"   Submitting {len(EGFR_CANDIDATES)} peptides × 1 trajectory @ 50 steps")
-    print(f"   Estimated cost: {len(EGFR_CANDIDATES) * 100} credits")
+    print(f"   Estimated cost: {fold_batch_credits(len(EGFR_CANDIDATES), 1, 50)} credits")
     job = client.peptides.fold_batch(
         peptides=EGFR_CANDIDATES,
         target_gene="EGFR",
@@ -107,7 +110,7 @@ def demo_pdb(client: LigandAI) -> None:
     print("== client.peptides.fold_batch(receptor_pdb=<file>) ==")
     print(f"   PDB: {pdb_path}")
     print(f"   Peptides: {len(CD47_CANDIDATES)} × 4 trajectories @ 100 steps (2× multiplier)")
-    print(f"   Estimated cost: {len(CD47_CANDIDATES) * 4 * 100 * 2} credits")
+    print(f"   Estimated cost: {fold_batch_credits(len(CD47_CANDIDATES), 4, 100)} credits")
     job = client.peptides.fold_batch(
         peptides=CD47_CANDIDATES,
         receptor_pdb=pdb_path,                # SDK reads the file once
@@ -133,7 +136,7 @@ def demo_sequence(client: LigandAI) -> None:
     print("== client.peptides.fold_batch(receptor_sequence=<AA>) ==")
     print(f"   Receptor sequence length: {len(cd47_ec)}")
     print(f"   Peptides: {len(CD47_CANDIDATES)} × 1 trajectory @ 50 steps")
-    print(f"   Estimated cost: {len(CD47_CANDIDATES) * 100} credits")
+    print(f"   Estimated cost: {fold_batch_credits(len(CD47_CANDIDATES), 1, 50)} credits")
     job = client.peptides.fold_batch(
         peptides=CD47_CANDIDATES,
         receptor_sequence=cd47_ec,

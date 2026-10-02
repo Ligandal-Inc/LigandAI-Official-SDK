@@ -47,26 +47,39 @@ def test_cofactor_support_separates_engine_capability_from_reachability():
     assert sup["opendde"]["engine_can_carry"] is False
     # unverified engines are declared unsupported, never assumed supported
     assert sup["promera"]["engine_can_carry"] is False
-    # neither is reachable through the hosted route today
-    assert sup["boltz2"]["reachable_today"] is False
-    assert "ChainSpec" in sup["boltz2"]["reason"]
+    # the hosted route carries a cofactor (CofoldStartRequest.cofactors,
+    # server commit 2e9ed2d1a2) for exactly the engines that can take one
+    assert sup["boltz2"]["reachable_today"] is True
+    assert sup["openfold3"]["reachable_today"] is True
+    assert sup["boltz2"]["reason"] == "supported"
+    assert sup["opendde"]["reachable_today"] is False
+    assert sup["promera"]["reachable_today"] is False
     assert "chains/sequences only" in sup["opendde"]["reason"]
 
 
-def test_requesting_a_cofactor_no_arm_can_carry_raises_by_default():
+def test_requesting_a_cofactor_an_arm_cannot_carry_raises_by_default():
     """⛔ The whole point. ENPP3 loses its binding interface without its two
     catalytic zincs; a zinc-free fold silently substituted for a zinc-bearing
     one is a measurement of a different molecule."""
     with pytest.raises(LigandAIInvalidConfig) as e:
-        Ensemble._check_cofactors(["boltz2", "esmfold2"], [CofactorSpec(ccd="ZN")], False)
+        Ensemble._check_cofactors(["boltz2", "opendde"], [CofactorSpec(ccd="ZN")], False)
     msg = str(e.value)
     assert "WITHOUT the cofactor" in msg
     assert "allow_cofactor_absent=True" in msg
+    assert "opendde" in msg
+
+
+def test_arms_that_can_carry_the_cofactor_do_not_raise():
+    """The hosted route can express a cofactor now, so boltz2/esmfold2/protenix/
+    openfold3 are not refused client-side."""
+    assert Ensemble._check_cofactors(
+        ["boltz2", "esmfold2", "protenix", "openfold3"], [CofactorSpec(ccd="ZN")], False
+    ) == []
 
 
 def test_cofactor_absent_opt_out_is_explicit_and_labels_the_arms():
-    absent = Ensemble._check_cofactors(["boltz2"], [CofactorSpec(ccd="ZN")], True)
-    assert absent == ["boltz2"]
+    absent = Ensemble._check_cofactors(["boltz2", "opendde"], [CofactorSpec(ccd="ZN")], True)
+    assert absent == ["opendde"]
 
 
 def test_no_cofactor_request_never_raises():
@@ -204,7 +217,8 @@ def test_estimate_warns_when_a_declared_cofactor_cannot_reach_an_arm():
         ["boltz2", "opendde"], n_peptides=5, cofactors=["ZN"])
     assert est.warnings
     assert "WITHOUT them" in est.warnings[0]
-    assert est.cofactor_arms == {"boltz2": False, "opendde": False}
+    assert "opendde" in est.warnings[0] and "boltz2" not in est.warnings[0]
+    assert est.cofactor_arms == {"boltz2": True, "opendde": False}
 
 
 def test_estimate_rejects_a_nonsense_peptide_count():

@@ -70,15 +70,22 @@ COFACTOR_SUPPORT: dict[str, bool] = {
     "promera": False,
 }
 
-#: ⛔ The DEPLOYED ensemble co-fold route cannot express a cofactor AT ALL,
-#: whatever the engine underneath could do. ``ChainSpec`` on
-#: ``POST /api/v1/cofold/start`` validates ``kind`` to ``receptor|peptide`` and
-#: ``sequence`` to ``isalpha()``, and every server-side converter
-#: (``to_boltz_entities`` / ``to_protenix_entities`` / ``to_esmfold_entities`` /
-#: ``to_openfold_chains``) emits protein entities only. So a cofactor request is
-#: currently unreachable through the hosted path even for the three engines that
-#: could carry it. This flag is what makes that visible instead of silent.
-COFACTORS_REACHABLE_VIA_HOSTED_COFOLD = False
+#: Whether the hosted ensemble route (``POST /api/v1/cofold/start``) can EXPRESS a
+#: cofactor. It can, since server commit 2e9ed2d1a2 (bd-dre-3jqok): the request
+#: carries a top-level ``cofactors`` list (``ccd`` | ``smiles``, ``copies``, ``id``;
+#: exactly one of ccd/smiles), equivalent to ``chains`` entries with
+#: ``kind="cofactor"``, and the per-engine converters emit each engine's native
+#: ligand entity for boltz2, protenix, esmfold2 and openfold3. ``opendde`` and
+#: ``promera`` cannot carry one and the server REFUSES the request unless
+#: ``allow_cofactor_absent`` is set. This SDK sends both fields (see
+#: ``Peptides.cofold``).
+#:
+#: ⛔ This flag says the route CAN express a cofactor. It is never evidence that a
+#: particular fold CARRIED one: an older deployment would ignore the unknown
+#: ``cofactors`` field and fold the complex without it. So ``run()`` marks an arm
+#: ``cofactor_honoured`` only when the server's own record for that engine says
+#: ``cofactor.honoured`` — the SDK's expectation alone never counts.
+COFACTORS_REACHABLE_VIA_HOSTED_COFOLD = True
 
 DEFAULT_BAR = 0.67
 
@@ -118,6 +125,14 @@ class CofactorSpec:
         return d
 
 
+def _credits_text(per_complex: Any, n: int) -> str:
+    """``per_complex * n`` as display text (no ``.0`` on whole credits)."""
+    if isinstance(per_complex, bool) or not isinstance(per_complex, (int, float)):
+        return str(per_complex)
+    total = per_complex * n
+    return str(int(total)) if float(total).is_integer() else str(round(total, 2))
+
+
 @dataclass
 class EnsembleEstimate:
     """Projected spend for a whole ensemble, BEFORE anything runs."""
@@ -141,9 +156,13 @@ class EnsembleEstimate:
             f"(~${self.usd_total:.2f}), {self.discount_percent:.0f}% bundle discount",
         ]
         for e in self.per_engine:
+            # The server quotes ONE complex (see Ensemble.estimate), so the
+            # per-engine ``cost`` it returns is per complex; this line says
+            # "x N", so it must show the N-complex figure, not the per-complex one.
             lines.append(
                 f"    {e.get('engine'):<10} {e.get('trajectories')} traj "
-                f"x {self.n_complexes} = {e.get('cost')} cr"
+                f"x {self.n_complexes} = "
+                f"{_credits_text(e.get('cost'), self.n_complexes)} cr"
             )
         for w in self.warnings:
             lines.append(f"  ! {w}")
@@ -293,6 +312,74 @@ def _norm_cofactors(cofactors: Optional[Iterable[Any]]) -> list[CofactorSpec]:
     return out
 
 
+#: The setting the SERVER reads to count one engine's trajectories — a mirror of
+#: ``trajectoryKnob`` in shared/fold-engine-registry.ts (the single source of
+#: truth the quote and the reservation both use). ``count`` knobs take an integer;
+#: ``seedList`` knobs are counted as ``len(seeds)``. ``promera`` is absent on
+#: purpose: it is fixed at one trajectory server-side and has no knob.
+_TRAJECTORY_KNOB: dict[str, tuple[str, str]] = {
+    "boltz2": ("diffusion_samples", "count"),
+    "protenix": ("sample", "count"),
+    "opendde": ("sample", "count"),
+    "esmfold2": ("seeds", "seedList"),
+    "openfold3": ("seeds", "seedList"),
+}
+
+
+def _per_engine_body(
+    per_engine: Optional[dict[str, Any]],
+    per_engine_trajectories: Optional[dict[str, int]],
+    per_engine_settings: Optional[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Build the ``per_engine`` map ``POST /api/v1/cofold/estimate`` reads.
+
+    ⛔ The server reads ONE key, ``per_engine`` (``{engine: {setting: value}}``),
+    and derives the trajectory count from the engine's own knob. This SDK used to
+    send ``perEngineTrajectories`` / ``perEngineSettings`` — keys the handler never
+    reads — so a caller who asked for 8 Boltz-2 trajectories was quoted the
+    default and charged for 8. The same ``per_engine`` dict that goes to
+    ``/start`` goes here, so the quote and the run cannot parse it differently.
+
+    ``per_engine_trajectories={"boltz2": 8}`` is a shortcut for the engine's
+    knob; ``per_engine_settings`` merges cost-relevant settings
+    (``use_potentials``, ``sampling_steps``). Naming the same knob in both
+    ``per_engine`` and the shortcut raises rather than letting one silently win.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for eng, st in (per_engine or {}).items():
+        out[str(eng).strip().lower()] = dict(st) if isinstance(st, dict) else {}
+    for eng, n in (per_engine_trajectories or {}).items():
+        el = str(eng).strip().lower()
+        if el == "promera":
+            continue  # fixed at 1 trajectory server-side; there is nothing to set
+        knob = _TRAJECTORY_KNOB.get(el)
+        if knob is None:
+            raise LigandAIInvalidConfig(
+                f"per_engine_trajectories names unknown engine {eng!r}; "
+                f"known: {sorted(_TRAJECTORY_KNOB) + ['promera']}"
+            )
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise LigandAIInvalidConfig(
+                f"per_engine_trajectories[{eng!r}] must be an integer >= 1 (got {n!r})"
+            )
+        key, kind = knob
+        slot = out.setdefault(el, {})
+        if key in slot:
+            raise LigandAIInvalidConfig(
+                f"{eng!r}: {key!r} is set in both per_engine and "
+                "per_engine_trajectories — pass it once"
+            )
+        slot[key] = n if kind == "count" else list(range(1, n + 1))
+    for eng, st in (per_engine_settings or {}).items():
+        el = str(eng).strip().lower()
+        if not isinstance(st, dict):
+            raise LigandAIInvalidConfig(
+                f"per_engine_settings[{eng!r}] must be a dict (got {type(st).__name__})"
+            )
+        out.setdefault(el, {}).update(st)
+    return out
+
+
 class _EnsembleCommon:
     """Shared, transport-free logic so the sync and async twins cannot drift."""
 
@@ -303,10 +390,10 @@ class _EnsembleCommon:
 
         ``engine_can_carry`` is a measured property of the engine's own entity
         parser. ``reachable_today`` is whether ``POST /api/v1/cofold/start`` can
-        currently express it — it cannot, for any engine, because ``ChainSpec``
-        is validated to ``receptor|peptide`` with an alphabetic sequence. The two
-        are reported separately so a caller is never told "unsupported" when the
-        real answer is "supported by the model, not yet plumbed".
+        express it (``cofactors`` / ``ChainSpec kind="cofactor"``) AND the engine
+        can carry it. The two are reported separately so a caller is never told
+        "unsupported" when the real answer is "supported by the model, not
+        plumbed".
         """
         engs = engines or list(COFACTOR_SUPPORT)
         out = {}
@@ -319,12 +406,13 @@ class _EnsembleCommon:
                 "reason": (
                     "engine takes chains/sequences only — no ligand entity"
                     if can is False else
-                    ("hosted cofold ChainSpec accepts kind=receptor|peptide with an "
-                     "alphabetic sequence, so no cofactor can be expressed on the "
-                     "multi-engine route yet. The single-engine Boltz-2 batch "
-                     "surface CAN carry one today: client.peptides.fold_batch(..., "
-                     "partners=[{'type':'ligand','ccd':'ZN','copies':2}])"
-                     if not COFACTORS_REACHABLE_VIA_HOSTED_COFOLD else "supported")
+                    ("engine is not in the verified cofactor capability table"
+                     if can is None else
+                     ("supported" if COFACTORS_REACHABLE_VIA_HOSTED_COFOLD else
+                      "the hosted co-fold route cannot express a cofactor; the "
+                      "single-engine Boltz-2 batch surface can: "
+                      "client.peptides.fold_batch(..., "
+                      "partners=[{'type':'ligand','ccd':'ZN','copies':2}])"))
                 ),
             }
         return out
@@ -345,8 +433,8 @@ class _EnsembleCommon:
         if cannot and not allow_cofactor_absent:
             names = ", ".join(sorted(f"{c.ccd or 'SMILES'}" for c in cofs))
             raise LigandAIInvalidConfig(
-                f"cofactor(s) {names} requested, but no engine in {engines} can "
-                f"receive them through the hosted co-fold route "
+                f"cofactor(s) {names} requested, but engine(s) {cannot} in "
+                f"{engines} cannot receive them through the hosted co-fold route "
                 f"({'; '.join(f'{e}: ' + sup[e]['reason'] for e in cannot)}). "
                 "These folds would run WITHOUT the cofactor, which on a "
                 "cofactor-dependent target scores a different molecule. "
@@ -401,6 +489,7 @@ class Ensemble(Resource, _EnsembleCommon):
         engines: list[str],
         n_peptides: int = 1,
         *,
+        per_engine: dict[str, Any] | None = None,
         per_engine_trajectories: dict[str, int] | None = None,
         per_engine_settings: dict[str, Any] | None = None,
         cofactors: Iterable[Any] | None = None,
@@ -409,13 +498,23 @@ class Ensemble(Resource, _EnsembleCommon):
         """Projected spend and per-engine breakdown BEFORE submitting anything.
 
         Wraps ``POST /api/v1/cofold/estimate`` (the server's own pricing, from
-        ``CREDIT_PRICING.cofold`` — per-engine per-trajectory rates with the
-        bundle discount) and scales it by the peptide count. It is deliberately
-        NOT a second cost model: the rates are never re-derived client-side.
+        ``CREDIT_PRICING.cofold`` — per-engine rates with the bundle discount)
+        and scales it by the peptide count. It is deliberately NOT a second cost
+        model: no rate is held or re-derived client-side, so a price change on the
+        platform reaches this estimate without an SDK release.
+
+        ONE complex is quoted (``complexCount: 1``) and scaled by ``n_peptides``
+        because :meth:`run` submits one co-fold JOB per peptide, and the server's
+        minimum charge applies per job.
 
         Args:
             engines: engines to include in the ensemble.
             n_peptides: how many complexes will be folded.
+            per_engine: the SAME ``{engine: {setting: value}}`` map you pass to
+                :meth:`run` / ``peptides.cofold`` — sent as ``per_engine``, the
+                key the server reads.
+            per_engine_trajectories / per_engine_settings: shortcuts merged into
+                ``per_engine``; see :func:`_per_engine_body`.
             cofactors: any cofactor the caller intends to pass — declared here
                 so the estimate can WARN when arms cannot honour it, before
                 money moves.
@@ -424,10 +523,9 @@ class Ensemble(Resource, _EnsembleCommon):
         if n_peptides < 1:
             raise LigandAIInvalidConfig("n_peptides must be >= 1")
         body: dict[str, Any] = {"engines": list(engines), "complexCount": 1}
-        if per_engine_trajectories:
-            body["perEngineTrajectories"] = per_engine_trajectories
-        if per_engine_settings:
-            body["perEngineSettings"] = per_engine_settings
+        pe = _per_engine_body(per_engine, per_engine_trajectories, per_engine_settings)
+        if pe:
+            body["per_engine"] = pe
         r = self._transport.request("POST", "/api/v1/cofold/estimate", json=body)
         per_complex = float(r.get("estimatedTotal") or 0)
         cofs = _norm_cofactors(cofactors)
@@ -528,7 +626,7 @@ class Ensemble(Resource, _EnsembleCommon):
         ceiling = max_credits
         if ceiling is None and budget is not None:
             ceiling = getattr(budget, "max_credits", None)
-        est = self.estimate(engines, len(peps), cofactors=cofs)
+        est = self.estimate(engines, len(peps), per_engine=per_engine, cofactors=cofs)
         if dry_run:
             return est
         if ceiling is not None and est.credits_total > ceiling:
@@ -561,10 +659,13 @@ class Ensemble(Resource, _EnsembleCommon):
             try:
                 job = cofold(chains, engines, per_engine=per_engine,
                              shared_msa=shared_msa, gene=gene,
-                             run_deltaforge=run_deltaforge)
+                             run_deltaforge=run_deltaforge,
+                             cofactors=[c.as_dict() for c in cofs] or None,
+                             allow_cofactor_absent=allow_cofactor_absent)
                 res = job.result(poll_interval=poll_interval)
                 for eng, rec_e in (res.get("engines") or {}).items():
                     vals[str(eng).lower()] = _pick_metric(rec_e, metric)
+                    _reconcile_honoured(honoured, str(eng).lower(), rec_e, cofs)
             except Exception as exc:              # one peptide must not kill the run
                 failures.append({"sequence": pep, "stage": "cofold",
                                  "error": f"{type(exc).__name__}: {exc}"[:400]})
@@ -587,8 +688,28 @@ class Ensemble(Resource, _EnsembleCommon):
         )
 
 
-#: Aliases that are THE SAME QUANTITY under a different worker's spelling.
-#: Nothing here maps a metric onto a different quantity.
+#: Where the hosted co-fold route puts each metric. Each engine's record is
+#: ``{engine, ok, n_traj, trajectories: [TRAJ], best: TRAJ | None, settings, ...}``
+#: (fastapi_backend/services/cofold_engine_adapters.py, "CANONICAL RETURN"), and
+#: ``best`` is the trajectory with the highest ipTM among the ok ones. The TRAJ
+#: keys below are the server's spelling; ``iPSAE`` / ``ipTM`` / ``iPAE`` are
+#: restricted host-side to the PEPTIDE<->receptor interface, so ``iPSAE`` IS the
+#: binder metric (``peptide_ipsae``). ``pLDDT`` is normalised to 0-1 server-side.
+#: Nothing here maps a metric onto a different quantity: ``ipTM_complex`` (the
+#: engine-native whole-complex value, contaminated by receptor<->receptor
+#: contacts) is reachable ONLY by asking for ``iptm_complex``.
+_BEST_TRAJ_KEYS: dict[str, tuple[str, ...]] = {
+    "peptide_ipsae": ("iPSAE",),
+    "iptm": ("ipTM",),
+    "iptm_complex": ("ipTM_complex",),
+    "ptm": ("pTM",),
+    "plddt": ("pLDDT",),
+}
+
+#: Aliases that are THE SAME QUANTITY under a different worker's spelling, looked
+#: up FLAT on the engine record (the shape single-engine workers return). The
+#: hosted route does not use them — see :data:`_BEST_TRAJ_KEYS`. Nothing here maps
+#: a metric onto a different quantity.
 _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
     "peptide_ipsae": ("peptide_ipsae", "peptideIpsae", "ipsae_peptide"),
     "ipsae": ("ipsae", "iPSAE", "overall_ipsae"),
@@ -598,8 +719,26 @@ _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _as_number(v: Any) -> Optional[float]:
+    if isinstance(v, dict):
+        v = v.get("best", v.get("value"))
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    return None
+
+
 def _pick_metric(engine_record: Any, metric: str) -> Optional[float]:
     """Pull ONE named metric out of an engine record.
+
+    Reads the hosted route's shape first — ``record["best"][<TRAJ key>]``, e.g.
+    ``best.iPSAE`` for ``peptide_ipsae`` — then falls back to a flat spelling on
+    the record. ⛔ Before this read ``best``, it looked only for a top-level
+    ``peptide_ipsae`` that the hosted route never emits, so every per-engine
+    score came back None live and the consensus counted nothing.
+
+    ``best`` is the engine's best structure by ipTM — the same one DeltaForge
+    scores — so this is the engine's own answer, not the maximum over its
+    trajectories (taking that would select on the metric being reported).
 
     ⛔ NEVER DEFAULTS TO 0.0 AND NEVER SUBSTITUTES A DIFFERENT QUANTITY. Both
     have shipped from production workers: a missing ipTM returned as a measured
@@ -607,20 +746,44 @@ def _pick_metric(engine_record: Any, metric: str) -> Optional[float]:
     1 uM binder), and a batch path that filled a missing ipSAE with
     plddt_interface/100 — a different quantity entirely — and then counted the
     result as elite. Here an absent metric is None, and asking for ipSAE gets
-    ipSAE or nothing.
+    ipSAE or nothing: the hosted route reports ONE iPSAE (peptide<->receptor), so
+    the whole-complex ``ipsae`` metric is None there rather than served the
+    peptide-interface value.
     """
     if not isinstance(engine_record, dict):
         return None
+    best = engine_record.get("best")
+    if isinstance(best, dict):
+        for key in _BEST_TRAJ_KEYS.get(metric, ()):
+            if key in best:
+                v = _as_number(best[key])
+                if v is not None:
+                    return v
     keys = _METRIC_ALIASES.get(metric, (metric,))
     for key in keys:
         if key not in engine_record:
             continue
-        v = engine_record[key]
-        if isinstance(v, dict):
-            v = v.get("best", v.get("value"))
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return float(v)
+        v = _as_number(engine_record[key])
+        if v is not None:
+            return v
     return None
+
+
+def _reconcile_honoured(honoured: dict[str, bool], engine: str,
+                        engine_record: Any, cofs: list[CofactorSpec]) -> None:
+    """Make ``cofactor_honoured`` the SERVER's statement, not the SDK's hope.
+
+    The hosted route reports, per engine, ``cofactor.honoured``. A deployment that
+    predates the ``cofactors`` field ignores it and folds the complex WITHOUT the
+    cofactor — and then returns no ``cofactor`` block at all. Either way an arm
+    the server did not confirm is marked not honoured, so it is never pooled with
+    one that carried the cofactor. Only ever flips True -> False.
+    """
+    if not cofs or engine not in honoured:
+        return
+    cof = engine_record.get("cofactor") if isinstance(engine_record, dict) else None
+    if not (isinstance(cof, dict) and cof.get("honoured") is True):
+        honoured[engine] = False
 
 
 class AsyncEnsemble(AsyncResource, _EnsembleCommon):
@@ -634,6 +797,7 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         engines: list[str],
         n_peptides: int = 1,
         *,
+        per_engine: dict[str, Any] | None = None,
         per_engine_trajectories: dict[str, int] | None = None,
         per_engine_settings: dict[str, Any] | None = None,
         cofactors: Iterable[Any] | None = None,
@@ -642,10 +806,9 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         if n_peptides < 1:
             raise LigandAIInvalidConfig("n_peptides must be >= 1")
         body: dict[str, Any] = {"engines": list(engines), "complexCount": 1}
-        if per_engine_trajectories:
-            body["perEngineTrajectories"] = per_engine_trajectories
-        if per_engine_settings:
-            body["perEngineSettings"] = per_engine_settings
+        pe = _per_engine_body(per_engine, per_engine_trajectories, per_engine_settings)
+        if pe:
+            body["per_engine"] = pe
         r = await self._transport.request("POST", "/api/v1/cofold/estimate", json=body)
         per_complex = float(r.get("estimatedTotal") or 0)
         cofs = _norm_cofactors(cofactors)
@@ -715,7 +878,7 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         ceiling = max_credits
         if ceiling is None and budget is not None:
             ceiling = getattr(budget, "max_credits", None)
-        est = await self.estimate(engines, len(peps), cofactors=cofs)
+        est = await self.estimate(engines, len(peps), per_engine=per_engine, cofactors=cofs)
         if dry_run:
             return est
         if ceiling is not None and est.credits_total > ceiling:
@@ -757,10 +920,13 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
                 try:
                     job = await cofold(chains, engines, per_engine=per_engine,
                                        shared_msa=shared_msa, gene=gene,
-                                       run_deltaforge=run_deltaforge)
+                                       run_deltaforge=run_deltaforge,
+                                       cofactors=[c.as_dict() for c in cofs] or None,
+                                       allow_cofactor_absent=allow_cofactor_absent)
                     res = await job.result(poll_interval=poll_interval)
                     for eng, rec_e in (res.get("engines") or {}).items():
                         vals[str(eng).lower()] = _pick_metric(rec_e, metric)
+                        _reconcile_honoured(honoured, str(eng).lower(), rec_e, cofs)
                 except Exception as exc:
                     failures.append({"sequence": pep, "stage": "cofold",
                                      "error": f"{type(exc).__name__}: {exc}"[:400]})

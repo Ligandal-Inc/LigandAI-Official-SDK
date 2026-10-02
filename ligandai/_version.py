@@ -33,7 +33,7 @@ from pathlib import Path
 #: Fallback for an uninstalled source tree, and the authority whenever the
 #: installed distribution metadata describes a DIFFERENT installation than the
 #: code being executed. Kept equal to ``pyproject.toml``'s ``version``.
-_FALLBACK_VERSION = "0.15.1"
+_FALLBACK_VERSION = "0.16.0"
 
 
 def _resolve_version() -> tuple[str, str]:

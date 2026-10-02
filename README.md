@@ -24,24 +24,22 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.15.1** — binder maturation reaches customers. (0.15.0 shipped without
-> `ligandai/contrastive.py` and could not be imported at all; it is yanked, and
-> 0.15.1 is that release plus the missing module. Nothing else differs.)
+> **v0.16.0** — a fold costs **10 credits ($0.10)** at the default 4 trajectories,
+> down from 100 ($1.00); 1 credit = 1 cent. The figures live in one module,
+> `ligandai.pricing`, as a local fallback for the pre-flight balance check and
+> offline campaign budgets — the platform's own quote is authoritative
+> (`client.peptides.estimate_cost()`, `client.ensemble.estimate()`).
+> `client.ensemble` also now reads the scores the hosted co-fold route actually
+> returns, quotes the `per_engine` settings you will run with, and sends cofactors.
 >
-> `client.maturation` drives the platform's server-side maturation loop: hand it
-> sequences you already have and it folds them, gates on the peptide-interface ipSAE, scores the in-domain poses,
-> mutates the interface, and re-folds the variants **and their parents in the same
-> cycle**, so a variant-vs-parent delta means something. Every withheld number says
-> which of six reasons withheld it — and only one of the six is a verdict about the
-> design. ⛔ `client.campaigns` is a DIFFERENT capability that merely shares the
-> word: a local panel-folding helper that never calls `/api/campaign/*`. Reaching
-> for `client.campaigns.mature` now names the real surface instead of raising
-> something that reads like a typo.
->
-> Upgrading from 0.14.0 keeps everything it introduced: the declarative campaign
+> Upgrading from 0.15.x keeps everything it introduced: `client.maturation` (the
+> platform's server-side binder maturation loop — ⛔ `client.campaigns` is a
+> DIFFERENT capability that merely shares the word), the declarative campaign
 > runner with its stop metrics and hard credit cap, `client.ensemble` co-folding N
-> peptides x M engines priced first, contrastive / avoidance design as a first-class
-> argument, and round-to-round lineage on the recursive campaign.
+> peptides x M engines priced first, contrastive / avoidance design as a
+> first-class argument, and round-to-round lineage on the recursive campaign.
+> (0.15.0 shipped without `ligandai/contrastive.py` and could not be imported;
+> it is yanked.)
 >
 > See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
@@ -845,10 +843,19 @@ complex (chain A = receptor, chain B = peptide). Pass exactly one of
 `target_gene`, `receptor_pdb`, or `receptor_sequence`. Peptide input accepts
 bare AA strings **or** FASTA blocks (multi-record supported).
 
-Billing is **25 credits per fold per trajectory**, with a
-`max(1.0, sampling_steps / 50)` multiplier, floored at a **100-credit minimum
-per fold** (so a single-trajectory fold still costs 100, not 25) — the full
-batch cost is charged upfront. HTTP 402 if balance is short.
+Billing is **10 credits ($0.10) per fold at the default 4 trajectories** — 2.5
+credits per trajectory, floored at a **10-credit minimum per fold** (so a
+single-trajectory fold still costs 10, not 2.5). Sampling steps above 50
+multiply the cost by `ceil(sampling_steps / 50)` (100 steps = 2x). 1 credit = 1
+cent. The full batch cost is charged upfront. HTTP 402 if balance is short.
+(A fold cost 100 credits / $1.00 before 0.16.0.)
+
+The figures live in one module, `ligandai.pricing`
+(`CREDITS_PER_FOLD_DEFAULT`, `TRAJECTORIES_DEFAULT`, `fold_credits()`), and are
+a **local fallback** for the pre-flight balance check and for offline budget
+arithmetic. The platform is authoritative — read the live quote with
+`client.peptides.estimate_cost()` or `client.ensemble.estimate()`, and the cost
+actually charged on `job.total_cost_credits`.
 
 ```python
 # Gene-based receptor (canonical PDB or human-proteome lookup)

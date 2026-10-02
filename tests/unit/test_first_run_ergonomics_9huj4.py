@@ -51,7 +51,8 @@ _ESTIMATE_PAYLOAD = {
         },
         "rates": {
             "credits_per_peptide": 100,
-            "credits_per_fold_per_trajectory": 100,
+            "credits_per_fold_per_trajectory": 2.5,
+            "credits_per_fold": 10,
             "fold_step_multiplier": 1,
             "credits_per_peptide_score": 25,
             "free_score_count": 300,

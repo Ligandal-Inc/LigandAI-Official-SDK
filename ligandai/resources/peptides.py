@@ -2245,6 +2245,42 @@ def _cofold_chains(chains: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _cofold_cofactors(cofactors: list[Any] | None) -> list[dict[str, Any]]:
+    """Coerce cofactors into the server ``CofoldStartRequest.cofactors`` shape:
+    ``{"ccd" | "smiles", "copies"?, "id"?}``.
+
+    Accepts a CCD string (``"ZN"``), a dict, or anything with ``as_dict()`` (the
+    ensemble's ``CofactorSpec``). EXACTLY ONE of ``ccd`` / ``smiles`` — an empty
+    ligand spec is what silently killed cofactor folds for months, so it is
+    refused here rather than on the wire.
+    """
+    out: list[dict[str, Any]] = []
+    for i, c in enumerate(cofactors or []):
+        if isinstance(c, str):
+            d: dict[str, Any] = {"ccd": c.strip().upper()}
+        elif isinstance(c, dict):
+            d = dict(c)
+        elif hasattr(c, "as_dict"):
+            d = dict(c.as_dict())
+        else:
+            raise TypeError(
+                f"cofactors[{i}] must be a CCD string, dict, or CofactorSpec; "
+                f"got {type(c).__name__}"
+            )
+        if "ccdCode" in d and "ccd" not in d:
+            d["ccd"] = d.pop("ccdCode")
+        ccd, smiles = d.get("ccd"), d.get("smiles")
+        if bool(ccd) == bool(smiles):
+            raise ValueError(
+                f"cofactors[{i}] needs exactly one of ccd= or smiles= "
+                f"(got ccd={ccd!r}, smiles={smiles!r})"
+            )
+        if ccd:
+            d["ccd"] = str(ccd).strip().upper()
+        out.append({k: v for k, v in d.items() if v is not None})
+    return out
+
+
 def _cofold_sanitize_per_engine(
     per_engine: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -5156,7 +5192,9 @@ class Peptides(Resource):
                 initial={"id": cached_job_id, "type": "folding", "status": "cached"},
             )
 
-        # Single-fold cost: trajectories × 100 × max(1.0, steps/50)
+        # Single-fold cost (local pre-flight estimate; the platform is
+        # authoritative): ligandai.pricing.fold_credits — 10 credits for a
+        # default 4-trajectory fold, proportional per trajectory, ceil(steps/50).
         effective_trajectories = int(
             num_trajectories if num_trajectories is not None else diffusion_samples
         )
@@ -5327,11 +5365,14 @@ class Peptides(Resource):
 
         Billing
         -------
-        25 credits per fold per trajectory, floored at a 100-credit minimum
-        per fold. Sampling steps >50 apply a multiplier of
-        ``max(1.0, sampling_steps / 50)``. Total cost is charged upfront
-        before any GPU work begins; HTTP 402 is raised when balance is
-        insufficient.
+        **10 credits ($0.10) per fold at the default 4 trajectories** —
+        2.5 credits per trajectory, floored at a 10-credit minimum per fold
+        (so a single-trajectory fold still costs 10). Sampling steps above 50
+        multiply the cost by ``ceil(sampling_steps / 50)``. The figures live in
+        :mod:`ligandai.pricing`; the platform is authoritative and the returned
+        ``total_cost_credits`` is what is charged. Total cost is charged
+        upfront before any GPU work begins; HTTP 402 is raised when balance
+        is insufficient.
 
         Graceful credit-exhaustion (``on_credit_exhausted``)
         ----------------------------------------------------
@@ -5678,6 +5719,11 @@ class Peptides(Resource):
         lengthBin: str | None = None,
         includeStructures: bool | None = None,
         auditId: str | None = None,
+        # Cofactors the hosted route carries (server CofoldStartRequest.cofactors,
+        # bd-dre-3jqok). Engines that cannot carry one make the server REFUSE the
+        # request unless allow_cofactor_absent=True.
+        cofactors: list[Any] | None = None,
+        allow_cofactor_absent: bool = False,
     ) -> "Job[dict[str, Any]]":
         """Ensemble co-fold — fold the SAME chains on 1-5 engines in parallel.
 
@@ -5719,6 +5765,16 @@ class Peptides(Resource):
             gene: Optional HGNC symbol for labelling + MSA lookup.
             include_structures: Include mmCIF/PDB text inline in the records
                 (default ``False`` keeps poll payloads small).
+            cofactors: Cofactors to co-fold with the complex — CCD codes
+                (``["ZN", "ZN"]``), dicts (``{"ccd": "ZN", "copies": 2}`` or
+                ``{"smiles": ...}``) or ``CofactorSpec``. Sent as the server's
+                ``cofactors`` field. Engines that cannot carry one
+                (``opendde``, ``promera``) make the server refuse the request
+                unless ``allow_cofactor_absent=True``; each engine's record then
+                says ``cofactor.honoured`` and an arm that dropped it is never
+                pooled with arms that carried it.
+            allow_cofactor_absent: run engines that cannot carry the cofactor
+                anyway (their arms come back ``cofactor.honoured=False``).
 
         Returns:
             A :class:`~ligandai.jobs.Job` polling ``/api/v1/cofold/{job_id}/
@@ -5780,6 +5836,10 @@ class Peptides(Resource):
             body["gene"] = gene
         if audit_id is not None:
             body["audit_id"] = audit_id
+        if cofactors:
+            body["cofactors"] = _cofold_cofactors(cofactors)
+        if allow_cofactor_absent:
+            body["allow_cofactor_absent"] = True
 
         payload = self._transport.request("POST", "/api/v1/cofold/start", json=body) or {}
         job_id = payload.get("job_id") or payload.get("jobId") or payload.get("id") or ""
@@ -5825,9 +5885,10 @@ class Peptides(Resource):
         Mirrors the flat-form hardening pre-flight (GPU allowlist → concurrency
         → dedupe → credit pre-flight → record), but the unit of cost is the
         GROUP (one complex fold) rather than the single peptide. Billing:
-        25 cr/group/trajectory × max(1.0, sampling_steps/50), floored at a
-        100-credit minimum per group, matching the server-side computation
-        for the grouped envelope.
+        2.5 cr/group/trajectory × ``ceil(sampling_steps / 50)``, floored at a
+        10-credit minimum per group (a default 4-trajectory group is 10
+        credits, $0.10), matching the server-side computation for the grouped
+        envelope. See :mod:`ligandai.pricing`.
         """
         from ligandai._hardening import (
             attach_job_id,
@@ -7960,6 +8021,8 @@ class AsyncPeptides(AsyncResource):
         lengthBin: str | None = None,
         includeStructures: bool | None = None,
         auditId: str | None = None,
+        cofactors: list[Any] | None = None,
+        allow_cofactor_absent: bool = False,
     ) -> "AsyncJob[dict[str, Any]]":
         """Async ensemble co-fold — see :meth:`Peptides.cofold`.
 
@@ -8014,6 +8077,10 @@ class AsyncPeptides(AsyncResource):
             body["gene"] = gene
         if audit_id is not None:
             body["audit_id"] = audit_id
+        if cofactors:
+            body["cofactors"] = _cofold_cofactors(cofactors)
+        if allow_cofactor_absent:
+            body["allow_cofactor_absent"] = True
 
         payload = await self._transport.request("POST", "/api/v1/cofold/start", json=body) or {}
         job_id = payload.get("job_id") or payload.get("jobId") or payload.get("id") or ""
