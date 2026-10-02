@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-10-02
+
+Ten defects found by running the **published** 0.16.0/0.16.1 wheels against
+production blue on 2026-10-02 (`bd-dre-3imtv.4`), fixed across four commits with
+53 new tests in `tests/unit/test_{client_cli_http,programs,proteins_synthesis,jobs_bivalent}_live_audit_3imtv4.py`.
+Every body replayed in those tests came off that server, and each fix was
+mutation-checked against the unfixed code.
+
+The shape they share: a read keyed on a field name **guessed at authoring time**,
+answering with a clean, plausible value — `[]`, `None`, "no orders", "that job
+does not exist" — that no caller could tell from a real measurement. Two of them
+went further and *fabricated* a value the server never sent.
+
+> ⛔ **Release-bookkeeping correction.** Three of these four commits (`42fdb47`,
+> `718f6ea`, `3272544`) were ancestors of the `0.16.2` release commit and so
+> shipped **inside the published 0.16.2 wheel**, which documented only its own
+> envelope fixes. Their entries are kept below rather than back-dated, so this
+> file records what users actually received. Only the `jobs`/`bivalent` group
+> (`54b0ea1`) is new code in 0.16.3.
+
+### Fixed — new in 0.16.3
+
+- **`jobs.stream(id)` 404'd on every job** while `Job.stream()` on the same job
+  worked. It called `GET /api/jobs/{id}/sse`, a route the server does not have;
+  the job stream is `/api/jobs/:id/stream`, and a `session_parallel_*` id streams
+  from `/api/ptf/parallel/:id/stream`. The 404 was read as "that job does not
+  exist". Sync and async now pick the route that exists.
+- **`bivalent.list_sessions()` / `get_session()` raised `ValidationError` on
+  every row.** `created_at` comes back as raw Postgres text with a two-digit UTC
+  offset (`"2026-06-11 16:03:02.793753+00"`), which ISO 8601 rejects. The base
+  model completes the offset for a string that is exactly such a timestamp, in a
+  `datetime`-typed field only; `str` fields keep the server's text verbatim.
+- **One un-chosen second target failed the whole listing, and absent values were
+  invented.** A session whose second target is not picked yet carries
+  `target2_gene: null` (all 14 rows on the dev account); the normalizer wrapped
+  that `None` in `{"gene": None}`. It also back-filled a gene literally named
+  `"unknown"` and an 8–16 residue linker when the server sent neither.
+  `target1` / `target2` / `linker` are `Optional` on `BivalentSession`, and
+  absent is `None` — never a fabricated string.
+
+### Fixed — shipped in the 0.16.2 wheel, undocumented until now
+
+- **A valid key with an unrecognised prefix was refused client-side, before any
+  request left the process.** `feature_allowed()` returned `False` for a client
+  that *had* a key whose prefix maps to no tier (a service/agent token, an
+  on-prem prefix), so `peptides.generate` raised "requires free tier or higher"
+  against a server that would have accepted it. Tier detection fails **open** —
+  only a client with no key at all is below every tier; the server decides.
+- **`ligandai legal status` sent a fully accepted account into re-acceptance.**
+  The server sends `needsReAcceptance` as a dict (`{"tos": false, "eula": false}`)
+  and a non-empty dict is truthy, so it printed "A newer version is available"
+  for a current account and `ligandai legal accept` skipped its already-accepted
+  early exit and opened the browser flow.
+- **A `POST`/`PATCH` died on a connection refused at connect time.** A
+  `peptides.fold` POST failed hard while blue was being redeployed, where GETs
+  rode it out. A connect-phase failure (`ConnectError` / `ConnectTimeout`) proves
+  nothing was sent, so it is now retried for POST/PATCH too. Read timeouts and
+  5xx on a POST are still sent at most once.
+- **`programs.get(1011)` answered a record whose every field was `None`** for a
+  program that has a name and a conversation. The route wraps the record in
+  `{"success": true, "program": {...}}` and every `ProgramDetail` field is
+  optional, so nothing raised. Same shape for `access()`, `get_session()`,
+  `share()` / `update_share()` and `invite()` — whose `inviteUrl` sits *beside*
+  the object and is the one value that call exists to return. A body carrying no
+  such object is refused, not validated empty.
+- **Session reads raised `id Field required` on every live row** — rows are keyed
+  `session_id` / `sessionId`, a name the server never sends as `id`.
+  `find_session_by_gene` also validated the by-gene *summary* envelope as a
+  session; it returns the newest row of that envelope's `sessions` list, and
+  `None` only when the server lists none. `programs.list()` returns handle-only
+  programs (`program_<ts>_<hash>`, `id` `None`) which `_validate_program_id`
+  refused, so a listing could not be fed back into `access()` / `share()`;
+  the handle is accepted and `Program.ref` returns whichever id the row carries.
+- **`synthesis.list_orders()` reported "you have no orders" from a stub.** All
+  seven `/api/synthesis-checkout/*` routes answer one canned
+  `{"status": "coming_soon", ...}` body; `get_cart` / `estimate` / `recommend` /
+  `add_to_cart` / `get_order` validated it into models needing a cart id, a quote
+  or an order, and `list_orders` read it as `payload.get("orders", []) → []`.
+  They raise `LigandAISynthesisUnavailable` carrying `platform_url` /
+  `pricing_url`; `options()` still returns the stub readably. Two paths were
+  simply wrong — `linker_options()` called `/api/synthesis-checkout/linker-options`
+  (404) where the route is `/api/synthesis/linker-options`, and
+  `adaptyv_search_targets()` called `/api/adaptyv/targets/search?query=` where it
+  is `/api/adaptyv/targets?search=`. `recommend_linker`,
+  `binding_orientation` and `generation_mask_guidance` call routes the server does
+  not have at all; the Express catch-all 404 is now
+  `LigandAISynthesisUnavailable`, while a handler 404 naming a record stays
+  `LigandAINotFoundError`.
+- **`proteins.info` raised `gene Field required` for every gene** — the route
+  sends `geneName`. `ReceptorTopology` also left `extracellular` / `tm_regions` /
+  `intracellular` `None` beside a populated `chain_topologies`; the flat fields
+  are derived from it, each range tagged with its chain. `has_topology: false`
+  still yields `None`, meaning unknown.
+
+### Known gap
+
+- The `peptides` **read** endpoints are **not verified live** in this release.
+  The agent token used for the audit is not an `lgai_`-prefixed key and those
+  routes reject it as malformed before any handler runs; creating a conforming
+  key was refused by an account key cap. Those paths are covered by replayed-body
+  unit tests only.
+
 ## [0.16.2] - 2026-10-02
 
 Eight list-returning methods answered `[]` — or raised — against a server that
