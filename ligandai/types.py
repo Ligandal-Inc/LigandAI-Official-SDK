@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias, TypedDict, cast
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias, TypedDict, cast, get_args
 
 from pydantic import (
     AliasChoices,
@@ -35,6 +35,20 @@ from ligandai.errors import LigandAIAnalysisNotComputed
 # -- Base ---------------------------------------------------------------------
 
 
+#: A Postgres ``timestamptz`` rendered by ``to_char``/default text output:
+#: ``2026-06-11 16:03:02.793753+00``. The offset is TWO digits, which ISO 8601
+#: (and pydantic) reject; ``+00:00`` is accepted.
+_PG_TIMESTAMPTZ = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}$"
+)
+
+
+def _mentions_datetime(annotation: Any) -> bool:
+    if annotation is datetime:
+        return True
+    return any(_mentions_datetime(arg) for arg in get_args(annotation))
+
+
 class _LGModel(BaseModel):
     """Base for SDK pydantic models.
 
@@ -48,6 +62,27 @@ class _LGModel(BaseModel):
         str_strip_whitespace=True,
         arbitrary_types_allowed=True,
     )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _complete_two_digit_utc_offset(cls, value: Any, info: Any) -> Any:
+        """Accept a Postgres ``...+00`` timestamp in a ``datetime`` field.
+
+        ⛔ Some routes return raw Postgres text (``GET /api/ligandforge/bivalent``
+        rows carry ``"created_at": "2026-06-11 16:03:02.793753+00"``). The
+        two-digit offset is not ISO 8601, so ``bivalent.list_sessions()`` and
+        ``get_session()`` raised ``ValidationError: created_at ... unexpected
+        extra characters`` on every row of an account that has any — the whole
+        listing lost to one field. Only a string that is EXACTLY such a
+        timestamp, in a field typed as a datetime, is touched; ``str`` fields
+        keep the server's text verbatim. Measured 2026-10-02 against blue.
+        [bd-dre-3imtv.4]
+        """
+        if isinstance(value, str) and _PG_TIMESTAMPTZ.match(value):
+            field = cls.model_fields.get(info.field_name)
+            if field is not None and _mentions_datetime(field.annotation):
+                return value + ":00"
+        return value
 
 
 # -- Auth / account -----------------------------------------------------------
@@ -3115,10 +3150,20 @@ class LinkerConfig(_LGModel):
 
 
 class BivalentSession(_LGModel):
+    """One bivalent design session.
+
+    ``target1`` / ``target2`` / ``linker`` are ``None`` when the server did not
+    send them — a ``GET /api/ligandforge/bivalent`` list row carries only
+    ``target1_gene`` / ``target2_gene`` (and ``target2_gene`` is ``null`` until the
+    second target is chosen) and no linker. They used to be required and were
+    back-filled with a gene named ``"unknown"`` and a default linker. Read
+    ``get_session(id)`` for the full record. [bd-dre-3imtv.4]
+    """
+
     id: str
-    target1: BivalentTarget
-    target2: BivalentTarget
-    linker: LinkerConfig
+    target1: BivalentTarget | None = None
+    target2: BivalentTarget | None = None
+    linker: LinkerConfig | None = None
     status: str
     run1_job_id: str | None = Field(default=None, alias="run1JobId")
     run2_job_id: str | None = Field(default=None, alias="run2JobId")

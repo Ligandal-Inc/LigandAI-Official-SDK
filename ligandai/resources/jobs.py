@@ -85,8 +85,13 @@ class Jobs(Resource):
         )
 
     def stream(self, job_id: str) -> Iterator[JobEvent]:
-        """``GET /api/jobs/:id/sse`` — yields :class:`JobEvent` instances live."""
-        for line in self._transport.stream_lines("GET", f"/api/jobs/{job_id}/sse"):
+        """``GET /api/jobs/:id/stream`` — yields :class:`JobEvent` instances live.
+
+        A ``session_parallel_*`` id (what ``peptides.generate`` returns) is not a
+        row in the generic jobs tables; it streams from
+        ``GET /api/ptf/parallel/:id/stream`` instead, as ``Job.stream`` does.
+        """
+        for line in self._transport.stream_lines("GET", _stream_path(job_id)):
             data = parse_sse_data(line)
             if data is None:
                 continue
@@ -141,11 +146,27 @@ class AsyncJobs(AsyncResource):
         )
 
     async def stream(self, job_id: str) -> AsyncIterator[JobEvent]:
-        async for line in self._transport.stream_lines("GET", f"/api/jobs/{job_id}/sse"):
+        """Async sibling of :meth:`Jobs.stream` (same route selection)."""
+        async for line in self._transport.stream_lines("GET", _stream_path(job_id)):
             data = parse_sse_data(line)
             if data is None:
                 continue
             yield JobEvent.model_validate(_normalize(data))
+
+
+def _stream_path(job_id: str) -> str:
+    """The SSE route that exists for ``job_id``.
+
+    ⛔ ``Jobs.stream`` called ``GET /api/jobs/{id}/sse``. The server has no such
+    route (its job stream is ``GET /api/jobs/:id/stream``; parallel-generation
+    sessions stream from ``/api/ptf/parallel/:id/stream``), so every call to
+    ``client.jobs.stream()`` was a 404 "Not found" — read as "that job does not
+    exist" — while ``Job.stream()`` on the same job worked. Measured 2026-10-02
+    against production blue. [bd-dre-3imtv.4]
+    """
+    if _is_parallel_session_id(job_id):
+        return f"/api/ptf/parallel/{job_id}/stream"
+    return f"/api/jobs/{job_id}/stream"
 
 
 def _normalize(data: dict[str, object]) -> dict[str, object]:

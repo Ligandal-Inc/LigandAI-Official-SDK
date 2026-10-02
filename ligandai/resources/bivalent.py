@@ -650,11 +650,23 @@ def _normalize_session(
     if target1 is not None:
         out.setdefault("target1", _target_dump(target1))
     elif "target1" not in out and "target1_gene" in payload:
-        out["target1"] = {"gene": payload["target1_gene"], "chain": payload.get("target1_chain") or "A"}
+        out["target1"] = (
+            {"gene": payload["target1_gene"], "chain": payload.get("target1_chain") or "A"}
+            if payload["target1_gene"]
+            else None
+        )
     if target2 is not None:
         out.setdefault("target2", _target_dump(target2))
     elif "target2" not in out and "target2_gene" in payload:
-        out["target2"] = {"gene": payload["target2_gene"], "chain": payload.get("target2_chain") or "A"}
+        # ⛔ A session that has not reached its second target answers
+        # `"target2_gene": null` (14 of 14 rows on the dev account). Wrapping the
+        # None in {"gene": None} made BivalentTarget reject it, so ONE such row
+        # failed the whole `list_sessions()`. Absent stays None. [bd-dre-3imtv.4]
+        out["target2"] = (
+            {"gene": payload["target2_gene"], "chain": payload.get("target2_chain") or "A"}
+            if payload["target2_gene"]
+            else None
+        )
     if linker is not None:
         out.setdefault("linker", _linker_dump(linker))
     elif "linker" not in out and "linker_position" in payload:
@@ -663,8 +675,11 @@ def _normalize_session(
             "lengthMin": payload.get("linker_length_min", 0),
             "lengthMax": payload.get("linker_length_max", 0),
         }
-    # Ensure required fields have something
-    out.setdefault("target1", {"gene": "unknown", "chain": "A"})
-    out.setdefault("target2", {"gene": "unknown", "chain": "A"})
-    out.setdefault("linker", {"position": "C", "lengthMin": 8, "lengthMax": 16})
+    # ⛔ These three used to be filled with a gene "unknown" and an 8-16 residue
+    # "C" linker when the server sent none. That is a fabricated answer to "which
+    # target / which linker did this session use" — a list row carries neither,
+    # and the placeholder read as data. Absent is now None. [bd-dre-3imtv.4]
+    out.setdefault("target1", None)
+    out.setdefault("target2", None)
+    out.setdefault("linker", None)
     return out
