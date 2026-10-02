@@ -3149,7 +3149,18 @@ class FoldAnalysis(_LGModel):
 
 
 class ProteinInfo(_LGModel):
-    gene: str
+    """``GET /api/protein-info/{gene}``.
+
+    ⛔ ``gene`` was required under that name only, and the route answers
+    ``geneName`` (``{"geneName": "EGFR", "uniprotId": "P00533", "source":
+    "receptor_database", "proteinName": ..., "tmHelices": 1}``), so
+    ``proteins.info()`` raised ``ValidationError: gene Field required`` on every
+    gene. Measured 2026-10-02 against blue. [bd-dre-3imtv.4]
+    """
+
+    gene: str = Field(validation_alias=AliasChoices("gene", "geneName", "gene_name"))
+    protein_name: str | None = Field(default=None, alias="proteinName")
+    source: str | None = None
     uniprot_id: str | None = Field(default=None, alias="uniprotId")
     sequence: str | None = None
     length: int | None = None
@@ -3167,11 +3178,60 @@ class DisorderProfile(_LGModel):
 
 
 class ReceptorTopology(_LGModel):
+    """``GET /api/receptor-topology/{gene}``.
+
+    ⛔ The typed fields below were authored against a flat shape the route does
+    not send. It answers ``{"success": true, "gene": "EGFR", "uniprotId":
+    "P00533", "has_topology": true, "chain_topologies": {"A": {"extracellular":
+    [[25, 645]], "transmembrane": [[646, 668]], "cytoplasmic": [[669, 1210]],
+    "signal_peptide": []}}}``, so ``topology.extracellular`` was ``None`` for a
+    receptor whose extracellular span the server had just reported — the data
+    was on the object, only under ``chain_topologies``. The flat fields are now
+    derived from it (every chain, each range tagged with its chain; the first
+    signal peptide); ``chain_topologies`` stays readable verbatim. When the
+    server reports ``has_topology: false`` they stay ``None`` — unknown, not
+    empty. Measured 2026-10-02 against blue. [bd-dre-3imtv.4]
+    """
+
     gene: str
     tm_regions: list[ResidueRange] | None = Field(default=None, alias="tmRegions")
     extracellular: list[ResidueRange] | None = None
     intracellular: list[ResidueRange] | None = None
     signal_peptide: ResidueRange | None = Field(default=None, alias="signalPeptide")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_from_chain_topologies(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        topo = data.get("chain_topologies")
+        if not isinstance(topo, dict) or not topo or data.get("has_topology") is False:
+            return data
+        flat_keys = (
+            "tmRegions", "tm_regions", "extracellular", "intracellular",
+            "signalPeptide", "signal_peptide",
+        )
+        if any(k in data for k in flat_keys):
+            return data
+
+        def ranges(*names: str) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for chain, spans in topo.items():
+                if not isinstance(spans, dict):
+                    continue
+                for name in names:
+                    for pair in spans.get(name) or []:
+                        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                            out.append({"chain": str(chain), "start": pair[0], "end": pair[1]})
+            return out
+
+        derived = dict(data)
+        derived["tm_regions"] = ranges("transmembrane")
+        derived["extracellular"] = ranges("extracellular")
+        derived["intracellular"] = ranges("cytoplasmic", "intracellular")
+        signal = ranges("signal_peptide")
+        derived["signal_peptide"] = signal[0] if signal else None
+        return derived
 
 
 class ReceptorIntelligence(_LGModel):

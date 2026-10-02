@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence as _Sequence
 from typing import Any, Literal
 
+from ligandai.errors import LigandAIError, LigandAINotFoundError, LigandAIUnreadableResponse
 from ligandai.resources._base import AsyncResource, Resource
 from ligandai.types import (
     AdaptyvExperiment,
@@ -23,6 +24,120 @@ from ligandai.types import (
     SynthesisQuote,
     SynthesisRecommendation,
 )
+
+# ── The synthesis-checkout surface is a stub on the platform ────────────────
+#
+# ⛔ Measured 2026-10-02 against production blue (bd-dre-3imtv.4). Of the
+# ``/api/synthesis-checkout/*`` routes this module calls, the server mounts
+# SEVEN, all answering ONE canned body (server/sdk-alias-routes.ts
+# ``synthesisStub``) and nothing else:
+#
+#     {"status": "coming_soon", "message": "API synthesis requests coming soon...",
+#      "platform_url": ..., "pricing_url": ..., "tier": ..., "can_synthesize_via_ui": ...}
+#
+# ``options`` was written to tolerate that (every field optional, ``status``
+# readable). The other six validated the stub into models that REQUIRE a cart id,
+# a quote or an order — ``ValidationError: cartId Field required`` for
+# ``get_cart()``, and for ``list_orders()`` a stub read as ``payload.get("orders",
+# [])`` returned ``[]``: "you have no orders", from a route that does not exist
+# yet. Four more methods call routes the server does not have at all
+# (``recommend-linker``, ``binding-orientation``, ``mask-guidance``,
+# ``linker-options`` — the last lives at ``/api/synthesis/linker-options``), which
+# read as a bare 404 "Not found" indistinguishable from "that record is missing".
+
+
+class LigandAISynthesisUnavailable(LigandAIError):
+    """The platform has not shipped the synthesis-checkout API call you made.
+
+    Raised instead of a ``ValidationError`` (the stub body validated into a
+    model that needs real fields), an empty list (a stub read as "no orders"),
+    or a bare 404. It is NOT "no results" and NOT "you are not allowed".
+
+    Attributes
+    ----------
+    platform_url : str | None
+        Where the same action is available today (the web synthesis page).
+    pricing_url : str | None
+    can_synthesize_via_ui : bool | None
+        Whether this account may place orders on the platform website.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        platform_url: str | None = None,
+        pricing_url: str | None = None,
+        can_synthesize_via_ui: bool | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.platform_url = platform_url
+        self.pricing_url = pricing_url
+        self.can_synthesize_via_ui = can_synthesize_via_ui
+
+
+def _refuse_coming_soon(payload: Any, what: str) -> Any:
+    """Pass a real body through; refuse the platform's ``coming_soon`` stub."""
+    if isinstance(payload, dict) and payload.get("status") == "coming_soon":
+        where = payload.get("platform_url") or "https://ligandai.com/synthesis"
+        raise LigandAISynthesisUnavailable(
+            f"{what}: API synthesis requests are not available yet "
+            f"({payload.get('message') or 'coming soon'}) Place orders at {where}.",
+            platform_url=payload.get("platform_url"),
+            pricing_url=payload.get("pricing_url"),
+            can_synthesize_via_ui=payload.get("can_synthesize_via_ui"),
+            response=payload,
+        )
+    return payload
+
+
+def _unavailable_if_route_missing(exc: LigandAINotFoundError, what: str) -> LigandAIError:
+    """A 404 from the Express catch-all (``{"error": "Not found", "path": ...}``)
+    means the ROUTE is not deployed; a 404 from a handler names a missing record.
+    Only the first becomes :class:`LigandAISynthesisUnavailable`."""
+    body = getattr(exc, "response", None)
+    if isinstance(body, dict) and "path" in body and body.get("error") == "Not found":
+        return LigandAISynthesisUnavailable(
+            f"{what}: this server has no such endpoint (404 Not found at "
+            f"{body.get('path')!r}). The platform has not shipped it; this is not a "
+            f"missing record.",
+            response=body,
+        )
+    return exc
+
+
+def _linker_rows(payload: Any) -> list[Any]:
+    """``GET /api/synthesis/linker-options`` -> ``{"linkers": [...]}``."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("linkers"), list):
+        return payload["linkers"]
+    raise LigandAIUnreadableResponse(
+        "GET /api/synthesis/linker-options returned a body without a 'linkers' list. "
+        "That is NOT \"no linkers\".",
+        cause="unrecognised_envelope",
+        response=payload if isinstance(payload, dict) else None,
+    )
+
+
+def _target_rows(payload: Any) -> list[Any]:
+    """``GET /api/adaptyv/targets`` proxies the Adaptyv catalogue. Accept a bare
+    list or an envelope under any key Adaptyv has used; refuse anything else so a
+    wrong key is not reported as "no matching targets"."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("targets", "items", "results", "data"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+    raise LigandAIUnreadableResponse(
+        "GET /api/adaptyv/targets returned a body carrying none of "
+        "targets/items/results/data. That is NOT \"no matching targets\".",
+        cause="unrecognised_envelope",
+        response=payload if isinstance(payload, dict) else None,
+    )
+
 
 # ── Adaptyv experiment body construction ────────────────────────────────────
 #
@@ -291,7 +406,10 @@ class Synthesis(Resource):
         if session_id is not None:
             body["sessionId"] = session_id
         return SynthesisQuote.model_validate(
-            self._transport.request("POST", "/api/synthesis-checkout/estimate", json=body)
+            _refuse_coming_soon(
+                self._transport.request("POST", "/api/synthesis-checkout/estimate", json=body),
+                "POST /api/synthesis-checkout/estimate",
+            )
             or {"totalUsd": 0.0, "lineItems": []}
         )
 
@@ -314,7 +432,10 @@ class Synthesis(Resource):
         if gene is not None:
             body["gene"] = gene
         return SynthesisRecommendation.model_validate(
-            self._transport.request("POST", "/api/synthesis-checkout/recommend", json=body)
+            _refuse_coming_soon(
+                self._transport.request("POST", "/api/synthesis-checkout/recommend", json=body),
+                "POST /api/synthesis-checkout/recommend",
+            )
             or {"intent": intent, "synthesisMode": synthesis_mode, "recommendations": []}
         )
 
@@ -340,23 +461,35 @@ class Synthesis(Resource):
         if peptide_sequences is not None:
             body["peptideSequences"] = peptide_sequences
         return SynthesisCart.model_validate(
-            self._transport.request("POST", "/api/synthesis-checkout/cart", json=body)
+            _refuse_coming_soon(
+                self._transport.request("POST", "/api/synthesis-checkout/cart", json=body),
+                "POST /api/synthesis-checkout/cart",
+            )
             or {"cartId": ""}
         )
 
     def get_cart(self) -> SynthesisCart:
         return SynthesisCart.model_validate(
-            self._transport.request("GET", "/api/synthesis-checkout/cart") or {"cartId": ""}
+            _refuse_coming_soon(
+                self._transport.request("GET", "/api/synthesis-checkout/cart"),
+                "GET /api/synthesis-checkout/cart",
+            ) or {"cartId": ""}
         )
 
     def list_orders(self) -> list[SynthesisOrder]:
-        payload = self._transport.request("GET", "/api/synthesis-checkout/orders") or []
+        payload = _refuse_coming_soon(
+                self._transport.request("GET", "/api/synthesis-checkout/orders"),
+                "GET /api/synthesis-checkout/orders",
+            ) or []
         items = payload if isinstance(payload, list) else payload.get("orders", [])
         return [SynthesisOrder.model_validate(o) for o in items]
 
     def get_order(self, order_id: str) -> SynthesisOrder:
         return SynthesisOrder.model_validate(
-            self._transport.request("GET", f"/api/synthesis-checkout/orders/{order_id}")
+            _refuse_coming_soon(
+                self._transport.request("GET", f"/api/synthesis-checkout/orders/{order_id}"),
+                f"GET /api/synthesis-checkout/orders/{order_id}",
+            )
             or {"id": order_id, "status": "unknown"}
         )
 
@@ -399,9 +532,9 @@ class Synthesis(Resource):
 
     def adaptyv_search_targets(self, query: str, limit: int = 10) -> list[AdaptyvTarget]:
         payload = self._transport.request(
-            "GET", "/api/adaptyv/targets/search", params={"query": query, "limit": limit}
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+            "GET", "/api/adaptyv/targets", params={"search": query, "limit": limit}
+        )
+        items = _target_rows(payload)
         return [AdaptyvTarget.model_validate(t) for t in items]
 
     def adaptyv_create(
@@ -461,8 +594,8 @@ class Synthesis(Resource):
         affinity measurement. The server returns 9 options spanning PEG, Ahx,
         and GS-type spacers at N- or C-terminus.
         """
-        payload = self._transport.request("GET", "/api/synthesis-checkout/linker-options") or []
-        items = payload if isinstance(payload, list) else payload.get("linkers", [])
+        payload = self._transport.request("GET", "/api/synthesis/linker-options")
+        items = _linker_rows(payload)
         return [BiotinLinker.model_validate(item) for item in items]
 
     def recommend_linker(
@@ -494,10 +627,11 @@ class Synthesis(Resource):
             body["gene"] = gene
         if pdb_job_id is not None:
             body["pdbJobId"] = pdb_job_id
-        return LinkerRecommendation.model_validate(
-            self._transport.request("POST", "/api/synthesis-checkout/recommend-linker", json=body)
-            or {}
-        )
+        try:
+            payload = self._transport.request("POST", "/api/synthesis-checkout/recommend-linker", json=body)
+        except LigandAINotFoundError as exc:
+            raise _unavailable_if_route_missing(exc, "POST /api/synthesis-checkout/recommend-linker") from exc
+        return LinkerRecommendation.model_validate(payload or {})
 
     def binding_orientation(
         self,
@@ -523,10 +657,11 @@ class Synthesis(Resource):
         }
         if gene is not None:
             body["gene"] = gene
-        return BindingOrientationResult.model_validate(
-            self._transport.request("POST", "/api/synthesis-checkout/binding-orientation", json=body)
-            or {}
-        )
+        try:
+            payload = self._transport.request("POST", "/api/synthesis-checkout/binding-orientation", json=body)
+        except LigandAINotFoundError as exc:
+            raise _unavailable_if_route_missing(exc, "POST /api/synthesis-checkout/binding-orientation") from exc
+        return BindingOrientationResult.model_validate(payload or {})
 
     def generation_mask_guidance(
         self,
@@ -558,10 +693,11 @@ class Synthesis(Resource):
             "linkerId": linker_id,
             "linkerPosition": linker_position,
         }
-        return GenerationMaskGuidance.model_validate(
-            self._transport.request("POST", "/api/synthesis-checkout/mask-guidance", json=body)
-            or {"maskHint": "none"}
-        )
+        try:
+            payload = self._transport.request("POST", "/api/synthesis-checkout/mask-guidance", json=body)
+        except LigandAINotFoundError as exc:
+            raise _unavailable_if_route_missing(exc, "POST /api/synthesis-checkout/mask-guidance") from exc
+        return GenerationMaskGuidance.model_validate(payload or {"maskHint": "none"})
 
     # -- Cost estimation -------------------------------------------------------
 
@@ -654,7 +790,10 @@ class AsyncSynthesis(AsyncResource):
         if session_id is not None:
             body["sessionId"] = session_id
         return SynthesisQuote.model_validate(
-            await self._transport.request("POST", "/api/synthesis-checkout/estimate", json=body)
+            _refuse_coming_soon(
+                await self._transport.request("POST", "/api/synthesis-checkout/estimate", json=body),
+                "POST /api/synthesis-checkout/estimate",
+            )
             or {"totalUsd": 0.0, "lineItems": []}
         )
 
@@ -677,7 +816,10 @@ class AsyncSynthesis(AsyncResource):
         if gene is not None:
             body["gene"] = gene
         return SynthesisRecommendation.model_validate(
-            await self._transport.request("POST", "/api/synthesis-checkout/recommend", json=body)
+            _refuse_coming_soon(
+                await self._transport.request("POST", "/api/synthesis-checkout/recommend", json=body),
+                "POST /api/synthesis-checkout/recommend",
+            )
             or {"intent": intent, "synthesisMode": synthesis_mode, "recommendations": []}
         )
 
@@ -703,23 +845,35 @@ class AsyncSynthesis(AsyncResource):
         if peptide_sequences is not None:
             body["peptideSequences"] = peptide_sequences
         return SynthesisCart.model_validate(
-            await self._transport.request("POST", "/api/synthesis-checkout/cart", json=body)
+            _refuse_coming_soon(
+                await self._transport.request("POST", "/api/synthesis-checkout/cart", json=body),
+                "POST /api/synthesis-checkout/cart",
+            )
             or {"cartId": ""}
         )
 
     async def get_cart(self) -> SynthesisCart:
         return SynthesisCart.model_validate(
-            await self._transport.request("GET", "/api/synthesis-checkout/cart") or {"cartId": ""}
+            _refuse_coming_soon(
+                await self._transport.request("GET", "/api/synthesis-checkout/cart"),
+                "GET /api/synthesis-checkout/cart",
+            ) or {"cartId": ""}
         )
 
     async def list_orders(self) -> list[SynthesisOrder]:
-        payload = await self._transport.request("GET", "/api/synthesis-checkout/orders") or []
+        payload = _refuse_coming_soon(
+                await self._transport.request("GET", "/api/synthesis-checkout/orders"),
+                "GET /api/synthesis-checkout/orders",
+            ) or []
         items = payload if isinstance(payload, list) else payload.get("orders", [])
         return [SynthesisOrder.model_validate(o) for o in items]
 
     async def get_order(self, order_id: str) -> SynthesisOrder:
         return SynthesisOrder.model_validate(
-            await self._transport.request("GET", f"/api/synthesis-checkout/orders/{order_id}")
+            _refuse_coming_soon(
+                await self._transport.request("GET", f"/api/synthesis-checkout/orders/{order_id}"),
+                f"GET /api/synthesis-checkout/orders/{order_id}",
+            )
             or {"id": order_id, "status": "unknown"}
         )
 
@@ -760,9 +914,9 @@ class AsyncSynthesis(AsyncResource):
 
     async def adaptyv_search_targets(self, query: str, limit: int = 10) -> list[AdaptyvTarget]:
         payload = await self._transport.request(
-            "GET", "/api/adaptyv/targets/search", params={"query": query, "limit": limit}
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+            "GET", "/api/adaptyv/targets", params={"search": query, "limit": limit}
+        )
+        items = _target_rows(payload)
         return [AdaptyvTarget.model_validate(t) for t in items]
 
     async def adaptyv_create(
@@ -813,8 +967,8 @@ class AsyncSynthesis(AsyncResource):
         )
 
     async def linker_options(self) -> list[BiotinLinker]:
-        payload = await self._transport.request("GET", "/api/synthesis-checkout/linker-options") or []
-        items = payload if isinstance(payload, list) else payload.get("linkers", [])
+        payload = await self._transport.request("GET", "/api/synthesis/linker-options")
+        items = _linker_rows(payload)
         return [BiotinLinker.model_validate(item) for item in items]
 
     async def recommend_linker(
@@ -832,10 +986,11 @@ class AsyncSynthesis(AsyncResource):
             body["gene"] = gene
         if pdb_job_id is not None:
             body["pdbJobId"] = pdb_job_id
-        return LinkerRecommendation.model_validate(
-            await self._transport.request("POST", "/api/synthesis-checkout/recommend-linker", json=body)
-            or {}
-        )
+        try:
+            payload = await self._transport.request("POST", "/api/synthesis-checkout/recommend-linker", json=body)
+        except LigandAINotFoundError as exc:
+            raise _unavailable_if_route_missing(exc, "POST /api/synthesis-checkout/recommend-linker") from exc
+        return LinkerRecommendation.model_validate(payload or {})
 
     async def binding_orientation(
         self,
@@ -849,10 +1004,11 @@ class AsyncSynthesis(AsyncResource):
         }
         if gene is not None:
             body["gene"] = gene
-        return BindingOrientationResult.model_validate(
-            await self._transport.request("POST", "/api/synthesis-checkout/binding-orientation", json=body)
-            or {}
-        )
+        try:
+            payload = await self._transport.request("POST", "/api/synthesis-checkout/binding-orientation", json=body)
+        except LigandAINotFoundError as exc:
+            raise _unavailable_if_route_missing(exc, "POST /api/synthesis-checkout/binding-orientation") from exc
+        return BindingOrientationResult.model_validate(payload or {})
 
     async def generation_mask_guidance(
         self,
@@ -863,10 +1019,11 @@ class AsyncSynthesis(AsyncResource):
             "linkerId": linker_id,
             "linkerPosition": linker_position,
         }
-        return GenerationMaskGuidance.model_validate(
-            await self._transport.request("POST", "/api/synthesis-checkout/mask-guidance", json=body)
-            or {"maskHint": "none"}
-        )
+        try:
+            payload = await self._transport.request("POST", "/api/synthesis-checkout/mask-guidance", json=body)
+        except LigandAINotFoundError as exc:
+            raise _unavailable_if_route_missing(exc, "POST /api/synthesis-checkout/mask-guidance") from exc
+        return GenerationMaskGuidance.model_validate(payload or {"maskHint": "none"})
 
     async def estimate_cost(
         self,
