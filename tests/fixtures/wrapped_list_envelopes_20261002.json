@@ -1,0 +1,820 @@
+{
+  "_meta": {
+    "captured": "2026-10-02",
+    "live_row_counts": {
+      "disease_gene_mutations_EGFR": 100,
+      "disease_search_cancer": 47,
+      "episodic_memory_list": 5,
+      "episodic_memory_search": 5,
+      "ptf_parallel_elite": 0,
+      "ptf_peptides_by_pocket_EGFR": 100,
+      "ptf_sessions_by_gene_EGFR": 232,
+      "receptordb_by_gene_EGFR": 33,
+      "receptordb_genes": 2537,
+      "receptordb_oligomeric_states": 255,
+      "receptordb_search_EGFR": 38,
+      "transcriptomics_organ_systems": 13,
+      "transcriptomics_tissues": 83
+    },
+    "note": "Bodies as the server answered them, rows trimmed and free-text redacted; every KEY is verbatim. live_row_counts holds the number of rows the untrimmed body carried, which is what the SDK reported as 0.",
+    "redaction": "Peptide sequences, session/job/user ids and file paths are replaced; long strings truncated and long arrays cut to 3. Every KEY is verbatim, which is what these tests are about.",
+    "server": "production blue (local 127.0.0.1:5050)"
+  },
+  "disease_gene_mutations_EGFR": [
+    {
+      "ablation_appropriate": 1,
+      "alt_allele": "A",
+      "approved_therapies": null,
+      "base_editable": 0,
+      "breakthrough_therapy": 0,
+      "chromosome": "7",
+      "clinical_significance": "Likely_benign",
+      "clinical_trials": null,
+      "clinvar_allele_id": "1183989",
+      "clinvar_id": "1195687",
+      "compensatory_evidence": null,
+      "compensatory_gene": null,
+      "compensatory_mechanism": null,
+      "compensatory_notes": null,
+      "compensatory_outcome": null,
+      "cuttable_only": 1,
+      "dgidb_interactions": null,
+      "disease_db_ids": "MedGen:C3661900",
+      "disease_names": "not_provided",
+      "enhancer_targetable": 1,
+      "ensembl_gene_id": null,
+      "ensembl_transcript_id": null,
+      "entrez_gene_id": "1956",
+      "exon_skippable": 0,
+      "gene": "EGFR",
+      "gene_therapy_trials": null,
+      "gnomad_af": 0.00439,
+      "go_biological_process": null,
+      "go_cellular_component": null,
+      "go_molecular_function": null,
+      "has_approved_therapy": 0,
+      "has_compensatory_target": 0,
+      "hgvs_coding": null,
+      "hgvs_genomic": "NC_000007.14:g.55018796C>A",
+      "hgvs_protein": null,
+      "id": 1032568,
+      "intervention_notes": null,
+      "kegg_pathways": null,
+      "last_updated": "2025-12-12T01:28:47.912279",
+      "molecular_consequence": null,
+      "origin": "1",
+      "orphan_drug_designation": 0,
+      "position": 55018796,
+      "prime_editable": 1,
+      "reactome_pathways": null,
+      "ref_allele": "C",
+      "removal_ok": 1,
+      "repair_category": "prime_edit",
+      "repair_complexity": "moderate",
+      "repair_notes": "Transversion (C>A) requires prime editin...",
+      "requires_gene_addition": 0,
+      "requires_hdr": 0,
+      "review_status": "criteria_provided,_single_submitter",
+      "rs_id": "17335710",
+      "string_interactions": null,
+      "string_network_id": null,
+      "therapy_modality": null,
+      "uniprot_id": null,
+      "variant_type": "single_nucleotide_variant"
+    }
+  ],
+  "disease_search_cancer": {
+    "diseases": [
+      {
+        "age_group": null,
+        "cell_types_matched": "luminal_epithelial_cells,myoepithelial_cells,adipocytes,fibr...",
+        "condition": "Breast cancer, susceptibility to",
+        "disease_biology": "Breast cancer, susceptibility to caused by the gene ATM:\n\nBr...",
+        "enhanced_cell_types": [
+          "luminal_epithelial_cells",
+          "myoepithelial_cells",
+          "adipocytes"
+        ],
+        "enhanced_organ_systems": [
+          "Reproductive",
+          "Circulatory",
+          "Nervous"
+        ],
+        "enhanced_organs": [],
+        "enhanced_tissues": [
+          "breast",
+          "lung",
+          "brain"
+        ],
+        "existing_drugs": null,
+        "gene": "ATM",
+        "id": 418,
+        "inheritance": "AD/AR",
+        "last_updated": "2025-12-12T01:28:04.918966",
+        "organ_systems_matched": "Reproductive,Circulatory,Nervous,Digestive,Other",
+        "organs_matched": "",
+        "organs_unmatched": "",
+        "prevalence": "Global: unknown; USA: unknown; America: unknown; America: un...",
+        "tissues_matched": "breast,lung,brain,liver,bone_marrow"
+      },
+      {
+        "age_group": null,
+        "cell_types_matched": "keratinocytes,melanocytes,fibroblasts,langerhans_cells,merke...",
+        "condition": "Cutaneous telangiectasia and cancer syndrome, familial",
+        "disease_biology": "Cutaneous telangiectasia and cancer syndrome, familial (CTCS...",
+        "enhanced_cell_types": [
+          "keratinocytes",
+          "melanocytes",
+          "fibroblasts"
+        ],
+        "enhanced_organ_systems": [
+          "Integumentary",
+          "Circulatory",
+          "Hematological"
+        ],
+        "enhanced_organs": [],
+        "enhanced_tissues": [
+          "skin",
+          "vascular",
+          "whole_blood"
+        ],
+        "existing_drugs": null,
+        "gene": "ATR",
+        "id": 465,
+        "inheritance": "AD/AR",
+        "last_updated": "2025-12-12T01:28:04.921114",
+        "organ_systems_matched": "Integumentary,Circulatory,Hematological",
+        "organs_matched": "",
+        "organs_unmatched": "",
+        "prevalence": null,
+        "tissues_matched": "skin,vascular,whole_blood"
+      }
+    ],
+    "total": 47
+  },
+  "episodic_memory_list": {
+    "memories": [
+      {
+        "content": "<redacted>",
+        "createdAt": "2026-10-02T18:42:20.703Z",
+        "id": 131037,
+        "importanceScore": 0.6,
+        "title": "Program: EGFR Challenge Lab --...",
+        "type": "program_summary"
+      },
+      {
+        "content": "<redacted>",
+        "createdAt": "2026-10-02T18:41:43.668Z",
+        "id": 131036,
+        "importanceScore": 0.6,
+        "title": "Program: EGFR Challenge Lab --...",
+        "type": "program_summary"
+      }
+    ],
+    "success": true
+  },
+  "episodic_memory_search": {
+    "count": 5,
+    "memories": [
+      {
+        "content": "<redacted>",
+        "createdAt": "2026-10-01T06:11:55.287Z",
+        "entities": {
+          "conformation": null,
+          "deltaG": -9.582153,
+          "genes": [
+            "EGFR"
+          ],
+          "ipsae": 0.80805784,
+          "iptm": 0.9623979,
+          "sequence": "<redacted-sequence>",
+          "sessionId": "session_parallel_REDACTED_0001",
+          "tissues": []
+        },
+        "id": 131012,
+        "importanceScore": 0.92,
+        "sourceConversationId": "<redacted-id>",
+        "tags": [
+          "EGFR",
+          "elite_hit",
+          "fold_result"
+        ],
+        "title": "Elite hit: EGFR -- iPSAE 0.808...",
+        "type": "fold_result"
+      },
+      {
+        "content": "<redacted>",
+        "createdAt": "2026-10-01T06:11:55.286Z",
+        "entities": {
+          "conformation": null,
+          "deltaG": -9.582153,
+          "genes": [
+            "EGFR"
+          ],
+          "ipsae": 0.76618785,
+          "iptm": 0.9673003,
+          "sequence": "<redacted-sequence>",
+          "sessionId": "session_parallel_REDACTED_0001",
+          "tissues": []
+        },
+        "id": 131011,
+        "importanceScore": 0.92,
+        "sourceConversationId": "<redacted-id>",
+        "tags": [
+          "EGFR",
+          "elite_hit",
+          "fold_result"
+        ],
+        "title": "Elite hit: EGFR -- iPSAE 0.766...",
+        "type": "fold_result"
+      }
+    ],
+    "success": true
+  },
+  "ptf_parallel_elite": {
+    "_confidentialMode": false,
+    "eliteHits": [],
+    "sessionId": "session_parallel_REDACTED_0001",
+    "success": true,
+    "threshold": 0.67,
+    "totalEliteHits": 0
+  },
+  "ptf_peptides_by_pocket_EGFR": {
+    "foldedCount": 0,
+    "gene": "EGFR",
+    "results": [
+      {
+        "bindingEnergy": -59.09,
+        "confidence": 0.02,
+        "conformation": null,
+        "createdAt": "2026-10-02T18:14:48.321Z",
+        "deltaG": null,
+        "energyPerResidue": -3.11,
+        "folded": false,
+        "gene": "EGFR",
+        "generationPocketFeatures": {
+          "conformation": "",
+          "conformation_name": "",
+          "contacts": null,
+          "dims_available": [
+            48,
+            56,
+            57
+          ],
+          "excluded_artifacts": [
+            25,
+            26,
+            29
+          ],
+          "feature_source": "generation",
+          "featurizer_version": "v6.5.13",
+          "max_contact_prob": null,
+          "pdb_content_sha256": "88f32c9b33832c5bc63a0f04501aa268d15c07872288d1abd36dc40ee088...",
+          "pocket_cache_key": "0726c3a4b3537701",
+          "pocket_pdb_code": "LOADED",
+          "pocket_residue_count": 98,
+          "pocket_residue_indices": [
+            6,
+            7,
+            8
+          ],
+          "pocket_source": "pocket_extractor",
+          "receptor_chain": "A",
+          "targeted": false
+        },
+        "ipsae": null,
+        "iptm": null,
+        "length": 19,
+        "plddt": null,
+        "predictedKd": null,
+        "ptm": null,
+        "sequence": "<redacted-sequence>",
+        "sessionId": "session_parallel_REDACTED_0001"
+      },
+      {
+        "bindingEnergy": -34.35,
+        "confidence": 0.02,
+        "conformation": null,
+        "createdAt": "2026-10-02T18:14:48.321Z",
+        "deltaG": null,
+        "energyPerResidue": -1.8078947,
+        "folded": false,
+        "gene": "EGFR",
+        "generationPocketFeatures": {
+          "conformation": "",
+          "conformation_name": "",
+          "contacts": null,
+          "dims_available": [
+            48,
+            56,
+            57
+          ],
+          "excluded_artifacts": [
+            25,
+            26,
+            29
+          ],
+          "feature_source": "generation",
+          "featurizer_version": "v6.5.13",
+          "max_contact_prob": null,
+          "pdb_content_sha256": "88f32c9b33832c5bc63a0f04501aa268d15c07872288d1abd36dc40ee088...",
+          "pocket_cache_key": "0726c3a4b3537701",
+          "pocket_pdb_code": "LOADED",
+          "pocket_residue_count": 98,
+          "pocket_residue_indices": [
+            6,
+            7,
+            8
+          ],
+          "pocket_source": "pocket_extractor",
+          "receptor_chain": "A",
+          "targeted": false
+        },
+        "ipsae": null,
+        "iptm": null,
+        "length": 19,
+        "plddt": null,
+        "predictedKd": null,
+        "ptm": null,
+        "sequence": "<redacted-sequence>",
+        "sessionId": "session_parallel_REDACTED_0001"
+      }
+    ],
+    "sessionBreakdown": {
+      "session_parallel_1790964869524_fbc1a237": 4
+    },
+    "sessionsSearched": 3,
+    "success": true,
+    "totalResults": 100
+  },
+  "ptf_sessions_by_gene_EGFR": {
+    "_elapsedMs": 2472,
+    "_source": "db_index",
+    "bestDeltaforgeDg": -19.968157,
+    "bestOverallIpsae": 0.8815638,
+    "gene": "EGFR",
+    "grouped": "<trimmed>",
+    "sessions": [
+      {
+        "bestDeltaforgeDg": null,
+        "bestIpsae": 0,
+        "conformations": [
+          "complex_A+B+C+D"
+        ],
+        "createdAt": "2026-10-02T18:14:29.555Z",
+        "eliteCount": 0,
+        "filePath": "<redacted-id>",
+        "foldedCount": 0,
+        "gene": "EGFR",
+        "parentSessionId": "session_parallel_REDACTED_0001",
+        "peptideCount": 4,
+        "programDbId": 0,
+        "sessionId": "session_parallel_REDACTED_0001",
+        "status": "running",
+        "updatedAt": "2026-10-02T18:14:52.521Z",
+        "variantConfig": {
+          "gene": "EGFR",
+          "hotspotResidues": [],
+          "pocketIndices": [],
+          "pocketResidues": [],
+          "residueNumbering": "pdb",
+          "selectedConformations": [],
+          "siteBoostResidues": [],
+          "targetChains": []
+        },
+        "variantKey": "full_protein",
+        "variantLabel": "Full protein"
+      },
+      {
+        "bestDeltaforgeDg": null,
+        "bestIpsae": 0,
+        "conformations": [
+          "complex_A+B+C+D"
+        ],
+        "createdAt": "2026-10-02T18:06:04.629Z",
+        "eliteCount": 0,
+        "filePath": "<redacted-id>",
+        "foldedCount": 0,
+        "gene": "EGFR",
+        "parentSessionId": "session_parallel_REDACTED_0001",
+        "peptideCount": 5,
+        "programDbId": 0,
+        "sessionId": "session_parallel_REDACTED_0001",
+        "status": "generation_complete",
+        "updatedAt": "2026-10-02T18:06:44.094Z",
+        "variantConfig": {
+          "gene": "EGFR",
+          "hotspotResidues": [],
+          "pocketIndices": [],
+          "pocketResidues": [],
+          "residueNumbering": "pdb",
+          "selectedConformations": [],
+          "siteBoostResidues": [],
+          "targetChains": []
+        },
+        "variantKey": "full_protein",
+        "variantLabel": "Full protein"
+      }
+    ],
+    "success": true,
+    "totalElites": 106,
+    "totalFolded": 486,
+    "totalPeptides": 882368,
+    "totalSessions": 232,
+    "variants": "<trimmed>"
+  },
+  "receptordb_by_gene_EGFR": {
+    "complexes": [
+      {
+        "complexId": "AGER_EGFR_heterodimer",
+        "geneSymbols": [
+          "AGER",
+          "EGFR"
+        ],
+        "ipsae": 0,
+        "ipsaeMetricKind": "complex_interface",
+        "iptm": 0.15032395720481873,
+        "isMultimer": true,
+        "method": "Boltz-2",
+        "oligomericState": "heterodimer",
+        "plddt": 0.8273819056562722,
+        "source": "boltz2",
+        "tier": 2
+      },
+      {
+        "complexId": "AXL_EGFR_heterodimer",
+        "geneSymbols": [
+          "AXL",
+          "EGFR"
+        ],
+        "ipsae": 0,
+        "ipsaeMetricKind": "complex_interface",
+        "iptm": 0.14111721515655518,
+        "isMultimer": true,
+        "method": "Boltz-2",
+        "oligomericState": "heterodimer",
+        "plddt": 0.8240215935084733,
+        "source": "boltz2",
+        "tier": 2
+      }
+    ],
+    "gene": "EGFR",
+    "ipsaeMetric": {
+      "description": "Inter-chain interface confidence of the reference cofolded r...",
+      "label": "Cofolded receptor-complex iPSAE",
+      "metricKind": "complex_interface"
+    }
+  },
+  "receptordb_genes": {
+    "genes": [
+      "ABCA1",
+      "ABCA12",
+      "ABCA3"
+    ],
+    "total": 2537
+  },
+  "receptordb_oligomeric_states": [
+    {
+      "count": 1364,
+      "state": "homodimer"
+    },
+    {
+      "count": 865,
+      "state": "heterodimer"
+    },
+    {
+      "count": 112,
+      "state": "heteromeric"
+    }
+  ],
+  "receptordb_search_EGFR": {
+    "complexes": [
+      {
+        "affinity_pred_value": null,
+        "alphaFoldUniProtIds": [
+          "P15514",
+          "P00533"
+        ],
+        "annotations": {
+          "bindingSites": [
+            {
+              "end": 726,
+              "gene": "EGFR",
+              "ligand": "ATP",
+              "start": 718
+            },
+            {
+              "end": 745,
+              "gene": "EGFR",
+              "ligand": "ATP",
+              "start": 745
+            },
+            {
+              "end": 791,
+              "gene": "EGFR",
+              "ligand": "ATP",
+              "start": 790
+            }
+          ],
+          "drugBankIds": [
+            {
+              "drugBankId": "DB15327",
+              "gene": "EGFR"
+            },
+            {
+              "drugBankId": "DB08916",
+              "gene": "EGFR"
+            },
+            {
+              "drugBankId": "DB03496",
+              "gene": "EGFR"
+            }
+          ],
+          "glycosylationSites": [
+            {
+              "gene": "AREG",
+              "note": "N-linked (GlcNAc...) asparagine",
+              "position": 30,
+              "type": "N-linked"
+            },
+            {
+              "gene": "AREG",
+              "note": "N-linked (GlcNAc...) asparagine",
+              "position": 113,
+              "type": "N-linked"
+            },
+            {
+              "gene": "AREG",
+              "note": "N-linked (GlcNAc...) asparagine",
+              "position": 119,
+              "type": "N-linked"
+            }
+          ],
+          "isKnownDrugTarget": true
+        },
+        "bestResolution": 2.605,
+        "bestResolutionPdbId": "1YY9",
+        "canUseECOnly": true,
+        "chains": [
+          {
+            "chainLetter": "A",
+            "ecRange": {
+              "end": 198,
+              "start": 25
+            },
+            "fullRange": {
+              "end": 252,
+              "start": 25
+            },
+            "gene": "AREG",
+            "stoichCopy": 1,
+            "uniprotId": "P15514"
+          },
+          {
+            "chainLetter": "B",
+            "ecRange": {
+              "end": 645,
+              "start": 25
+            },
+            "fullRange": {
+              "end": 1210,
+              "start": 25
+            },
+            "gene": "EGFR",
+            "stoichCopy": 1,
+            "uniprotId": "P00533"
+          }
+        ],
+        "complexId": "AREG_EGFR_ligand-receptor",
+        "complexName": "AREG-EGFR complex",
+        "complexType": "inferred",
+        "confidence": "high",
+        "evidenceSource": "AREG is EGFR ligand, interacts_with contains EGFR",
+        "experimentalPdbIds": [
+          "1NQL",
+          "4RIX",
+          "7LFS"
+        ],
+        "genes": [
+          "AREG",
+          "EGFR"
+        ],
+        "glycosylationSites": [],
+        "hasAlphaFoldAvailable": true,
+        "hasExperimentalPDB": true,
+        "hasExtracellularLigand": true,
+        "hasGeneratedStructure": true,
+        "ipsae": 0.7759149081493715,
+        "ipsaeMetricKind": "complex_interface",
+        "iptm": 0.7965587973594666,
+        "oligomericState": "ligand-receptor",
+        "pdbIds": [
+          "1NQL",
+          "4RIX",
+          "7LFS"
+        ],
+        "pdbRankScore": 11000,
+        "plddt": 0.7220056682825089,
+        "preferredStructureSource": "pdb_high_priority",
+        "ptm": 0.7903575301170349,
+        "receptorClass": "single_pass",
+        "requiresFullChain": false,
+        "stoichiometry": "ligand-receptor",
+        "structureFile": "AREG_EGFR_ligand-receptor.pdb",
+        "structureSource": "boltz2"
+      },
+      {
+        "affinity_pred_value": null,
+        "alphaFoldUniProtIds": [
+          "P16070",
+          "P00533"
+        ],
+        "annotations": {
+          "bindingSites": [
+            {
+              "end": 41,
+              "gene": "CD44",
+              "ligand": "hyaluronan",
+              "start": 41
+            },
+            {
+              "end": 78,
+              "gene": "CD44",
+              "ligand": "hyaluronan",
+              "start": 78
+            },
+            {
+              "end": 79,
+              "gene": "CD44",
+              "ligand": "hyaluronan",
+              "start": 79
+            }
+          ],
+          "drugBankIds": [
+            {
+              "drugBankId": "DB06550",
+              "gene": "CD44"
+            },
+            {
+              "drugBankId": "DB08818",
+              "gene": "CD44"
+            },
+            {
+              "drugBankId": "DB15327",
+              "gene": "EGFR"
+            }
+          ],
+          "glycosylationSites": [
+            {
+              "gene": "CD44",
+              "note": "N-linked (GlcNAc...) asparagine",
+              "position": 25,
+              "type": "N-linked"
+            },
+            {
+              "gene": "CD44",
+              "note": "N-linked (GlcNAc...) asparagine",
+              "position": 57,
+              "type": "N-linked"
+            },
+            {
+              "gene": "CD44",
+              "note": "N-linked (GlcNAc...) asparagine",
+              "position": 100,
+              "type": "N-linked"
+            }
+          ],
+          "isKnownDrugTarget": true
+        },
+        "bestResolution": 1.083,
+        "bestResolutionPdbId": "4PZ3",
+        "canUseECOnly": true,
+        "chains": [
+          {
+            "chainLetter": "A",
+            "ecRange": {
+              "end": 649,
+              "start": 21
+            },
+            "fullRange": {
+              "end": 742,
+              "start": 21
+            },
+            "gene": "CD44",
+            "stoichCopy": 1,
+            "uniprotId": "P16070"
+          },
+          {
+            "chainLetter": "B",
+            "ecRange": {
+              "end": 645,
+              "start": 25
+            },
+            "fullRange": {
+              "end": 1210,
+              "start": 25
+            },
+            "gene": "EGFR",
+            "stoichCopy": 1,
+            "uniprotId": "P00533"
+          }
+        ],
+        "complexId": "CD44_EGFR_heterodimer",
+        "complexName": "CD44-EGFR complex",
+        "complexType": "known",
+        "confidence": "high",
+        "evidenceSource": "UniProt subunit structure",
+        "experimentalPdbIds": [
+          "1UUH",
+          "4PZ3",
+          "4PZ4"
+        ],
+        "genes": [
+          "CD44",
+          "EGFR"
+        ],
+        "glycosylationSites": [],
+        "hasAlphaFoldAvailable": true,
+        "hasExperimentalPDB": true,
+        "hasExtracellularLigand": true,
+        "hasGeneratedStructure": true,
+        "ipsae": 0,
+        "ipsaeMetricKind": "complex_interface",
+        "iptm": 0.19230829179286957,
+        "oligomericState": "heterodimer",
+        "pdbIds": [
+          "1UUH",
+          "4PZ3",
+          "4PZ4"
+        ],
+        "pdbRankScore": 11000,
+        "plddt": 0.5916582784414292,
+        "preferredStructureSource": "pdb_high_priority",
+        "ptm": 0.4305488169193268,
+        "receptorClass": "single_pass",
+        "requiresFullChain": false,
+        "stoichiometry": "heterodimer",
+        "structureFile": "CD44_EGFR_heterodimer.pdb",
+        "structureSource": "boltz2"
+      }
+    ],
+    "ipsaeMetric": {
+      "description": "Inter-chain interface confidence of the reference cofolded r...",
+      "label": "Cofolded receptor-complex iPSAE",
+      "metricKind": "complex_interface"
+    },
+    "matchAll": false,
+    "query": [
+      "EGFR"
+    ],
+    "total": 38
+  },
+  "transcriptomics_organ_systems": {
+    "bothDataSources": 45,
+    "bulkOnlyTissues": 28,
+    "cellSubtypes": {
+      "Hematological": [
+        "<trimmed>"
+      ]
+    },
+    "organSystems": [
+      {
+        "color": "#FF0000",
+        "name": "Hematological",
+        "tissueDisplayNames": [
+          "Whole Blood",
+          "PBMC"
+        ],
+        "tissues": [
+          "whole_blood",
+          "pbmc"
+        ]
+      },
+      {
+        "color": "#FF8000",
+        "name": "Circulatory",
+        "tissueDisplayNames": [
+          "Heart - Left Ventricle",
+          "Heart - Atrial Appendage"
+        ],
+        "tissues": [
+          "heart_left_ventricle",
+          "heart_atrial_appendage"
+        ]
+      }
+    ],
+    "scrnaOnlyTissues": 10,
+    "totalCellTypes": 85,
+    "totalOrganSystems": 13,
+    "totalReceptorGenes": 2683,
+    "totalScrnaTissues": 31,
+    "totalTissues": 84
+  },
+  "transcriptomics_tissues": {
+    "tissues": [
+      "whole_blood",
+      "pbmc",
+      "bone_marrow"
+    ]
+  }
+}

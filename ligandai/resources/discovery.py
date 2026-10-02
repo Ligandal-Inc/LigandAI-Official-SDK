@@ -13,7 +13,7 @@ from ligandai.errors import (
     LigandAILegalAcceptanceRequired,
     resolve_mutation_failure,
 )
-from ligandai.resources._base import AsyncResource, Resource
+from ligandai.resources._base import AsyncResource, Resource, unwrap_rows
 from ligandai.types import (
     BBBReceptor,
     ComparisonResponse,
@@ -101,6 +101,31 @@ def _split_shared_differential(markers: list[Any]) -> tuple[list[str], list[str]
             # SI-method (gtex) markers are specificity-ranked → differential.
             differential.append(gene)
     return shared, differential
+
+
+#: ``GET /api/transcriptomics/organ-systems`` answers
+#: ``{"organSystems": [{"name", "tissues", ...}], "cellSubtypes": {...}, ...}``
+#: — measured against blue 2026-10-02: 13 systems, while this module read
+#: ``systems`` and reported none. [bd-dre-3imtv.3]
+_ORGAN_SYSTEM_KEYS = ("organSystems", "organ_systems", "systems")
+
+
+def _organ_system_names(rows: list) -> list[str]:
+    """System NAMES out of the route's rows.
+
+    The rows are objects (``name``, ``tissues``, ``tissueDisplayNames``,
+    ``color``) and this method is typed ``list[str]`` — the name is what
+    ``organ_system=`` filters take. [bd-dre-3imtv.3]
+    """
+    out: list[str] = []
+    for row in rows:
+        if isinstance(row, str):
+            out.append(row)
+        elif isinstance(row, dict):
+            name = row.get("name", row.get("system", row.get("organSystem")))
+            if isinstance(name, str):
+                out.append(name)
+    return out
 
 
 class Discovery(Resource):
@@ -671,12 +696,20 @@ class Discovery(Resource):
         )
 
     def tissues(self) -> list[str]:
-        payload = self._transport.request("GET", "/api/transcriptomics/tissues") or []
-        return list(payload if isinstance(payload, list) else payload.get("tissues", []))
+        payload = self._transport.request("GET", "/api/transcriptomics/tissues")
+        return list(
+            unwrap_rows(payload, ("tissues",), what="GET /api/transcriptomics/tissues")
+        )
 
     def organ_systems(self) -> list[str]:
-        payload = self._transport.request("GET", "/api/transcriptomics/organ-systems") or []
-        return list(payload if isinstance(payload, list) else payload.get("systems", []))
+        payload = self._transport.request("GET", "/api/transcriptomics/organ-systems")
+        return _organ_system_names(
+            unwrap_rows(
+                payload,
+                _ORGAN_SYSTEM_KEYS,
+                what="GET /api/transcriptomics/organ-systems",
+            )
+        )
 
 
 class AsyncDiscovery(AsyncResource):
@@ -1081,9 +1114,17 @@ class AsyncDiscovery(AsyncResource):
         )
 
     async def tissues(self) -> list[str]:
-        payload = await self._transport.request("GET", "/api/transcriptomics/tissues") or []
-        return list(payload if isinstance(payload, list) else payload.get("tissues", []))
+        payload = await self._transport.request("GET", "/api/transcriptomics/tissues")
+        return list(
+            unwrap_rows(payload, ("tissues",), what="GET /api/transcriptomics/tissues")
+        )
 
     async def organ_systems(self) -> list[str]:
-        payload = await self._transport.request("GET", "/api/transcriptomics/organ-systems") or []
-        return list(payload if isinstance(payload, list) else payload.get("systems", []))
+        payload = await self._transport.request("GET", "/api/transcriptomics/organ-systems")
+        return _organ_system_names(
+            unwrap_rows(
+                payload,
+                _ORGAN_SYSTEM_KEYS,
+                what="GET /api/transcriptomics/organ-systems",
+            )
+        )

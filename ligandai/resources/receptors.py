@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, List
 
-from ligandai.resources._base import AsyncResource, Resource
+from ligandai.resources._base import AsyncResource, Resource, unwrap_rows
 from ligandai.types import (
     ChainClassification,
     FoldQueueStatus,
@@ -15,6 +15,38 @@ from ligandai.types import (
     ReceptorComplex,
     ReceptorListResponse,
 )
+
+#: Envelope keys ``GET /api/receptordb/search`` has been seen to use, live key
+#: first. The route answers ``{query, matchAll, total, complexes: [...]}``
+#: (measured against blue 2026-10-02: 38 rows for ``EGFR``); ``results`` /
+#: ``data`` stay behind it for older servers. [bd-dre-3imtv.3]
+_SEARCH_KEYS = ("complexes", "results", "data")
+
+#: ``GET /api/receptordb/oligomeric-states`` answers a bare list of
+#: ``{"state": ..., "count": ...}`` rows, not of strings. [bd-dre-3imtv.3]
+_STATE_KEYS = ("states", "oligomericStates", "oligomeric_states")
+
+
+def _state_names(rows: list[Any]) -> List[str]:
+    """Oligomeric-state NAMES out of the route's rows.
+
+    ⛔ The route answers ``[{"state": "homodimer", "count": 412}, ...]`` (255
+    rows live), and this method is typed ``List[str]``. It used to hand the raw
+    dicts back, so the declared type was a lie and ``"homodimer" in
+    client.receptors.oligomeric_states()`` was always False — while
+    ``oligomeric_state=`` on :meth:`Receptors.search` takes exactly that
+    string. The count stays reachable through
+    :meth:`Receptors.summary`'s ``byOligomericState``. [bd-dre-3imtv.3]
+    """
+    out: List[str] = []
+    for row in rows:
+        if isinstance(row, str):
+            out.append(row)
+        elif isinstance(row, dict):
+            name = row.get("state", row.get("name", row.get("oligomericState")))
+            if isinstance(name, str):
+                out.append(name)
+    return out
 
 
 class Receptors(Resource):
@@ -63,13 +95,20 @@ class Receptors(Resource):
             ``"mouse"``. Falls back to the client ``default_organism``; coerced to
             ``"human"`` when the key is not entitled (fail-closed).
         :param species: alias for ``organism`` (server-parity). ``organism`` wins.
+        :raises LigandAIUnreadableResponse: the body carries no recognised
+            list of complexes. An unreadable answer is never reported as
+            "no matches" — see :func:`ligandai.resources._base.unwrap_rows`.
         """
         params: dict[str, object] = {"query": query, "limit": limit}
         if oligomeric_state is not None:
             params["oligomeric_state"] = oligomeric_state
         self._stamp_organism(params, organism, species)
-        payload = self._transport.request("GET", "/api/receptordb/search", params=params) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+        payload = self._transport.request("GET", "/api/receptordb/search", params=params)
+        items = unwrap_rows(
+            payload,
+            _SEARCH_KEYS,
+            what=f"GET /api/receptordb/search for {query!r}",
+        )
         return [ReceptorComplex.model_validate(c) for c in items]
 
     def get(self, complex_id: str) -> ReceptorComplex:
@@ -134,8 +173,12 @@ class Receptors(Resource):
         self._stamp_organism(params, organism, species)
         payload = self._transport.request(
             "GET", f"/api/receptordb/by-gene/{gene}", params=params or None
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("complexes", [])
+        )
+        items = unwrap_rows(
+            payload,
+            _SEARCH_KEYS,
+            what=f"GET /api/receptordb/by-gene/{gene}",
+        )
         return [ReceptorComplex.model_validate(c) for c in items]
 
     def chain_classification(self, gene: str) -> ChainClassification:
@@ -180,12 +223,15 @@ class Receptors(Resource):
         return self._transport.request("GET", "/api/receptordb/summary") or {}
 
     def oligomeric_states(self) -> List[str]:
-        payload = self._transport.request("GET", "/api/receptordb/oligomeric-states") or []
-        return list(payload if isinstance(payload, list) else payload.get("states", []))
+        """Oligomeric-state names, as :meth:`search` takes them."""
+        payload = self._transport.request("GET", "/api/receptordb/oligomeric-states")
+        return _state_names(
+            unwrap_rows(payload, _STATE_KEYS, what="GET /api/receptordb/oligomeric-states")
+        )
 
     def genes(self) -> List[str]:
-        payload = self._transport.request("GET", "/api/receptordb/genes") or []
-        return list(payload if isinstance(payload, list) else payload.get("genes", []))
+        payload = self._transport.request("GET", "/api/receptordb/genes")
+        return list(unwrap_rows(payload, ("genes",), what="GET /api/receptordb/genes"))
 
 
 class AsyncReceptors(AsyncResource):
@@ -216,13 +262,20 @@ class AsyncReceptors(AsyncResource):
         """Async ReceptorDB search. ``organism`` (``"human"`` default /
         ``"mouse"``) selects the namespace, fail-closed to human when not
         entitled; ``species`` is an alias.
+
+        :raises LigandAIUnreadableResponse: the body carries no recognised
+            list of complexes — never reported as "no matches".
         """
         params: dict[str, object] = {"query": query, "limit": limit}
         if oligomeric_state is not None:
             params["oligomeric_state"] = oligomeric_state
         self._stamp_organism(params, organism, species)
-        payload = await self._transport.request("GET", "/api/receptordb/search", params=params) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+        payload = await self._transport.request("GET", "/api/receptordb/search", params=params)
+        items = unwrap_rows(
+            payload,
+            _SEARCH_KEYS,
+            what=f"GET /api/receptordb/search for {query!r}",
+        )
         return [ReceptorComplex.model_validate(c) for c in items]
 
     async def get(self, complex_id: str) -> ReceptorComplex:
@@ -287,8 +340,12 @@ class AsyncReceptors(AsyncResource):
         self._stamp_organism(params, organism, species)
         payload = await self._transport.request(
             "GET", f"/api/receptordb/by-gene/{gene}", params=params or None
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("complexes", [])
+        )
+        items = unwrap_rows(
+            payload,
+            _SEARCH_KEYS,
+            what=f"GET /api/receptordb/by-gene/{gene}",
+        )
         return [ReceptorComplex.model_validate(c) for c in items]
 
     async def chain_classification(self, gene: str) -> ChainClassification:
@@ -331,12 +388,15 @@ class AsyncReceptors(AsyncResource):
         return await self._transport.request("GET", "/api/receptordb/summary") or {}
 
     async def oligomeric_states(self) -> List[str]:
-        payload = await self._transport.request("GET", "/api/receptordb/oligomeric-states") or []
-        return list(payload if isinstance(payload, list) else payload.get("states", []))
+        """Oligomeric-state names, as :meth:`AsyncReceptors.search` takes them."""
+        payload = await self._transport.request("GET", "/api/receptordb/oligomeric-states")
+        return _state_names(
+            unwrap_rows(payload, _STATE_KEYS, what="GET /api/receptordb/oligomeric-states")
+        )
 
     async def genes(self) -> List[str]:
-        payload = await self._transport.request("GET", "/api/receptordb/genes") or []
-        return list(payload if isinstance(payload, list) else payload.get("genes", []))
+        payload = await self._transport.request("GET", "/api/receptordb/genes")
+        return list(unwrap_rows(payload, ("genes",), what="GET /api/receptordb/genes"))
 
 
 def _normalize_list(payload: dict[str, Any], offset: int, limit: int) -> dict[str, Any]:

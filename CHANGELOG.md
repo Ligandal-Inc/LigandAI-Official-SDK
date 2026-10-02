@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-10-02
+
+Eight list-returning methods answered `[]` — or raised — against a server that
+held the rows. Found by running 0.16.1 live against production (2026-10-02,
+`bd-dre-3imtv.3`); the npm SDK shipped the same fix for the same route in
+`32f3afc`. Every body replayed in
+`tests/unit/test_wrapped_list_envelopes_3imtv3.py` came off that server, from
+`tests/fixtures/wrapped_list_envelopes_20261002.json`.
+
+Each of these methods read its rows out of a wrapped body under a key **guessed
+at authoring time**. Where the guess was wrong, the method reported a clean,
+plausible measurement of zero that no caller could tell from "the server holds
+nothing".
+
+### Fixed
+
+- **`receptors.search("EGFR")` returned `[]` against 38 EGFR complexes.** The
+  route answers `{"query", "matchAll", "total", "complexes": [...]}`; the client
+  read only `results`. `complexes` is read first, `results` / `data` stay for
+  older servers, and a body carrying none of them now raises
+  `LigandAIUnreadableResponse` instead of reporting zero hits. Same fix on
+  `AsyncReceptors.search` and on `by_gene`.
+- **`diseases.search("cancer")` returned `[]` against 47 rows** — the route
+  answers `{"diseases": [...], "total": n}`.
+- **`memory.search()` and `memory.list()` returned `[]`** for a user with
+  memories: both routes answer `{"success": true, "memories": [...]}`, read as
+  `results` / `items`.
+- **`discovery.organ_systems()` returned `[]` against 13 systems** — the route
+  answers `{"organSystems": [{"name", "tissues", ...}], ...}`, read as
+  `systems`. It returns the system **names**, which is what its `list[str]`
+  signature promises and what `organ_system=` filters take.
+- **`peptides.search_by_pocket()` returned `[]` against 100 prior designs** —
+  the route answers `{..., "results": [...]}`, read as `peptides`.
+- **`peptides.get_elite(gene=...)` raised `No active session` for every gene,**
+  including genes with hundreds. `GET /api/ptf/sessions/by-gene/{gene}` answers
+  `{"success", "gene", "totalSessions", "sessions": [...]}` and the client read
+  a top-level `id` that body has never had. The session id now comes from the
+  rows (`sessionId` / `session_id` / `id`), and the elite route's own
+  `eliteHits` envelope is read (it was read as `peptides`).
+- **`receptors.oligomeric_states()` handed back raw `{"state", "count"}` dicts**
+  from a method typed `List[str]`, so `"homodimer" in
+  client.receptors.oligomeric_states()` was always `False` while
+  `search(oligomeric_state="homodimer")` wanted exactly that string. It returns
+  the state names; the counts remain in `summary()["byOligomericState"]`.
+- **`diseases.gene_mutations("EGFR")` raised `ValidationError` on row 1 of 100.**
+  `Mutation.variant` was required and the live ClinVar rows do not carry it
+  (they key `hgvs_genomic` / `hgvs_coding` / `hgvs_protein` / `rs_id` /
+  `variant_type`). `variant` is optional, `consequence` also reads
+  `molecular_consequence`, and the HGVS fields stay reachable as model extras.
+  `Disease.name` likewise reads the server's `condition` and is optional (the
+  rows have no `name`), and `MemoryItem.memory_type` accepts the rows' `type`
+  alongside `memoryType` — `save()` still sends `memoryType`.
+
+### Added
+
+- `ligandai.resources._base.unwrap_rows()` — one implementation of
+  "rows out of a list-or-envelope body", used by every method above. Keys are
+  tried in order, the live key first; a body carrying none of them raises
+  `LigandAIUnreadableResponse(cause="unrecognised_envelope")` carrying the
+  body, because "I could not read the answer" must never be spelled the same
+  way as "there were no rows". An honest `[]` under a recognised key is still
+  an honest `[]`.
+
 ## [0.16.1] - 2026-10-02
 
 Three defects in `client.ensemble` / `Job.wait()` found by running the hosted

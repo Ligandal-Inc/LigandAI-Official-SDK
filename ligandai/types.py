@@ -3390,17 +3390,48 @@ class UserProtein(_LGModel):
 
 
 class Disease(_LGModel):
+    """A DiseaseViewer row.
+
+    ⛔ ``name`` and ``variant``-style required fields were authored against a
+    GUESSED row shape. Measured live 2026-10-02:
+    ``GET /api/disease-viewer/search`` rows carry ``condition`` (the human
+    name), ``gene``, ``inheritance``, ``age_group`` and the organ/tissue match
+    sets — and no ``name`` at all, so validating one raised
+    ``ValidationError`` the moment the envelope fix let real rows through.
+    ``name`` therefore reads ``condition`` as well, and is optional.
+    Every unmodelled field is still reachable: this base allows extras.
+    [bd-dre-3imtv.3]
+    """
+
     id: int
-    name: str
+    name: str | None = Field(
+        default=None, validation_alias=AliasChoices("name", "condition")
+    )
+    gene: str | None = None
     category: str | None = None
     summary: str | None = None
     gene_count: int | None = Field(default=None, alias="geneCount")
 
 
 class Mutation(_LGModel):
+    """A ClinVar-derived mutation row.
+
+    ⛔ ``variant`` was required and the live rows do not have it: measured
+    2026-10-02, ``GET /api/disease-viewer/gene-mutations/EGFR`` answers rows
+    keyed ``hgvs_genomic`` / ``hgvs_coding`` / ``hgvs_protein`` / ``rs_id`` /
+    ``variant_type``, so ``diseases.gene_mutations()`` raised
+    ``ValidationError`` on row 1 of 100 — the method was unusable, not merely
+    lossy. It is optional now, and the HGVS/rsID fields stay readable as
+    extras. ``consequence`` also accepts the server's
+    ``molecular_consequence``. [bd-dre-3imtv.3]
+    """
+
     gene: str
-    variant: str
-    consequence: str | None = None
+    variant: str | None = None
+    consequence: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("consequence", "molecular_consequence"),
+    )
     pathogenic: bool | None = None
     disease_id: int | None = Field(default=None, alias="diseaseId")
 
@@ -3684,10 +3715,22 @@ class AdaptyvTarget(_LGModel):
 
 
 class MemoryItem(_LGModel):
+    """One episodic-memory row.
+
+    ⛔ ``memory_type`` read ONLY ``memoryType``; the live rows
+    (``/api/episodic-memory/search`` and ``/list``, measured 2026-10-02) key it
+    ``type``, so a real row failed validation as soon as the envelope fix
+    delivered one. ``memoryType`` is still accepted, and still used on the way
+    out (``save()`` sends it). [bd-dre-3imtv.3]
+    """
+
     id: str | int
     title: str | None = None
     content: str
-    memory_type: str = Field(alias="memoryType")
+    memory_type: str = Field(
+        alias="memoryType",
+        validation_alias=AliasChoices("memoryType", "memory_type", "type"),
+    )
     tags: list[str] | None = None
     created_at: datetime | None = Field(default=None, alias="createdAt")
     relevance: float | None = None

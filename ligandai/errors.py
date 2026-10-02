@@ -335,6 +335,13 @@ class LigandAIUnreadableResponse(LigandAIError):
             in transit.
         ``"empty_body"``
             Zero-length body where a JSON document was required.
+        ``"unrecognised_envelope"``
+            A readable JSON body that does not carry the list the caller asked
+            for under ANY key this SDK knows — e.g. ``GET
+            /api/receptordb/search`` answering ``{"complexes": [...]}`` to a
+            client that only reads ``{"results": [...]}``. Raised by
+            :func:`ligandai.resources._base.unwrap_rows` so a wrong envelope
+            key can never be reported as "no matches". [bd-dre-3imtv.3]
     method : str | None
         HTTP method attempted.
     url : str | None

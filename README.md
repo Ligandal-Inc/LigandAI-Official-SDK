@@ -24,8 +24,20 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.1** — fixes `client.ensemble` against the hosted co-fold route:
-> `ensemble.run()` now collects its co-folds (0.16.0 called a `Job.result()` that
+> **v0.16.2** — eight list-returning methods answered `[]` against a server that
+> held the rows, because each read its rows under a key the route does not send.
+> `receptors.search("EGFR")` now returns the 38 complexes the server has (it read
+> `results`; the route sends `complexes`), and the same fix lands on
+> `diseases.search`, `memory.search` / `memory.list`, `discovery.organ_systems`,
+> `peptides.search_by_pocket` and `peptides.get_elite` (which raised
+> `No active session` for every gene). A body carrying no recognised list now
+> raises `LigandAIUnreadableResponse` — "I could not read the answer" is never
+> spelled the same way as "there were no rows". `receptors.oligomeric_states()`
+> returns state names, as its type says, and `diseases.gene_mutations()` no longer
+> raises on real ClinVar rows.
+>
+> 0.16.1 fixed `client.ensemble` against the hosted co-fold route:
+> `ensemble.run()` collects its co-folds (0.16.0 called a `Job.result()` that
 > does not exist, so every peptide landed in `failures` after its job was submitted);
 > `Job.wait()` rides out the route's intermittent 404 "job not found"
 > (`not_found_grace`, default 600 s) and reads the co-fold state `done` as finished;

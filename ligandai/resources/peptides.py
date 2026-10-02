@@ -58,7 +58,7 @@ from ligandai.errors import (
     LigandAIWaitTimeout,
 )
 from ligandai.jobs import AsyncJob, Job
-from ligandai.resources._base import AsyncResource, Resource
+from ligandai.resources._base import AsyncResource, Resource, unwrap_rows
 from ligandai.types import (
     CostEstimate,
     DeltaForgeScore,
@@ -4073,6 +4073,49 @@ async def _aload_generation_result(
 # -- Sync resource ----------------------------------------------------------
 
 
+#: ``GET /api/ptf/peptides/by-pocket`` answers
+#: ``{"success", "gene", "totalResults", "sessionBreakdown", "results": [...]}``
+#: and ``GET /api/ptf/parallel/{sid}/elite`` answers
+#: ``{"success", "sessionId", "threshold", "totalEliteHits", "eliteHits": [...]}``
+#: — measured against blue 2026-10-02. Both were read under ``peptides``, a key
+#: neither route has ever sent, so both methods reported zero prior designs for
+#: a gene that had them. [bd-dre-3imtv.3]
+_BY_POCKET_KEYS = ("results", "peptides", "data")
+_ELITE_KEYS = ("eliteHits", "elite_hits", "peptides", "results")
+
+#: ``GET /api/ptf/sessions/by-gene/{gene}`` rows key the session id
+#: ``sessionId``; ``session_id`` is what ``/api/ptf/sessions`` sends.
+_SESSION_ID_KEYS = ("sessionId", "session_id", "id")
+
+
+def _session_id_for_gene(payload: object, gene: str | None) -> str | None:
+    """Newest session id out of ``/api/ptf/sessions/by-gene/{gene}``.
+
+    ⛔ This used to be ``payload.get("id")`` against a body that has no ``id``
+    at the top level — it carries ``{"success", "gene", "totalSessions",
+    "sessions": [...]}`` (232 sessions for EGFR, measured 2026-10-02). So
+    ``get_elite(gene=...)`` raised "No active session" for every gene on the
+    platform, including ones with hundreds. [bd-dre-3imtv.3]
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in _SESSION_ID_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    rows = payload.get("sessions")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, str) and row:
+                return row
+            if isinstance(row, dict):
+                for key in _SESSION_ID_KEYS:
+                    value = row.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+    return None
+
+
 class Peptides(Resource):
     """Generation, folding, scoring, and search."""
 
@@ -6660,8 +6703,14 @@ class Peptides(Resource):
             params["start_residue"] = start_residue
         if end_residue is not None:
             params["end_residue"] = end_residue
-        payload = self._transport.request("GET", "/api/ptf/peptides/by-pocket", params=params) or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+        payload = self._transport.request(
+            "GET", "/api/ptf/peptides/by-pocket", params=params
+        )
+        items = unwrap_rows(
+            payload,
+            _BY_POCKET_KEYS,
+            what=f"GET /api/ptf/peptides/by-pocket for {gene!r}",
+        )
         return [Peptide.model_validate(p) for p in items]
 
     def get_elite(
@@ -6673,12 +6722,20 @@ class Peptides(Resource):
         if not session_id and not gene:
             raise ValueError("Pass session_id= or gene=")
         if not session_id:
-            from_session = self._transport.request("GET", f"/api/ptf/sessions/by-gene/{gene}") or {}
-            session_id = from_session.get("id")
+            from_session = self._transport.request(
+                "GET", f"/api/ptf/sessions/by-gene/{gene}"
+            )
+            session_id = _session_id_for_gene(from_session, gene)
             if not session_id:
                 raise LigandAIError(f"No active session for gene {gene!r}")
-        payload = self._transport.request("GET", f"/api/ptf/parallel/{session_id}/elite") or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+        payload = self._transport.request(
+            "GET", f"/api/ptf/parallel/{session_id}/elite"
+        )
+        items = unwrap_rows(
+            payload,
+            _ELITE_KEYS,
+            what=f"GET /api/ptf/parallel/{session_id}/elite",
+        )
         return [Peptide.model_validate(p) for p in items]
 
     # ------------------------------------------------------------------
@@ -8889,8 +8946,14 @@ class AsyncPeptides(AsyncResource):
             params["start_residue"] = start_residue
         if end_residue is not None:
             params["end_residue"] = end_residue
-        payload = await self._transport.request("GET", "/api/ptf/peptides/by-pocket", params=params) or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+        payload = await self._transport.request(
+            "GET", "/api/ptf/peptides/by-pocket", params=params
+        )
+        items = unwrap_rows(
+            payload,
+            _BY_POCKET_KEYS,
+            what=f"GET /api/ptf/peptides/by-pocket for {gene!r}",
+        )
         return [Peptide.model_validate(p) for p in items]
 
     async def get_elite(
@@ -8901,12 +8964,20 @@ class AsyncPeptides(AsyncResource):
         if not session_id and not gene:
             raise ValueError("Pass session_id= or gene=")
         if not session_id:
-            from_session = await self._transport.request("GET", f"/api/ptf/sessions/by-gene/{gene}") or {}
-            session_id = from_session.get("id")
+            from_session = await self._transport.request(
+                "GET", f"/api/ptf/sessions/by-gene/{gene}"
+            )
+            session_id = _session_id_for_gene(from_session, gene)
             if not session_id:
                 raise LigandAIError(f"No active session for gene {gene!r}")
-        payload = await self._transport.request("GET", f"/api/ptf/parallel/{session_id}/elite") or []
-        items = payload if isinstance(payload, list) else payload.get("peptides", [])
+        payload = await self._transport.request(
+            "GET", f"/api/ptf/parallel/{session_id}/elite"
+        )
+        items = unwrap_rows(
+            payload,
+            _ELITE_KEYS,
+            what=f"GET /api/ptf/parallel/{session_id}/elite",
+        )
         return [Peptide.model_validate(p) for p in items]
 
     # --- Selectivity / negative-selection validation (async) ---

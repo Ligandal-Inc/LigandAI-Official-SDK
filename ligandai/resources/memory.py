@@ -9,8 +9,14 @@ from ligandai.errors import (
     LigandAILegalAcceptanceRequired,
     resolve_mutation_failure,
 )
-from ligandai.resources._base import AsyncResource, Resource
+from ligandai.resources._base import AsyncResource, Resource, unwrap_rows
 from ligandai.types import MemoryItem, RecentActivity
+
+#: ``/api/episodic-memory/search`` and ``/list`` both answer
+#: ``{"success": true, "memories": [...]}`` — measured against blue
+#: 2026-10-02, while this module read ``results`` / ``items`` and reported an
+#: empty memory for a user who had memories. [bd-dre-3imtv.3]
+_MEMORY_KEYS = ("memories", "results", "items", "data")
 
 _MemoryType = Literal["result", "decision", "conversation", "discovery", "all"]
 
@@ -28,16 +34,18 @@ class Memory(Resource):
         body: dict[str, object] = {"query": query, "limit": limit}
         if memory_type != "all":
             body["memoryType"] = memory_type
-        payload = self._transport.request("POST", "/api/episodic-memory/search", json=body) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+        payload = self._transport.request("POST", "/api/episodic-memory/search", json=body)
+        items = unwrap_rows(
+            payload, _MEMORY_KEYS, what=f"POST /api/episodic-memory/search for {query!r}"
+        )
         return [MemoryItem.model_validate(it) for it in items]
 
     def list(self, limit: int = 20, offset: int = 0) -> List[MemoryItem]:
         """List memories paged."""
         payload = self._transport.request(
             "GET", "/api/episodic-memory/list", params={"limit": limit, "offset": offset}
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("items", [])
+        )
+        items = unwrap_rows(payload, _MEMORY_KEYS, what="GET /api/episodic-memory/list")
         return [MemoryItem.model_validate(it) for it in items]
 
     def save(
@@ -91,15 +99,17 @@ class AsyncMemory(AsyncResource):
         body: dict[str, object] = {"query": query, "limit": limit}
         if memory_type != "all":
             body["memoryType"] = memory_type
-        payload = await self._transport.request("POST", "/api/episodic-memory/search", json=body) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
+        payload = await self._transport.request("POST", "/api/episodic-memory/search", json=body)
+        items = unwrap_rows(
+            payload, _MEMORY_KEYS, what=f"POST /api/episodic-memory/search for {query!r}"
+        )
         return [MemoryItem.model_validate(it) for it in items]
 
     async def list(self, limit: int = 20, offset: int = 0) -> List[MemoryItem]:
         payload = await self._transport.request(
             "GET", "/api/episodic-memory/list", params={"limit": limit, "offset": offset}
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("items", [])
+        )
+        items = unwrap_rows(payload, _MEMORY_KEYS, what="GET /api/episodic-memory/list")
         return [MemoryItem.model_validate(it) for it in items]
 
     async def save(
