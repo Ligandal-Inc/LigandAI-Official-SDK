@@ -1,0 +1,816 @@
+{
+ "_about": "Engine records from four real hosted co-fold runs (EGFR human/mouse x two peptides, boltz2 + protenix, 2026-10-02 smoke). Structures, PAE matrices, sequences, DeltaForge blocks and MSA/cofactor evidence are removed; every score, status and key is verbatim. `miss_streaks` are the observed runs of consecutive HTTP 404 'job not found' status polls (count, seconds from first to last miss) per run.",
+ "runs": {
+  "A_human": {
+   "job_id": "cofold_a4eb59cbeefb",
+   "engines": [
+    "boltz2",
+    "protenix"
+   ],
+   "elapsed_s": 104.36,
+   "miss_streaks": [],
+   "running_payload": {
+    "job_id": "cofold_a4eb59cbeefb",
+    "status": "running",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790961819.7749372,
+    "started_at": 1790961819.7753317,
+    "finished_at": null,
+    "elapsed_s": 2.47,
+    "error": null
+   },
+   "done_payload": {
+    "job_id": "cofold_a4eb59cbeefb",
+    "status": "done",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790961819.7749372,
+    "started_at": 1790961819.7753317,
+    "finished_at": 1790961924.1358922,
+    "elapsed_s": 104.36,
+    "error": null,
+    "result": {
+     "engines": {
+      "boltz2": {
+       "engine": "Boltz-2",
+       "ok": true,
+       "error": null,
+       "wall_s": 86.47,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0.9303407719005385,
+         "ipTM_complex": 0.9303408265113831,
+         "pTM": 0.8851824402809143,
+         "iPSAE": 0.6914105743424245,
+         "iPAE": 4.642864272495159,
+         "pLDDT_raw": 0.8791583027238044,
+         "pLDDT": 0.8791583027238044,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0.7214759116736621,
+         "ipTM_complex": 0.7214758992195129,
+         "pTM": 0.8442649245262146,
+         "iPSAE": 0.2724169565417928,
+         "iPAE": 6.752271472280229,
+         "pLDDT_raw": 0.8616307382457353,
+         "pLDDT": 0.8616307382457353,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0.9303407719005385,
+        "ipTM_complex": 0.9303408265113831,
+        "pTM": 0.8851824402809143,
+        "iPSAE": 0.6914105743424245,
+        "iPAE": 4.642864272495159,
+        "pLDDT_raw": 0.8791583027238044,
+        "pLDDT": 0.8791583027238044,
+        "wall_s": null
+       },
+       "settings": {
+        "diffusion_samples": 2,
+        "sampling_steps": 50,
+        "recycling_steps": 3,
+        "use_potentials": true,
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      },
+      "protenix": {
+       "engine": "Protenix-V2",
+       "ok": true,
+       "error": null,
+       "wall_s": 99.52,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.3838200271129608,
+         "pTM": 0.7134349942207336,
+         "iPSAE": 0,
+         "iPAE": 10,
+         "pLDDT_raw": 87.2627182006836,
+         "pLDDT": 0.872627182006836,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.2979467809200287,
+         "pTM": 0.7083520293235779,
+         "iPSAE": 0,
+         "iPAE": 10,
+         "pLDDT_raw": 87.29197692871094,
+         "pLDDT": 0.8729197692871093,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0,
+        "ipTM_complex": 0.3838200271129608,
+        "pTM": 0.7134349942207336,
+        "iPSAE": 0,
+        "iPAE": 10,
+        "pLDDT_raw": 87.2627182006836,
+        "pLDDT": 0.872627182006836,
+        "wall_s": null
+       },
+       "settings": {
+        "seeds": "1",
+        "sample": 2,
+        "cycle": 10,
+        "step": 200,
+        "msa": "own_precomputed_msa_dir",
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      }
+     },
+     "summary": {
+      "best_engine": "boltz2",
+      "best_ipTM": 0.9303407719005385,
+      "ipTM_min": 0,
+      "ipTM_max": 0.9303407719005385,
+      "n_engines": 2,
+      "n_engines_ok": 2
+     },
+     "billing": {
+      "engines_ok": [
+       "boltz2",
+       "protenix"
+      ],
+      "engines_failed": [],
+      "trajectories": {
+       "boltz2": 2,
+       "protenix": 2
+      },
+      "settings": {
+       "boltz2": {
+        "sampling_steps": 50,
+        "use_potentials": true
+       },
+       "protenix": {}
+      }
+     },
+     "receptor_chains": [
+      "A"
+     ],
+     "peptide_chain": "B"
+    }
+   }
+  },
+  "A_mouse": {
+   "job_id": "cofold_7726b99456b0",
+   "engines": [
+    "boltz2",
+    "protenix"
+   ],
+   "elapsed_s": 98.29,
+   "miss_streaks": [
+    {
+     "count": 1,
+     "span_s": 0.0
+    },
+    {
+     "count": 2,
+     "span_s": 10.0
+    },
+    {
+     "count": 4,
+     "span_s": 30.0
+    }
+   ],
+   "running_payload": {
+    "job_id": "cofold_7726b99456b0",
+    "status": "running",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790962747.667209,
+    "started_at": 1790962747.6675777,
+    "finished_at": null,
+    "elapsed_s": 2.47,
+    "error": null
+   },
+   "done_payload": {
+    "job_id": "cofold_7726b99456b0",
+    "status": "done",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790962747.667209,
+    "started_at": 1790962747.6675777,
+    "finished_at": 1790962845.9582658,
+    "elapsed_s": 98.29,
+    "error": null,
+    "result": {
+     "engines": {
+      "boltz2": {
+       "engine": "Boltz-2",
+       "ok": true,
+       "error": null,
+       "wall_s": 60.15,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0.6484556800662495,
+         "ipTM_complex": 0.6484556794166565,
+         "pTM": 0.8392619490623474,
+         "iPSAE": 0.2553485311167886,
+         "iPAE": 7.869747246157972,
+         "pLDDT_raw": 0.8451519814607139,
+         "pLDDT": 0.8451519814607139,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0.6113412751517263,
+         "ipTM_complex": 0.6113412976264954,
+         "pTM": 0.8175562024116516,
+         "iPSAE": 0.21551234956552154,
+         "iPAE": 7.981182303273312,
+         "pLDDT_raw": 0.8438638503492064,
+         "pLDDT": 0.8438638503492064,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0.6484556800662495,
+        "ipTM_complex": 0.6484556794166565,
+        "pTM": 0.8392619490623474,
+        "iPSAE": 0.2553485311167886,
+        "iPAE": 7.869747246157972,
+        "pLDDT_raw": 0.8451519814607139,
+        "pLDDT": 0.8451519814607139,
+        "wall_s": null
+       },
+       "settings": {
+        "diffusion_samples": 2,
+        "sampling_steps": 50,
+        "recycling_steps": 3,
+        "use_potentials": true,
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      },
+      "protenix": {
+       "engine": "Protenix-V2",
+       "ok": true,
+       "error": null,
+       "wall_s": 94.49,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.5293796062469482,
+         "pTM": 0.6978165507316589,
+         "iPSAE": 0.013623181687760466,
+         "iPAE": 9.536000010841772,
+         "pLDDT_raw": 86.09017944335938,
+         "pLDDT": 0.8609017944335937,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.5257889032363892,
+         "pTM": 0.6992912888526917,
+         "iPSAE": 0.019483201099882993,
+         "iPAE": 9.489294130661909,
+         "pLDDT_raw": 86.09323120117188,
+         "pLDDT": 0.8609323120117187,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0,
+        "ipTM_complex": 0.5293796062469482,
+        "pTM": 0.6978165507316589,
+        "iPSAE": 0.013623181687760466,
+        "iPAE": 9.536000010841772,
+        "pLDDT_raw": 86.09017944335938,
+        "pLDDT": 0.8609017944335937,
+        "wall_s": null
+       },
+       "settings": {
+        "seeds": "1",
+        "sample": 2,
+        "cycle": 10,
+        "step": 200,
+        "msa": "own_precomputed_msa_dir",
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      }
+     },
+     "summary": {
+      "best_engine": "boltz2",
+      "best_ipTM": 0.6484556800662495,
+      "ipTM_min": 0,
+      "ipTM_max": 0.6484556800662495,
+      "n_engines": 2,
+      "n_engines_ok": 2
+     },
+     "billing": {
+      "engines_ok": [
+       "boltz2",
+       "protenix"
+      ],
+      "engines_failed": [],
+      "trajectories": {
+       "boltz2": 2,
+       "protenix": 2
+      },
+      "settings": {
+       "boltz2": {
+        "sampling_steps": 50,
+        "use_potentials": true
+       },
+       "protenix": {}
+      }
+     },
+     "receptor_chains": [
+      "A"
+     ],
+     "peptide_chain": "B"
+    }
+   }
+  },
+  "B_human": {
+   "job_id": "cofold_4be539f68071",
+   "engines": [
+    "boltz2",
+    "protenix"
+   ],
+   "elapsed_s": 592.5,
+   "miss_streaks": [
+    {
+     "count": 1,
+     "span_s": 0.0
+    },
+    {
+     "count": 5,
+     "span_s": 40.0
+    },
+    {
+     "count": 54,
+     "span_s": 530.5
+    }
+   ],
+   "running_payload": {
+    "job_id": "cofold_4be539f68071",
+    "status": "running",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790962927.1970432,
+    "started_at": 1790962927.1972673,
+    "finished_at": null,
+    "elapsed_s": 2.47,
+    "error": null
+   },
+   "done_payload": {
+    "job_id": "cofold_4be539f68071",
+    "status": "done",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790962927.1970432,
+    "started_at": 1790962927.1972673,
+    "finished_at": 1790963519.696273,
+    "elapsed_s": 592.5,
+    "error": null,
+    "result": {
+     "engines": {
+      "boltz2": {
+       "engine": "Boltz-2",
+       "ok": true,
+       "error": null,
+       "wall_s": 77.15,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0.8946151844081834,
+         "ipTM_complex": 0.8946151733398438,
+         "pTM": 0.8698740005493164,
+         "iPSAE": 0.6067796764868916,
+         "iPAE": 5.839307084661053,
+         "pLDDT_raw": 0.8749118067497431,
+         "pLDDT": 0.8749118067497431,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.49126356840133667,
+         "pTM": 0.7973517179489136,
+         "iPSAE": 0.012718987251414928,
+         "iPAE": 9.637632085762771,
+         "pLDDT_raw": 0.8594216246013493,
+         "pLDDT": 0.8594216246013493,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0.8946151844081834,
+        "ipTM_complex": 0.8946151733398438,
+        "pTM": 0.8698740005493164,
+        "iPSAE": 0.6067796764868916,
+        "iPAE": 5.839307084661053,
+        "pLDDT_raw": 0.8749118067497431,
+        "pLDDT": 0.8749118067497431,
+        "wall_s": null
+       },
+       "settings": {
+        "diffusion_samples": 2,
+        "sampling_steps": 50,
+        "recycling_steps": 3,
+        "use_potentials": true,
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      },
+      "protenix": {
+       "engine": "Protenix-V2",
+       "ok": true,
+       "error": null,
+       "wall_s": 586.41,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.44195306301116943,
+         "pTM": 0.6654599905014038,
+         "iPSAE": 0,
+         "iPAE": 10,
+         "pLDDT_raw": 86.0345687866211,
+         "pLDDT": 0.8603456878662109,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.4024445712566376,
+         "pTM": 0.67454993724823,
+         "iPSAE": 0.013623181687760466,
+         "iPAE": 8.84000015258789,
+         "pLDDT_raw": 86.20315551757812,
+         "pLDDT": 0.8620315551757812,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0,
+        "ipTM_complex": 0.44195306301116943,
+        "pTM": 0.6654599905014038,
+        "iPSAE": 0,
+        "iPAE": 10,
+        "pLDDT_raw": 86.0345687866211,
+        "pLDDT": 0.8603456878662109,
+        "wall_s": null
+       },
+       "settings": {
+        "seeds": "1",
+        "sample": 2,
+        "cycle": 10,
+        "step": 200,
+        "msa": "own_precomputed_msa_dir",
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      }
+     },
+     "summary": {
+      "best_engine": "boltz2",
+      "best_ipTM": 0.8946151844081834,
+      "ipTM_min": 0,
+      "ipTM_max": 0.8946151844081834,
+      "n_engines": 2,
+      "n_engines_ok": 2
+     },
+     "billing": {
+      "engines_ok": [
+       "boltz2",
+       "protenix"
+      ],
+      "engines_failed": [],
+      "trajectories": {
+       "boltz2": 2,
+       "protenix": 2
+      },
+      "settings": {
+       "boltz2": {
+        "sampling_steps": 50,
+        "use_potentials": true
+       },
+       "protenix": {}
+      }
+     },
+     "receptor_chains": [
+      "A"
+     ],
+     "peptide_chain": "B"
+    }
+   }
+  },
+  "B_mouse": {
+   "job_id": "cofold_29f064fd7f86",
+   "engines": [
+    "boltz2",
+    "protenix"
+   ],
+   "elapsed_s": 150.59,
+   "miss_streaks": [
+    {
+     "count": 5,
+     "span_s": 40.1
+    },
+    {
+     "count": 7,
+     "span_s": 60.1
+    }
+   ],
+   "running_payload": {
+    "job_id": "cofold_29f064fd7f86",
+    "status": "running",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790963606.5659506,
+    "started_at": 1790963606.5664139,
+    "finished_at": null,
+    "elapsed_s": 2.47,
+    "error": null
+   },
+   "done_payload": {
+    "job_id": "cofold_29f064fd7f86",
+    "status": "done",
+    "engines": [
+     "boltz2",
+     "protenix"
+    ],
+    "created_at": 1790963606.5659506,
+    "started_at": 1790963606.5664139,
+    "finished_at": 1790963757.1559854,
+    "elapsed_s": 150.59,
+    "error": null,
+    "result": {
+     "engines": {
+      "boltz2": {
+       "engine": "Boltz-2",
+       "ok": true,
+       "error": null,
+       "wall_s": 80.36,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0.8948025613124999,
+         "ipTM_complex": 0.8948025107383728,
+         "pTM": 0.8713480830192566,
+         "iPSAE": 0.5624645389682196,
+         "iPAE": 6.47104689758509,
+         "pLDDT_raw": 0.8391619473464729,
+         "pLDDT": 0.8391619473464729,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.41356581449508667,
+         "pTM": 0.7224209904670715,
+         "iPSAE": 0,
+         "iPAE": 10,
+         "pLDDT_raw": 0.831863086768823,
+         "pLDDT": 0.831863086768823,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0.8948025613124999,
+        "ipTM_complex": 0.8948025107383728,
+        "pTM": 0.8713480830192566,
+        "iPSAE": 0.5624645389682196,
+        "iPAE": 6.47104689758509,
+        "pLDDT_raw": 0.8391619473464729,
+        "pLDDT": 0.8391619473464729,
+        "wall_s": null
+       },
+       "settings": {
+        "diffusion_samples": 2,
+        "sampling_steps": 50,
+        "recycling_steps": 3,
+        "use_potentials": true,
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      },
+      "protenix": {
+       "engine": "Protenix-V2",
+       "ok": true,
+       "error": null,
+       "wall_s": 147.07,
+       "n_traj": 2,
+       "n_traj_ok": 2,
+       "trajectories": [
+        {
+         "label": "sample0",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.41332435607910156,
+         "pTM": 0.6658602356910706,
+         "iPSAE": 0.018015818264333426,
+         "iPAE": 8.599999904632568,
+         "pLDDT_raw": 86.5820541381836,
+         "pLDDT": 0.865820541381836,
+         "wall_s": null
+        },
+        {
+         "label": "sample1",
+         "ok": true,
+         "error": null,
+         "ipTM": 0,
+         "ipTM_complex": 0.40964651107788086,
+         "pTM": 0.6670669317245483,
+         "iPSAE": 0.018679326291814114,
+         "iPAE": 8.676666736602783,
+         "pLDDT_raw": 86.5505599975586,
+         "pLDDT": 0.865505599975586,
+         "wall_s": null
+        }
+       ],
+       "best": {
+        "label": "sample0",
+        "ok": true,
+        "error": null,
+        "ipTM": 0,
+        "ipTM_complex": 0.41332435607910156,
+        "pTM": 0.6658602356910706,
+        "iPSAE": 0.018015818264333426,
+        "iPAE": 8.599999904632568,
+        "pLDDT_raw": 86.5820541381836,
+        "pLDDT": 0.865820541381836,
+        "wall_s": null
+       },
+       "settings": {
+        "seeds": "1",
+        "sample": 2,
+        "cycle": 10,
+        "step": 200,
+        "msa": "own_precomputed_msa_dir",
+        "gpu_containers": 1
+       },
+       "cofactor": {
+        "requested": [],
+        "engine_can_carry": true,
+        "honoured": null,
+        "reason": "no cofactor requested"
+       }
+      }
+     },
+     "summary": {
+      "best_engine": "boltz2",
+      "best_ipTM": 0.8948025613124999,
+      "ipTM_min": 0,
+      "ipTM_max": 0.8948025613124999,
+      "n_engines": 2,
+      "n_engines_ok": 2
+     },
+     "billing": {
+      "engines_ok": [
+       "boltz2",
+       "protenix"
+      ],
+      "engines_failed": [],
+      "trajectories": {
+       "boltz2": 2,
+       "protenix": 2
+      },
+      "settings": {
+       "boltz2": {
+        "sampling_steps": 50,
+        "use_potentials": true
+       },
+       "protenix": {}
+      }
+     },
+     "receptor_chains": [
+      "A"
+     ],
+     "peptide_chain": "B"
+    }
+   }
+  }
+ }
+}

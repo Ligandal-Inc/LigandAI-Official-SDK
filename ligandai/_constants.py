@@ -164,6 +164,19 @@ MAX_REGION_SPAN_RESIDUES: int = 5000
 DEFAULT_POLL_INTERVAL_SECS: float = 2.0
 DEFAULT_JOB_TIMEOUT_SECS: float = 1800.0  # 30 minutes — generation+fold can take this long
 
+# How long Job.wait() keeps polling through consecutive HTTP 404 "job not found"
+# answers before it believes them. The hosted co-fold job store is per-process
+# (several API workers, no shared store), so a status poll that lands on a worker
+# that does not hold the job answers 404 for a job the API is still running.
+# MEASURED 2026-10-02 (four EGFR co-fold smoke runs against the hosted route):
+# 0, 7, 12 and 60 such answers per run, and the longest unbroken streak was 54
+# polls over 530 s that ended with the job completing normally. 120 s would have
+# failed that run; 600 s clears it. A genuinely lost job (expired, or the server
+# restarted) costs one grace window before the error, never an unbounded wait,
+# and the overall ``timeout`` still bounds the whole call. Pass
+# ``not_found_grace=0`` to ``wait()`` to restore fail-on-first-404.
+DEFAULT_NOT_FOUND_GRACE_SECS: float = 600.0
+
 # Legal-acceptance interactive resolution defaults (SDK-side browser-redirect
 # + resume flow, docs/clickwrap_legal_acceptance.md §3.6). Distinct from the
 # job-polling defaults above: this is a human clicking through a clickwrap

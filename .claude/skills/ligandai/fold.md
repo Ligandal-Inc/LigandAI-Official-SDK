@@ -242,13 +242,16 @@ for a kinase, `cofactors=[{"smiles": "..."}]` for anything without a CCD code.
 | `unanimous()` | designs every engine that returned a score put above the bar |
 | `row.contested` | some engines above the bar, some below — the ones to look at |
 | `row.n_engines_scored` | the DENOMINATOR. An engine that failed is not counted as a vote against |
+| `row.no_interface` | engines that folded the complex but found no peptide-receptor contact at all (best structure ipTM 0 / iPSAE 0 / iPAE 10). Their value is `None`, not 0.0, and they are not in `n_engines_scored` or `rank_agreement()` — but they did not back the peptide, so the row is `contested`, never `unanimous` |
 | `row.cofactor_honoured` | per engine, whether the platform CONFIRMED the cofactor reached that fold (`engines[e].cofactor.honoured` in its own record) — never just that you asked for it |
 | `rank_agreement()` | pairwise Spearman rho between engines, each with its own n |
 | `failures` | every fold that did not return, with its error. Nothing is imputed |
 
 ⛔ A metric an engine did not return is `None`, never `0.0`. A missing score is
 not evidence of a bad interface, and it never counts toward or against the
-consensus.
+consensus. The one exception is a fold that RETURNED a structure showing no
+interface (`row.no_interface`): that is an answer, not a gap, so it is still
+`None` (not a measurement) but it keeps the row from being unanimous.
 
 ### Cofactors on the hosted route
 

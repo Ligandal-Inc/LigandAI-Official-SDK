@@ -205,12 +205,34 @@ def test_the_estimate_follows_the_server_quote_when_the_platform_reprices():
 # --------------------------------------------------------------------------- #
 # run(): the ceiling, the per_engine map and the cofactor all reach the wire
 # --------------------------------------------------------------------------- #
-class _Job:
+class _StatusTransport:
+    """Answers a co-fold status poll the way the hosted route does: terminal
+    ``done`` with the multi-engine record under ``result``."""
+
     def __init__(self, result):
         self._result = result
 
-    def result(self, **kw):
-        return self._result
+    def request(self, method, path, **kw):
+        return {"job_id": "cofold_test", "status": "done", "result": self._result}
+
+
+def _Job(result):
+    """A REAL ``ligandai.jobs.Job`` over a canned transport.
+
+    This used to be a hand-rolled stub exposing ``.result()``. The real Job has no
+    such method, so ``Ensemble.run`` called a nonexistent API in production (every
+    peptide landed in ``failures`` AFTER its job was submitted) while these tests
+    passed against a stub that had the same wrong shape. Using the real class is
+    what stops the fake from agreeing with the bug.
+    """
+    from ligandai.jobs import Job
+    from ligandai.resources.peptides import _parse_cofold
+
+    return Job(
+        _StatusTransport(result), "cofold_test", job_type="cofold",
+        parser=_parse_cofold, status_path="/api/v1/cofold/{job_id}/status",
+        initial={"id": "cofold_test", "type": "cofold", "status": "pending"},
+    )
 
 
 class _Peptides:
@@ -356,12 +378,21 @@ class _AsyncCapture(_Capture):
         return super().request(method, path, **kw)
 
 
-class _AsyncJob:
-    def __init__(self, result):
-        self._result = result
+class _AsyncStatusTransport(_StatusTransport):
+    async def request(self, method, path, **kw):
+        return super().request(method, path, **kw)
 
-    async def result(self, **kw):
-        return self._result
+
+def _AsyncJob(result):
+    """A REAL ``ligandai.jobs.AsyncJob``; see :func:`_Job`."""
+    from ligandai.jobs import AsyncJob
+    from ligandai.resources.peptides import _parse_cofold
+
+    return AsyncJob(
+        _AsyncStatusTransport(result), "cofold_test", job_type="cofold",
+        parser=_parse_cofold, status_path="/api/v1/cofold/{job_id}/status",
+        initial={"id": "cofold_test", "type": "cofold", "status": "pending"},
+    )
 
 
 class _AsyncPeptides:

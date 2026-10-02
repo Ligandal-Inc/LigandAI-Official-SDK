@@ -22,6 +22,7 @@ from typing import Any, Generic, TypeVar
 
 from ligandai._constants import (
     DEFAULT_JOB_TIMEOUT_SECS,
+    DEFAULT_NOT_FOUND_GRACE_SECS,
     DEFAULT_POLL_INTERVAL_SECS,
 )
 from ligandai._fold_time_model import estimate_fold_time, format_eta
@@ -50,6 +51,7 @@ from ligandai.errors import (
     LigandAIIncompleteResult,
     LigandAIJobError,
     LigandAILegalAcceptanceRequired,
+    LigandAINotFoundError,
     LigandAIReceptorMsaUnavailable,  # noqa: F401  re-exported for `except` convenience
     LigandAITargetingWarning,
     LigandAITimeoutError,
@@ -59,11 +61,17 @@ from ligandai.errors import (
 from ligandai.types import JobEvent, JobInfo
 
 T = TypeVar("T")
+# ``done`` is the hosted co-fold job store's success state (fastapi
+# ``cofold_job_store``: pending / running / done / error / cancelled). It was
+# missing here, so ``wait()`` on a finished co-fold job read ``done`` as "still
+# running" and polled until ``timeout``.
 TERMINAL_STATUSES = frozenset({
-    "complete", "completed", "failed", "cancelled", "error",
+    "complete", "completed", "done", "failed", "cancelled", "error",
     "generation_complete", "fold_complete",
 })
-SUCCESS_STATUSES = frozenset({"complete", "completed", "generation_complete", "fold_complete"})
+SUCCESS_STATUSES = frozenset({
+    "complete", "completed", "done", "generation_complete", "fold_complete",
+})
 
 # Durable-success keys to look for in a fold result. When
 # ``Job.wait(durable=True)`` is set (the default), the SDK refuses to return a
@@ -163,6 +171,57 @@ def _result_payload_is_spawn_ack_only(payload: dict[str, Any] | None) -> bool:
     return keys.issubset(_FOLD_SPAWN_ONLY_KEYS) and "call_id" in keys
 ResultLoader = Callable[[JobInfo], dict[str, Any] | None]
 AsyncResultLoader = Callable[[JobInfo], Awaitable[dict[str, Any] | None] | dict[str, Any] | None]
+
+
+class _NotFoundGrace:
+    """Tolerates transient HTTP 404s from a job's status endpoint.
+
+    A job this SDK just submitted exists: the server returned its id. When a
+    later status poll answers 404 "job not found" the cause is usually a
+    different API worker that does not hold the job (the hosted co-fold job
+    store is per-process), not a lost job. :meth:`miss` therefore absorbs
+    consecutive 404s for ``grace`` seconds measured from the first miss of the
+    streak, and raises :class:`~ligandai.errors.LigandAINotFoundError` once the
+    window is spent. :meth:`hit` (any non-404 answer) resets the streak.
+    ``grace <= 0`` raises on the first miss, which is the pre-0.16.1 behaviour.
+    """
+
+    def __init__(self, job_id: str, grace: float) -> None:
+        self.job_id = job_id
+        self.grace = max(0.0, float(grace))
+        self.streak = 0
+        self.total = 0
+        self._first: float | None = None
+
+    def hit(self) -> None:
+        self.streak = 0
+        self._first = None
+
+    def miss(self, exc: LigandAINotFoundError) -> None:
+        now = time.monotonic()
+        if self._first is None:
+            self._first = now
+        self.streak += 1
+        self.total += 1
+        span = now - self._first
+        if span < self.grace:
+            return
+        raise LigandAINotFoundError(
+            (
+                f"Job {self.job_id}: the status endpoint answered 404 "
+                f"{self.streak} time(s) in a row over {span:.0f}s, which exhausts "
+                f"the {self.grace:.0f}s not-found grace window. The server may "
+                "route a poll to an API worker that does not hold the job, so "
+                "short runs of 404s are retried; a run this long means the job "
+                "expired, was lost in a server restart, or never existed. "
+                "Re-submit it, or pass not_found_grace=<seconds> to wait() to "
+                f"wait longer. Last response: {exc.message}"
+            ),
+            code=exc.code,
+            status_code=404,
+            request_id=exc.request_id,
+            response=exc.response,
+        ) from exc
 
 
 class _DiagnosticsAccumulator:
@@ -546,10 +605,20 @@ class Job(_DiagnosticsAccumulator, Generic[T]):
         save_to: str | None = None,
         *,
         durable: bool = True,
+        not_found_grace: float = DEFAULT_NOT_FOUND_GRACE_SECS,
     ) -> T:
         """Block until the job completes (or raises) and return the parsed result.
 
         Args:
+            not_found_grace: Seconds of CONSECUTIVE HTTP 404 "job not found"
+                status answers ``wait()`` rides out before it raises
+                :class:`~ligandai.errors.LigandAINotFoundError`. The job was
+                accepted by the server, and the hosted co-fold job store is
+                per-process, so a poll routed to another API worker can 404 for a
+                job that is still running (measured: up to 54 consecutive polls
+                over 530 s on a run that then completed). Any non-404 answer
+                resets the count. ``0`` raises on the first 404. The overall
+                ``timeout`` still applies.
             save_to: Optional local directory. When provided AND the result
                 exposes a ``save_to(...)`` method (i.e. ``GenerationResult``),
                 automatically writes ``peptides.csv``, ``folds/*.pdb``, and
@@ -576,6 +645,17 @@ class Job(_DiagnosticsAccumulator, Generic[T]):
         # missing fields fall back to typical defaults (L=300, traj=1, gpus=1).
         eta_seconds = self._compute_eta_seconds() if self._job_type == "folding" else None
         wait_start = time.monotonic()
+        not_found = _NotFoundGrace(self._job_id, not_found_grace)
+
+        def _poll() -> bool:
+            """One status poll. False when the server answered 404 (absorbed)."""
+            try:
+                self.refresh()
+            except LigandAINotFoundError as exc:
+                not_found.miss(exc)  # raises once the grace window is spent
+                return False
+            not_found.hit()
+            return True
 
         def _maybe_emit_progress() -> None:
             if not on_progress:
@@ -597,10 +677,10 @@ class Job(_DiagnosticsAccumulator, Generic[T]):
                     f"Job {self._job_id} did not complete within {timeout}s "
                     f"(last status: {self.status})"
                 )
-            self.refresh()
-            _maybe_emit_progress()
-            if self.is_terminal:
-                break
+            if _poll():
+                _maybe_emit_progress()
+                if self.is_terminal:
+                    break
             time.sleep(poll_interval)
         if not self.succeeded:
             # [bd-LIGANDAI_ALPHA_V2-7r1sb] See the note at Job.results.
@@ -645,7 +725,7 @@ class Job(_DiagnosticsAccumulator, Generic[T]):
                     )
                 _maybe_emit_progress()
                 time.sleep(max(poll_interval, 1.0))
-                self.refresh()
+                _poll()
 
         result = self.results
         if save_to is not None and hasattr(result, "save_to"):
@@ -873,21 +953,33 @@ class AsyncJob(_DiagnosticsAccumulator, Generic[T]):
         on_progress: Callable[[JobInfo], None] | None = None,
         *,
         durable: bool = True,
+        not_found_grace: float = DEFAULT_NOT_FOUND_GRACE_SECS,
     ) -> T:
         """Async sibling of :meth:`Job.wait`. See :meth:`Job.wait` for full
-        ``durable=True`` semantics."""
+        ``durable=True`` and ``not_found_grace`` semantics."""
         deadline = time.monotonic() + timeout
+        not_found = _NotFoundGrace(self._job_id, not_found_grace)
+
+        async def _poll() -> bool:
+            try:
+                await self.refresh()
+            except LigandAINotFoundError as exc:
+                not_found.miss(exc)  # raises once the grace window is spent
+                return False
+            not_found.hit()
+            return True
+
         while not self.is_terminal:
             if time.monotonic() > deadline:
                 raise LigandAITimeoutError(
                     f"Job {self._job_id} did not complete within {timeout}s "
                     f"(last status: {self.status})"
                 )
-            await self.refresh()
-            if on_progress:
-                on_progress(self._info)
-            if self.is_terminal:
-                break
+            if await _poll():
+                if on_progress:
+                    on_progress(self._info)
+                if self.is_terminal:
+                    break
             await asyncio.sleep(poll_interval)
         if not self.succeeded:
             # [bd-LIGANDAI_ALPHA_V2-7r1sb] See the note at Job.results.
@@ -928,7 +1020,7 @@ class AsyncJob(_DiagnosticsAccumulator, Generic[T]):
                 if on_progress:
                     on_progress(self._info)
                 await asyncio.sleep(max(poll_interval, 1.0))
-                await self.refresh()
+                await _poll()
 
         return await self.async_results()
 

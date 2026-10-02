@@ -5778,8 +5778,11 @@ class Peptides(Resource):
 
         Returns:
             A :class:`~ligandai.jobs.Job` polling ``/api/v1/cofold/{job_id}/
-            status``. ``job.result()`` returns the multi-engine result dict
-            (``engines``, ``summary``, ``billing``).
+            status``. ``job.wait()`` blocks until the job is terminal and
+            returns the multi-engine result dict (``engines``, ``summary``,
+            ``billing``); it rides out the intermittent 404 "job not found"
+            the hosted job store answers between API workers (see
+            ``not_found_grace``).
 
         Free-pays-credits — any tier (including free) may submit a co-fold as
         long as the account has a positive credit balance; the server reserves

@@ -33,6 +33,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
 
+from .._constants import DEFAULT_JOB_TIMEOUT_SECS
 from ..errors import LigandAIInvalidConfig
 from ._base import AsyncResource, Resource
 
@@ -171,7 +172,17 @@ class EnsembleEstimate:
 
 @dataclass
 class ConsensusRow:
-    """One peptide's answer across the ensemble."""
+    """One peptide's answer across the ensemble.
+
+    ``per_engine`` holds a number only where the engine MEASURED one. An engine
+    that folded the complex but produced no peptide<->receptor interface score
+    (the scorer's "no residue pair under the PAE cutoff" default, which reads as
+    ipSAE 0.0 / iPAE 10) is ``None`` in ``per_engine``, is listed in
+    ``no_interface``, and is NOT counted in ``n_engines_scored``. It is not
+    silently dropped from the vote either: it cannot be above the bar, so it
+    keeps the row from being ``unanimous`` and makes it ``contested`` when
+    another engine cleared the bar.
+    """
 
     sequence: str
     per_engine: dict[str, Optional[float]]
@@ -181,6 +192,7 @@ class ConsensusRow:
     cofactor_honoured: dict[str, bool]
     unanimous: bool
     contested: bool
+    no_interface: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -256,6 +268,7 @@ class EnsembleResult:
                  "n_engines_above_bar": r.n_engines_above_bar,
                  "engines_above_bar": r.engines_above_bar,
                  "cofactor_honoured": r.cofactor_honoured,
+                 "no_interface": r.no_interface,
                  "unanimous": r.unanimous, "contested": r.contested}
                 for r in self.rows
             ],
@@ -454,19 +467,26 @@ class _EnsembleCommon:
                       failures: list[dict[str, Any]],
                       cofs: list[CofactorSpec],
                       credits: Optional[int], wall: Optional[float],
-                      stopped: Optional[str]) -> EnsembleResult:
+                      stopped: Optional[str],
+                      no_interface: Optional[dict[str, list[str]]] = None,
+                      ) -> EnsembleResult:
         rows = []
         for seq, vals in per_peptide.items():
             scored = {e: v for e, v in vals.items() if v is not None}
             above = sorted(e for e, v in scored.items() if v >= bar)
+            # Engines that folded but produced no interface score: not a
+            # measurement (so not in `scored`), but not a vote for the peptide.
+            no_iface = sorted(e for e in (no_interface or {}).get(seq, [])
+                              if vals.get(e) is None)
             rows.append(ConsensusRow(
                 sequence=seq, per_engine=vals,
                 n_engines_scored=len(scored),
                 n_engines_above_bar=len(above),
                 engines_above_bar=above,
                 cofactor_honoured=dict(honoured),
-                unanimous=bool(scored) and len(above) == len(scored),
-                contested=0 < len(above) < len(scored),
+                unanimous=bool(scored) and len(above) == len(scored) and not no_iface,
+                contested=bool(above) and (len(above) < len(scored) or bool(no_iface)),
+                no_interface=no_iface,
             ))
         rows.sort(key=lambda r: (-r.n_engines_above_bar, r.sequence))
         return EnsembleResult(
@@ -645,6 +665,7 @@ class Ensemble(Resource, _EnsembleCommon):
         t0 = time.time()
         per_peptide: dict[str, dict[str, Optional[float]]] = {}
         failures: list[dict[str, Any]] = []
+        no_iface: dict[str, list[str]] = {}
         consecutive_dead = 0
         stopped: Optional[str] = None
         cofold = self._client.peptides.cofold  # the shipping single-complex call
@@ -656,19 +677,22 @@ class Ensemble(Resource, _EnsembleCommon):
             chains = [{"id": "A", "sequence": rec, "kind": "receptor"},
                       {"id": "B", "sequence": pep, "kind": "peptide"}]
             vals: dict[str, Optional[float]] = {e: None for e in engines}
+            job = None
             try:
                 job = cofold(chains, engines, per_engine=per_engine,
                              shared_msa=shared_msa, gene=gene,
                              run_deltaforge=run_deltaforge,
                              cofactors=[c.as_dict() for c in cofs] or None,
                              allow_cofactor_absent=allow_cofactor_absent)
-                res = job.result(poll_interval=poll_interval)
-                for eng, rec_e in (res.get("engines") or {}).items():
-                    vals[str(eng).lower()] = _pick_metric(rec_e, metric)
-                    _reconcile_honoured(honoured, str(eng).lower(), rec_e, cofs)
+                # An already-submitted job has its credits reserved, so it is
+                # allowed to finish: `timeout` stops the NEXT peptide, it does
+                # not abandon this one mid-flight.
+                res = job.wait(timeout=DEFAULT_JOB_TIMEOUT_SECS,
+                               poll_interval=poll_interval)
+                _absorb_engine_records(res, vals, no_iface.setdefault(pep, []),
+                                       metric, honoured, cofs)
             except Exception as exc:              # one peptide must not kill the run
-                failures.append({"sequence": pep, "stage": "cofold",
-                                 "error": f"{type(exc).__name__}: {exc}"[:400]})
+                failures.append(_failure_record(pep, job, exc))
             per_peptide[pep] = vals
             if all(v is None for v in vals.values()):
                 consecutive_dead += 1
@@ -685,6 +709,7 @@ class Ensemble(Resource, _EnsembleCommon):
         return self._build_result(
             bar, engines, metric, per_peptide, honoured, failures, cofs,
             credits=None, wall=round(time.time() - t0, 1), stopped=stopped,
+            no_interface=no_iface,
         )
 
 
@@ -727,6 +752,68 @@ def _as_number(v: Any) -> Optional[float]:
     return None
 
 
+#: The iPAE (Angstrom) the host-side interface scorer reports when NO residue pair
+#: clears its PAE cutoff: ``ipae = pae_cutoff`` ("worst case"), alongside the
+#: initial ``ipsae = 0.0`` / ``iptm = 0.0`` (modal_workers/ipsae_scoring.py,
+#: PAE_CUTOFF = 10.0). That triple is "no interface was found", not "the
+#: interface scored zero". Seen live on Protenix (best structure ipTM 0 / iPSAE 0 /
+#: iPAE 10 on 2 of 4 EGFR smoke runs); a low but REAL interface reads differently
+#: (the other two runs: iPSAE 0.014 / 0.018 with iPAE 9.5 / 8.6).
+_NO_INTERFACE_IPAE = 10.0
+
+#: Metrics that are read off the peptide<->receptor interface, i.e. the ones a
+#: "no interface" record has no measurement for. ``ptm`` / ``plddt`` /
+#: ``iptm_complex`` describe the whole complex and stay valid regardless.
+_INTERFACE_METRICS = frozenset({"peptide_ipsae", "iptm"})
+
+
+def _no_interface_score(engine_record: Any, metric: str) -> bool:
+    """True when the engine record SHOWS it produced no interface score for ``metric``.
+
+    Evidence required, never inferred from the value alone: the best structure's
+    interface value for ``metric`` is exactly 0 AND the same structure's iPAE sits
+    at the scorer's no-contact default (:data:`_NO_INTERFACE_IPAE`). A bare 0.0
+    with no iPAE beside it is kept as the measurement it claims to be.
+    """
+    if metric not in _INTERFACE_METRICS or not isinstance(engine_record, dict):
+        return False
+    best = engine_record.get("best")
+    if not isinstance(best, dict):
+        return False
+    ipae = _as_number(best.get("iPAE"))
+    if ipae is None or ipae < _NO_INTERFACE_IPAE:
+        return False
+    for key in _BEST_TRAJ_KEYS.get(metric, ()):
+        v = _as_number(best.get(key))
+        if v is not None:
+            return v == 0.0
+    return False
+
+
+def _absorb_engine_records(res: Any, vals: dict[str, Optional[float]],
+                           no_interface: list[str], metric: str,
+                           honoured: dict[str, bool], cofs: list[CofactorSpec]) -> None:
+    """Fold one finished co-fold job's per-engine records into ``vals``."""
+    engines = res.get("engines") if isinstance(res, dict) else None
+    for eng, rec_e in (engines or {}).items():
+        key = str(eng).lower()
+        vals[key] = _pick_metric(rec_e, metric)
+        if vals[key] is None and _no_interface_score(rec_e, metric):
+            no_interface.append(key)
+        _reconcile_honoured(honoured, key, rec_e, cofs)
+
+
+def _failure_record(sequence: str, job: Any, exc: BaseException) -> dict[str, Any]:
+    """A failed peptide, with the job id when one was already submitted so the
+    caller can still collect (and has already been charged for) that job."""
+    rec: dict[str, Any] = {"sequence": sequence, "stage": "cofold",
+                           "error": f"{type(exc).__name__}: {exc}"[:400]}
+    job_id = getattr(job, "id", None)
+    if job_id:
+        rec["job_id"] = str(job_id)
+    return rec
+
+
 def _pick_metric(engine_record: Any, metric: str) -> Optional[float]:
     """Pull ONE named metric out of an engine record.
 
@@ -749,11 +836,21 @@ def _pick_metric(engine_record: Any, metric: str) -> Optional[float]:
     ipSAE or nothing: the hosted route reports ONE iPSAE (peptide<->receptor), so
     the whole-complex ``ipsae`` metric is None there rather than served the
     peptide-interface value.
+
+    ⛔ A "NO INTERFACE" STRUCTURE IS NOT A MEASURED ZERO. When the best structure's
+    interface value is 0 and its iPAE is the scorer's no-contact default (10 A),
+    the engine found no peptide<->receptor contact at all (see
+    :func:`_no_interface_score`); that returns None here, and ``run()`` records
+    the engine in ``ConsensusRow.no_interface`` so the consensus still treats it
+    as an engine that did not back the peptide. A low but real interface (iPSAE
+    0.014, iPAE 9.5) is a measurement and is returned as is.
     """
     if not isinstance(engine_record, dict):
         return None
     best = engine_record.get("best")
     if isinstance(best, dict):
+        if _no_interface_score(engine_record, metric):
+            return None
         for key in _BEST_TRAJ_KEYS.get(metric, ()):
             if key in best:
                 v = _as_number(best[key])
@@ -890,6 +987,7 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         t0 = time.time()
         per_peptide: dict[str, dict[str, Optional[float]]] = {}
         failures: list[dict[str, Any]] = []
+        no_iface: dict[str, list[str]] = {}
         sem = asyncio.Semaphore(max(1, concurrency))
         cofold = self._client.peptides.cofold
 
@@ -917,19 +1015,19 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
                 chains = [{"id": "A", "sequence": rec, "kind": "receptor"},
                           {"id": "B", "sequence": pep, "kind": "peptide"}]
                 vals: dict[str, Optional[float]] = {e: None for e in engines}
+                job = None
                 try:
                     job = await cofold(chains, engines, per_engine=per_engine,
                                        shared_msa=shared_msa, gene=gene,
                                        run_deltaforge=run_deltaforge,
                                        cofactors=[c.as_dict() for c in cofs] or None,
                                        allow_cofactor_absent=allow_cofactor_absent)
-                    res = await job.result(poll_interval=poll_interval)
-                    for eng, rec_e in (res.get("engines") or {}).items():
-                        vals[str(eng).lower()] = _pick_metric(rec_e, metric)
-                        _reconcile_honoured(honoured, str(eng).lower(), rec_e, cofs)
+                    res = await job.wait(timeout=DEFAULT_JOB_TIMEOUT_SECS,
+                                         poll_interval=poll_interval)
+                    _absorb_engine_records(res, vals, no_iface.setdefault(pep, []),
+                                           metric, honoured, cofs)
                 except Exception as exc:
-                    failures.append({"sequence": pep, "stage": "cofold",
-                                     "error": f"{type(exc).__name__}: {exc}"[:400]})
+                    failures.append(_failure_record(pep, job, exc))
                 per_peptide[pep] = vals
 
         await asyncio.gather(*(one(p) for p in peps))
@@ -941,4 +1039,5 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         return self._build_result(
             bar, engines, metric, per_peptide, honoured, failures, cofs,
             credits=None, wall=round(time.time() - t0, 1), stopped=stopped,
+            no_interface=no_iface,
         )
