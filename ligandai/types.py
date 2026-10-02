@@ -3663,6 +3663,17 @@ class Program(_LGModel):
     created_at: datetime | None = Field(default=None, alias="createdAt")
     updated_at: datetime | None = Field(default=None, alias="updatedAt")
 
+    @property
+    def ref(self) -> int | str | None:
+        """The identifier to pass back to ``client.programs.*``.
+
+        ``GET /api/ptf/programs`` lists a program with only its string handle
+        (``program_<ts>_<hash>``) when it has no numeric database id, so ``id`` is
+        ``None`` for those rows. The server resolves either form on every
+        ``/api/ptf/programs/{id}...`` route; this returns whichever the row has.
+        """
+        return self.id if self.id is not None else self.program_id
+
 
 class Workstream(_LGModel):
     id: int
@@ -3679,12 +3690,28 @@ class ProgramDetail(Program):
 
 
 class Session(_LGModel):
-    id: str
+    """One generation/fold session row.
+
+    ⛔ ``id`` was required under that name only, and the server never sends it:
+    ``GET /api/ptf/sessions`` rows are keyed ``session_id`` (snake) with
+    ``created_at``, ``GET /api/ptf/sessions/by-gene/{gene}`` rows are keyed
+    ``sessionId`` with ``createdAt``, and ``GET /api/ptf/sessions/{id}`` is
+    keyed ``session_id`` inside a ``session`` envelope. So ``list_sessions()``,
+    ``get_session()`` and ``find_session_by_gene()`` all raised ``ValidationError
+    : id Field required`` on every live row. Measured 2026-10-02 against blue.
+    [bd-dre-3imtv.4]
+    """
+
+    id: str = Field(validation_alias=AliasChoices("id", "sessionId", "session_id"))
     gene: str | None = None
-    program_id: int | None = Field(default=None, alias="programId")
+    program_id: int | str | None = Field(
+        default=None, alias="programId", validation_alias=AliasChoices("programId", "program_id")
+    )
     workstream_id: int | None = Field(default=None, alias="workstreamId")
     status: str | None = None
-    created_at: datetime | None = Field(default=None, alias="createdAt")
+    created_at: datetime | None = Field(
+        default=None, alias="createdAt", validation_alias=AliasChoices("createdAt", "created_at")
+    )
 
 
 class SessionDetail(Session):
