@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-02
+
+Three defects in `client.ensemble` / `Job.wait()` found by running the hosted
+co-fold route end to end (four EGFR human/mouse runs, boltz2 + protenix).
+
+### Fixed
+
+- **`Ensemble.run` / `AsyncEnsemble.run` recorded every peptide as a failure.**
+  They called `job.result(...)`, which `Job` and `AsyncJob` do not have, so each
+  co-fold was submitted (and its credits reserved) and then dropped into
+  `failures` with an `AttributeError`. They now call `job.wait()`, which returns
+  the multi-engine result. A failure now carries `job_id` whenever the job had
+  already been submitted, so it can still be collected. The test stubs for
+  `Ensemble.run` had grown a `.result()` method and agreed with the bug; they are
+  now real `Job` / `AsyncJob` objects over a canned transport.
+- **`Job.wait()` never saw a finished co-fold job as finished.** The hosted
+  co-fold store's success state is `done`, which was not in `TERMINAL_STATUSES`
+  or `SUCCESS_STATUSES`, so `wait()` polled until `timeout`. `done` is now a
+  terminal success status (generation/fold statuses are unchanged).
+- **`Job.wait()` aborted on the first HTTP 404 "job not found".** The co-fold job
+  store is per-process behind several API workers, so a status poll routed to a
+  worker that does not hold the job answers 404 for a job that is still running:
+  0, 7, 12 and 60 such answers in the four smoke runs, the longest unbroken
+  streak 54 polls over 530 s, after which the job completed. `Job.wait()` and
+  `AsyncJob.wait()` now absorb consecutive 404s for `not_found_grace` seconds
+  (new keyword, default `DEFAULT_NOT_FOUND_GRACE_SECS = 600`; any non-404 answer
+  resets the count) and then raise `LigandAINotFoundError` stating the job id,
+  the number of misses, the window and how to widen it. `not_found_grace=0`
+  restores fail-on-first-404; `refresh()` / `poll()` are unchanged, and the
+  overall `timeout` still bounds the call. A job that is truly gone (expired, or
+  lost in a server restart) now costs one grace window before the error.
+- **A "no interface" structure was reported as a measured `0.0`.** When a
+  structure has no residue pair under the scorer's PAE cutoff it reports
+  ipTM 0 / iPSAE 0 / iPAE 10 (Protenix on 2 of the 4 smoke runs). `_pick_metric`
+  now returns `None` for `peptide_ipsae` and `iptm` when the best structure's
+  value is exactly 0 AND its iPAE is that no-contact default; a low but real
+  interface (iPSAE 0.014 with iPAE 9.5) and every whole-complex metric (`ptm`,
+  `plddt`, `iptm_complex`) are still returned as measured. `ConsensusRow` gains
+  `no_interface: list[str]` (also in `EnsembleResult.to_dict()`): those engines
+  are excluded from `n_engines_scored` and from `rank_agreement()` rather than
+  entered as 0.0, but they still count as not backing the peptide, so a row where
+  one engine cleared the bar and another found no contact is `contested`, never
+  `unanimous`.
+
 ## [0.16.0] - 2026-10-02
 
 ### Changed — a fold costs 10 credits ($0.10) at the default 4 trajectories (was 100 credits, $1.00)
