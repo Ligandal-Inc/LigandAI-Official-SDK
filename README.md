@@ -24,13 +24,31 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.2** — eight list-returning methods answered `[]` against a server that
-> held the rows, because each read its rows under a key the route does not send.
-> `receptors.search("EGFR")` now returns the 38 complexes the server has (it read
-> `results`; the route sends `complexes`), and the same fix lands on
+> **v0.16.3** — ten defects found by running the *published* 0.16.0/0.16.1
+> wheels against production, each one answering with a clean, plausible value
+> that no caller could tell from a real measurement. `jobs.stream()` called a
+> route the server does not have, so every call 404'd and read as "that job does
+> not exist" (sync and async now pick the route that exists);
+> `bivalent.list_sessions()` raised on the server's raw Postgres timestamps and
+> on a session whose second target is not chosen yet, and it invented a gene
+> named `"unknown"` and a linker the server never sent — absent is now `None`.
+> A valid key with an unrecognised prefix is no longer refused client-side
+> before the request is sent; `ligandai legal status` no longer sends a fully
+> accepted account into re-acceptance; a `POST`/`PATCH` refused at connect time
+> is retried, which is what killed a `peptides.fold` during a redeploy;
+> `programs.get()` no longer answers an all-`None` record for a program that has
+> one; `synthesis.list_orders()` no longer reports "no orders" out of a
+> `coming_soon` stub; and `proteins.info` works for every gene (the route sends
+> `geneName`). Note the `peptides` **read** endpoints are covered by replayed-body
+> tests only — see the CHANGELOG's "Known gap".
+>
+> 0.16.2 fixed eight list-returning methods that answered `[]` against a server
+> that held the rows, because each read its rows under a key the route does not
+> send. `receptors.search("EGFR")` returns the 38 complexes the server has (it
+> read `results`; the route sends `complexes`), and the same fix lands on
 > `diseases.search`, `memory.search` / `memory.list`, `discovery.organ_systems`,
 > `peptides.search_by_pocket` and `peptides.get_elite` (which raised
-> `No active session` for every gene). A body carrying no recognised list now
+> `No active session` for every gene). A body carrying no recognised list
 > raises `LigandAIUnreadableResponse` — "I could not read the answer" is never
 > spelled the same way as "there were no rows". `receptors.oligomeric_states()`
 > returns state names, as its type says, and `diseases.gene_mutations()` no longer
