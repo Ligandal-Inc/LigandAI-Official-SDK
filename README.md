@@ -24,7 +24,15 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.0** — a fold costs **10 credits ($0.10)** at the default 4 trajectories,
+> **v0.16.1** — fixes `client.ensemble` against the hosted co-fold route:
+> `ensemble.run()` now collects its co-folds (0.16.0 called a `Job.result()` that
+> does not exist, so every peptide landed in `failures` after its job was submitted);
+> `Job.wait()` rides out the route's intermittent 404 "job not found"
+> (`not_found_grace`, default 600 s) and reads the co-fold state `done` as finished;
+> and an engine that finds no peptide-receptor contact is `None` /
+> `ConsensusRow.no_interface`, not a measured 0.0.
+>
+> Since 0.16.0 a fold costs **10 credits ($0.10)** at the default 4 trajectories,
 > down from 100 ($1.00); 1 credit = 1 cent. The figures live in one module,
 > `ligandai.pricing`, as a local fallback for the pre-flight balance check and
 > offline campaign budgets — the platform's own quote is authoritative
