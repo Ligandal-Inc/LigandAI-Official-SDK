@@ -20,6 +20,15 @@ machine instead of after GPU spend:
    hands the model geometry where it expects composition. Never pad, tile, or
    slice across widths; re-featurize at the width the model declares.
 
+⛔ Paralog guidance is an AFFINITY PRIOR; it does not buy selectivity. It steers
+the generator away from the off-target pockets you name, instead of drawing
+freely and filtering afterwards. In our controlled test it was not more
+selective than generate-and-filter. Use it as a different experiment, not as an
+upgrade. Selectivity is established only by a delta-ipSAE panel comparison in the
+SAME fold pass, and an absent panel fold is ABSENT, never "not selective" (same
+wording as the web design form, ``ParalogConditioningControl.tsx``
+``CONTRASTIVE_COPY``).
+
 The avoidance surface (:class:`AvoidancePolicy`) is the other half: which
 receptor residues a design must stay off, and which sequences are known hard
 negatives that should not be re-proposed.
