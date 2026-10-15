@@ -942,12 +942,64 @@ def _serialize_residue_ranges(
     elif isinstance(target_residues, dict):
         # A single already-serialized range dict.
         items = [target_residues]
+    elif isinstance(target_residues, (int, float)) and not isinstance(target_residues, bool):
+        # A single bare residue number.
+        items = [target_residues]
     else:
         items = list(target_residues)
-    return [
-        r.model_dump(by_alias=True) if isinstance(r, ResidueRange) else r
-        for r in items
-    ]
+
+    # ⛔ [bd-dre-i3h4y] A BARE RESIDUE NUMBER MUST GO ON THE WIRE AS A RANGE.
+    #
+    # `validate_region_list()` (which ran in `_generation_body` before this) has
+    # accepted a flat list of PDB resnums since x4vt8 and normalizes it to
+    # canonical {chain,start,end} — and then this builder deliberately keeps the
+    # ORIGINAL shape so per-region `label`/`description` fields survive. For a
+    # dict / ResidueRange that is right. For a bare int it meant the wire carried
+    # `targets[0].targetResidues = [140, 141, ...]`, and the server's
+    # shape-coercion step (`liftSdkResidueField`, residue-targeting-validation.ts)
+    # dropped every non-object entry — so `targetRegions` was never populated,
+    # `ptf_generation_runs.target_residues` persisted NULL, no `target_residues`
+    # reached FastAPI, and generation ran on the whole-chain geometric-pocket
+    # fallback. The call returned success the whole time. MEASURED on all 105
+    # receipts of a live campaign (120-206 residues requested per run, NULL
+    # persisted on every one).
+    #
+    # The server now accepts bare integers too (same five shapes as
+    # `normalize_region` here and `normalize_regions()` in FastAPI), so this is
+    # the second of two independent fixes rather than the only one: it is what
+    # makes a flat list work against a server that has NOT taken that fix, and
+    # it is what keeps the FastAPI surface (whose `target_residues` field is
+    # typed `List[Dict]`) reachable for a caller who bypasses Express.
+    #
+    # Consecutive resnums are collapsed into one range — identical residue set
+    # (the resolver enumerates start..end per region), readable label/diagnostic,
+    # and the SAME variantKey as the equivalent hand-written range, which is the
+    # correct identity because they request the same residues. The server's
+    # collapse rule is the mirror of this one. Non-scalar entries keep their
+    # original shape and order.
+    passthrough: list[Any] = []
+    resnums: list[int] = []
+    for r in items:
+        if isinstance(r, ResidueRange):
+            passthrough.append(r.model_dump(by_alias=True))
+        elif isinstance(r, (int, float)) and not isinstance(r, bool):
+            resnums.append(int(r))
+        else:
+            passthrough.append(r)
+    if not resnums:
+        return passthrough
+
+    ranges: list[dict[str, Any]] = []
+    ordered = sorted(set(resnums))
+    run_start = prev = ordered[0]
+    for n in ordered[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        ranges.append({"start": run_start, "end": prev})
+        run_start = prev = n
+    ranges.append({"start": run_start, "end": prev})
+    return passthrough + ranges
 
 
 def _jsonsafe_residue_ranges(value: Any) -> Any:
@@ -1304,6 +1356,40 @@ def _generation_body(
         body["pocketExpansionRadiusA"] = float(pocket_expansion_radius_a)
         body["expandHotspotPocket"] = pocket_expansion_radius_a > 0
 
+    # ⛔ [bd-dre-i3h4y] TARGET REGIONS GO ON THE WIRE AT THE TOP LEVEL TOO, the
+    # same way avoid_residues already does immediately below.
+    #
+    # `avoid_residues` has always been emitted as the INTERNAL key the Express
+    # handler destructures (`avoidRegions`), while `target_residues` was emitted
+    # ONLY as `targets[0].targetResidues` and relied on one server-side lift
+    # (`liftSdkResidueFieldsOnBody`) to reach `targetRegions`. That made the
+    # entire pocket-targeting transport depend on a single coercion step, and
+    # when that step dropped bare integers the field vanished with a 200 OK:
+    # measured NULL `ptf_generation_runs.target_residues` on 105/105 runs of a
+    # live campaign. Emitting the canonical key here removes the single point of
+    # failure and makes the call work against a server that has not taken the
+    # lift fix. Per-region `label`/`description` are carried through, and
+    # `targets[0].targetResidues` still carries the caller's original shape, so
+    # nothing that reads either key loses information. Express precedence: an
+    # explicitly-provided `targetRegions` wins and the lift is a no-op.
+    if target_residues is not None:
+        _serialized_target = _serialize_residue_ranges(target_residues)
+        if _serialized_target:
+            body["targetRegions"] = [
+                {
+                    # null when unscoped — never guessed (x4vt8).
+                    "chain": r.get("chain"),
+                    "start": r["start"] if "start" in r else r["startResidue"],
+                    "end": r["end"] if "end" in r else r["endResidue"],
+                    "startResidue": r["start"] if "start" in r else r["startResidue"],
+                    "endResidue": r["end"] if "end" in r else r["endResidue"],
+                    **({"description": r["description"]} if r.get("description") else {}),
+                    **({"label": r["label"]} if r.get("label") else {}),
+                }
+                for r in _serialized_target
+                if isinstance(r, dict)
+            ]
+
     # Avoid residues — receptor regions the caller wants kept clear. Serialized
     # as ``avoidRegions`` (top-level body key), which the Express layer reads
     # alongside ``targetRegions`` and forwards to FastAPI as ``avoid_residues``.
@@ -1335,7 +1421,18 @@ def _generation_body(
             # bead exists to kill).
             body["avoidRegions"] = [
                 {
-                    "chain": r.get("chain", "A"),
+                    # ⛔ [bd-dre-i3h4y] `r.get("chain", "A")` GUESSED CHAIN A for
+                    # any region the caller did not scope — the exact thing the
+                    # x4vt8 rule three lines above forbids, and that every other
+                    # implementation of this rule (normalize_region here,
+                    # liftSdkResidueField / canonicalizeRegionsForVariantKey in
+                    # Express, normalize_regions in FastAPI) already gets right by
+                    # preserving null. A fabricated chain short-circuits FastAPI's
+                    # own fallback order (region chain -> active_chains ->
+                    # chain-agnostic resnum match), so on a differently-labelled
+                    # chain that reuses the same resnum the exclusion silently
+                    # lands on the WRONG residue. null means "no chain given".
+                    "chain": r.get("chain"),
                     "start": r["start"] if "start" in r else r["startResidue"],
                     "end": r["end"] if "end" in r else r["endResidue"],
                     "startResidue": r["start"] if "start" in r else r["startResidue"],
