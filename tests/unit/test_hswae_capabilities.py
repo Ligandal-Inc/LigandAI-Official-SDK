@@ -115,6 +115,11 @@ def _semantic_result() -> dict[str, Any]:
             }
         ],
         "count": 1,
+        "unmatched_reason": None,
+        "searched_vocabularies": [
+            {"name": "tissues", "size": 73},
+            {"name": "cell_types", "size": 85},
+        ],
     }
 
 
@@ -135,10 +140,28 @@ def _surface_result() -> dict[str, Any]:
                 "ensemblGene": "ENSG00000141505",
                 "uniprotId": "P07307",
                 "proteinName": "ASGPR1",
+                "embeddingSpecificity": 0.1131,
+                "embeddingCombinedScore": 0.1131,
+                "consistency": 1.0,
             }
         ],
         "timing_ms": 3.25,
         "method": "semantic_search_markers",
+        "marker_method": "hswae_differential",
+        "ranking_key": "specificity_index",
+        "sort_key_field": "specificity_index",
+        "expression_floor_tpm": 1.0,
+        "expression_floor_tissue": "Liver",
+        "markers_eligible": 1413,
+        "markers_requested": 25,
+        "markers_returned": 1,
+        "markers_below_floor_excluded": 1276,
+        "markers_unknown_expression_excluded": 0,
+        "markers_below_consistency_excluded": 0,
+        "floor_note": (
+            "A list shorter than markers_requested means the expression floor or "
+            "the consistency threshold excluded candidates."
+        ),
     }
 
 
@@ -161,12 +184,48 @@ def _resolve_result() -> dict[str, Any]:
                 "supportingGenes": [{"gene": "ALB", "csi": 8.1, "rankForGene": 1}],
                 "vote_count": 2,
                 "marker_score": 0.91,
+                "match_type": "ontology_synonym",
+                "resolution_is_proxy": False,
+                "dropped_query_tokens": [],
+                "uncorroborated_qualifiers": [],
+                "added_canonical_tokens": ["cells"],
+                "unrequested_specializations": [],
             }
         ],
         "delivery_context_hint": {
             "default_scope": "systemic",
             "rationale": "The target context is systemically accessible.",
             "alternatives": ["tissue_resident"],
+        },
+        "resolution_status": "resolved",
+        "resolution_stage": "ontology_synonym",
+        "resolution_is_proxy": False,
+        "resolution_is_ambiguous": False,
+        "ambiguous_alternatives": [],
+        "stages_tried": ["exact", "substring", "ontology_synonym"],
+        "nearest_candidates": [
+            {
+                "cell_type": "hepatocyte",
+                "score": 0.96,
+                "match_type": "ontology_synonym",
+                "accepted": True,
+                "shared_tokens": ["hep"],
+                "dropped_query_tokens": [],
+            }
+        ],
+        "unresolved_reason": None,
+        "vocabulary": {
+            "size": 202,
+            "source_datasets": ["hpa_v25_single_cell_cluster"],
+            "tissue_count": 38,
+            "scope": "A FIXED set of HPA v25 single-cell cluster labels.",
+            "specificity_row_count": 477_692,
+            "synonym_tables": {
+                "specialized_alias_keys": 66,
+                "specialized_alias_entries": 16,
+                "ontology_synonym_keys": 254,
+                "ontology_synonym_entries": 88,
+            },
         },
     }
 
@@ -189,11 +248,44 @@ def _compare_result() -> dict[str, Any]:
                 "is_surface_annotated": True,
                 "top_tissue": "Liver",
                 "top_organ_system": "Digestive system",
+                "reference_cell_types_matched": ["cholangiocyte"],
             }
         ],
         "comparator_scope": "systemic",
         "comparator_scope_source": "request",
         "delivery_context": "systemic",
+        "differential_status": "computed",
+        "differential_status_detail": (
+            "1 gene row(s) computed for target 'hepatocyte' against 1 reference(s)."
+        ),
+        "target_resolution": {
+            "query": "hep",
+            "canonical": "hepatocyte",
+            "resolution_status": "resolved",
+            "resolution_stage": "ontology_synonym",
+            "resolution_is_proxy": False,
+            "resolution_is_ambiguous": False,
+            "ambiguous_alternatives": [],
+            "stages_tried": ["exact", "substring", "ontology_synonym"],
+            "unresolved_reason": None,
+        },
+        "reference_resolution": [
+            {
+                "requested": "cholangiocyte",
+                "canonical": "cholangiocyte",
+                "resolution_status": "resolved",
+                "resolution_stage": "exact",
+                "resolution_is_proxy": False,
+                "specificity_row_count": 2_683,
+                "contributes_to_differential": True,
+                "unresolved_reason": None,
+            }
+        ],
+        "reference_cell_types_requested": ["cholangiocyte"],
+        "comparator_scope_note": (
+            "comparator_scope 'systemic' did not auto-populate: 1 explicit reference."
+        ),
+        "differential_truncated_at_top_n": False,
     }
 
 
@@ -217,6 +309,7 @@ def _isoform_result() -> dict[str, Any]:
                         "max_tpm": 20.0,
                         "prevalence_tpm1": 0.75,
                         "sample_count": 12,
+                        "context_resolution": "cell_type",
                     }
                 ],
                 "specificity_by_context": [
@@ -231,12 +324,54 @@ def _isoform_result() -> dict[str, Any]:
                         "gene_mean_tpm": 18.0,
                         "rank_expression": 1,
                         "rank_usage": 2,
+                        "context_resolution": "cell_type",
+                    }
+                ],
+                "cell_type_expression_by_context": [
+                    {
+                        "tissue": "Liver",
+                        "cell_type": "hepatocyte",
+                        "cluster": "Liver c-1",
+                        "context_resolution": "cell_type",
+                        "transcript_expression": 10.0,
+                        "gene_expression": 18.0,
+                        "isoform_usage": 0.55,
+                        "expression_unit": "nTPM",
+                        "cell_count": 1_204,
+                        "cell_transcript_si": 2.1,
+                        "cell_usage_ratio": 0.6,
+                        "cisi": 1.8,
+                        "rank_expression": 1,
+                        "rank_usage": 2,
+                        "competitor_cell_type": "cholangiocyte",
+                        "competitor_tissue": "Liver",
+                        "evidence_level": "single_cell_cluster",
+                        "platform": "10x",
+                        "source_dataset": "hpa_v25_single_cell_cluster",
                     }
                 ],
             }
         ],
         "resolution": "cell_type",
         "note": "Cell-type resolved H-SWAEV2 result.",
+        "observed_resolution": "cell_type_in_returned_records",
+        "backend_observed_resolution": "cell_type_in_returned_records",
+        "cell_type_resolution_available": True,
+        "cell_type_resolution_scope": {
+            "populated": True,
+            "row_count": 339_739,
+            "gene_row_count": 171,
+            "cell_type_count": 19,
+            "tissue_count": 1,
+            "source_datasets": ["hpa_v25_single_cell_cluster"],
+            "note": "A SEPARATE, much narrower vocabulary than the cell-type layer.",
+        },
+        "returned_row_counts": {
+            "tissue_resolved": 0,
+            "cell_type_resolved": 1,
+            "with_cell_type_label": 1,
+            "cell_type_rows_below_threshold": 0,
+        },
     }
 
 
@@ -641,9 +776,6 @@ def test_unintegrated_and_planned_operations_are_not_exposed(
 @pytest.mark.parametrize(
     "case",
     [
-        "top_level_extra",
-        "owner_extra",
-        "result_extra",
         "nonfinite",
         "oversize",
         "wrong_status",
@@ -657,13 +789,7 @@ def test_malformed_server_receipts_fail_closed(
     client: LigandAI,
 ) -> None:
     payload = _receipt("hswae.v1.semantic_search")
-    if case == "top_level_extra":
-        payload["internalPath"] = "/srv/private/model.bin"
-    elif case == "owner_extra":
-        payload["owner"]["apiKeyId"] = "private-key-id"
-    elif case == "result_extra":
-        payload["result"]["databaseTable"] = "cell_context_expression"
-    elif case == "nonfinite":
+    if case == "nonfinite":
         payload["result"]["matches"][0]["score"] = math.inf
     elif case == "oversize":
         payload["result"]["matches"] = payload["result"]["matches"] * 51
@@ -700,6 +826,236 @@ def test_malformed_server_receipts_fail_closed(
 
 
 @pytest.mark.parametrize(
+    ("case", "path"),
+    [
+        ("receipt_envelope", ("serverLatencyMs",)),
+        ("owner", ("owner", "tenantRegion")),
+        ("result", ("result", "rankingRevision")),
+        ("list_element", ("result", "matches", 0, "matchRevision")),
+        ("nested_list_element", ("result", "searched_vocabularies", 0, "vocabularyRevision")),
+    ],
+)
+def test_additive_server_fields_parse_and_stay_reachable(
+    case: str,
+    path: tuple[Any, ...],
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """An undeclared server field must NOT break the call.
+
+    ⛔ This replaces four cases that asserted the opposite
+    (``top_level_extra`` / ``owner_extra`` / ``result_extra`` /
+    ``context_extra``). Those pinned a live regression: the platform added
+    resolution and ranking bookkeeping under bd-dre-pjhrp.10 and
+    bd-dre-pjhrp.11 and EVERY H-SWAE capability call through this SDK then
+    raised ``ValidationError`` — 57 errors on surface_markers, 47 on
+    compare_cell_types, 15 on resolve_cell_type, 2 on semantic_search, all
+    ``extra_forbidden``, against well-formed production payloads. Refusing a
+    field the server sent also protects nothing, which was those cases' stated
+    purpose: the bytes have already arrived in this process, so rejecting them
+    only denies the caller the result. [bd-dre-pjhrp.17]
+    """
+
+    payload = _receipt("hswae.v1.semantic_search")
+    target: Any = payload
+    for step in path[:-1]:
+        target = target[step]
+    target[path[-1]] = "additive-value"
+    httpx_mock.add_response(method="POST", url=INVOKE_URL, json=payload)
+
+    receipt = client.discovery.invoke_capability("hswae.v1.semantic_search", {"query": "liver"})
+
+    # Declared data is unaffected...
+    assert receipt.result.query == "liver"
+    assert receipt.result.matches[0].tissue == "Liver"
+    # ...and the additive value survives parsing and a round trip.
+    owner: Any = receipt
+    for step in path[:-1]:
+        owner = owner[step] if isinstance(step, int) else getattr(owner, step)
+    assert owner.model_extra == {path[-1]: "additive-value"}
+    dumped: Any = receipt.model_dump(mode="json", by_alias=True)
+    for step in path[:-1]:
+        dumped = dumped[step]
+    assert dumped[path[-1]] == "additive-value"
+
+
+def test_additive_field_in_a_complex_context_parses(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """The complex-specificity contexts take additive fields too.
+
+    Replaces the ``context_extra`` case of
+    ``test_malformed_complex_receipts_fail_closed``; every other case there
+    (private path, internal label, non-finite, bool-as-number, subunit order,
+    count mismatch, unknown limiter, oversize) is a genuine malformation and
+    still asserts a raise.
+    """
+
+    operation = "predictive_interactomics.complex_specificity"
+    payload = _receipt(operation)
+    payload["result"]["contexts"][0]["clusterRevision"] = "2026-10"
+    httpx_mock.add_response(method="POST", url=INVOKE_URL, json=payload)
+
+    receipt = client.discovery.invoke_capability(operation, {"subunits": ["IL2RA", "IL2RB"]})
+
+    context = receipt.result.contexts[0]
+    assert context.model_extra == {"clusterRevision": "2026-10"}
+    assert context.heteromer_si == 2.75
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_pre_bookkeeping_server_payloads_still_parse(
+    operation: str,
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """A server older than bd-dre-pjhrp.10/.11 omits the new fields entirely.
+
+    Every field declared for that work is ``Optional`` with a ``None``
+    default, so an older deployment keeps parsing and the new accessors read
+    ``None`` rather than raising.
+    """
+
+    added = {
+        "marker_method", "ranking_key", "sort_key_field", "expression_floor_tpm",
+        "expression_floor_tissue", "markers_eligible", "markers_requested",
+        "markers_returned", "markers_below_floor_excluded",
+        "markers_unknown_expression_excluded", "markers_below_consistency_excluded",
+        "floor_note", "unmatched_reason", "searched_vocabularies", "resolution_status",
+        "resolution_stage", "resolution_is_proxy", "resolution_is_ambiguous",
+        "ambiguous_alternatives", "stages_tried", "nearest_candidates",
+        "unresolved_reason", "vocabulary", "differential_status",
+        "differential_status_detail", "target_resolution", "reference_resolution",
+        "reference_cell_types_requested", "comparator_scope_note",
+        "differential_truncated_at_top_n", "reference_cell_types_matched",
+        "observed_resolution", "backend_observed_resolution",
+        "cell_type_resolution_available", "cell_type_resolution_scope",
+        "returned_row_counts", "cell_type_expression_by_context", "context_resolution",
+        "match_type", "dropped_query_tokens", "uncorroborated_qualifiers",
+        "added_canonical_tokens", "unrequested_specializations",
+        "embeddingSpecificity", "embeddingCombinedScore", "consistency",
+    }
+    keep_match_type = {"matches", "matched_tissues", "contexts"}
+
+    def strip(node: Any, parent_key: str | None = None) -> Any:
+        if isinstance(node, dict):
+            return {
+                key: strip(value, key)
+                for key, value in node.items()
+                if key not in added
+                or (key == "match_type" and parent_key in keep_match_type)
+            }
+        if isinstance(node, list):
+            return [strip(item, parent_key) for item in node]
+        return node
+
+    payload = _receipt(operation)
+    payload["result"] = strip(payload["result"])
+    httpx_mock.add_response(method="POST", url=INVOKE_URL, json=payload)
+
+    receipt = client.discovery.invoke_capability(operation, INPUTS[operation])  # type: ignore[call-overload]
+
+    assert isinstance(receipt, RECEIPT_TYPES[operation])
+    assert receipt.model_extra == {}
+
+
+@pytest.mark.parametrize(
+    ("operation", "mutate"),
+    [
+        (
+            "hswae.v1.surface_markers",
+            lambda result: result.update(markers_eligible="many"),
+        ),
+        (
+            "hswae.v1.surface_markers",
+            lambda result: result["markers"][0].update(consistency="high"),
+        ),
+        (
+            "hswae.v1.surface_markers",
+            lambda result: result.update(expression_floor_tpm=-1.0),
+        ),
+        (
+            "hswae.v2.resolve_cell_type",
+            lambda result: result.update(resolution_is_proxy="no"),
+        ),
+        (
+            "hswae.v2.resolve_cell_type",
+            lambda result: result.update(vocabulary="hpa_v25"),
+        ),
+        (
+            "hswae.v2.resolve_cell_type",
+            lambda result: result["nearest_candidates"][0].update(score="0.9"),
+        ),
+        (
+            "hswae.v2.compare_cell_types",
+            lambda result: result.update(target_resolution=["hepatocyte"]),
+        ),
+        (
+            "hswae.v2.compare_cell_types",
+            lambda result: result["reference_resolution"][0].pop("requested"),
+        ),
+        (
+            "hswae.v2.compare_cell_types",
+            lambda result: result["differential"][0].update(reference_cell_types_matched="chol"),
+        ),
+        (
+            "hswae.v2.isoform_expression",
+            lambda result: result.update(returned_row_counts={"tissue_resolved": "0"}),
+        ),
+        (
+            "hswae.v2.isoform_expression",
+            lambda result: result["isoforms"][0]["cell_type_expression_by_context"][0].update(
+                cell_count=-1
+            ),
+        ),
+        (
+            "hswae.v1.semantic_search",
+            lambda result: result["searched_vocabularies"][0].pop("name"),
+        ),
+    ],
+)
+def test_declared_fields_keep_their_type_discipline(
+    operation: str,
+    mutate: Any,
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """Permissive about UNDECLARED fields, strict about declared ones.
+
+    A wrong type, a bound violation, a missing required field, and a
+    non-object where a model belongs all still raise — only "a field I do not
+    declare" became non-fatal. [bd-dre-pjhrp.17]
+    """
+
+    payload = _receipt(operation)
+    mutate(payload["result"])
+    httpx_mock.add_response(method="POST", url=INVOKE_URL, json=payload)
+
+    with pytest.raises(ValidationError):
+        client.discovery.invoke_capability(operation, INPUTS[operation])  # type: ignore[call-overload]
+
+
+def test_caller_input_is_still_closed_after_responses_opened(
+    httpx_mock: HTTPXMock,
+    client: LigandAI,
+) -> None:
+    """Opening RESPONSES must not open REQUESTS.
+
+    An unknown input key is a caller typo that the server would silently
+    drop, so it still fails before HTTP.
+    """
+
+    with pytest.raises(ValidationError):
+        client.discovery.invoke_capability(  # type: ignore[call-overload]
+            "hswae.v1.surface_markers",
+            {"context": "liver", "ranking_key": "specificity_index"},
+        )
+
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.parametrize(
     "case",
     [
         "private_source",
@@ -707,7 +1063,6 @@ def test_malformed_server_receipts_fail_closed(
         "internal_cell_type",
         "uri_cluster",
         "encoded_competitor",
-        "context_extra",
         "nonfinite",
         "bool_as_number",
         "subunit_order",
@@ -734,8 +1089,6 @@ def test_malformed_complex_receipts_fail_closed(
         context["cluster"] = "file:atlas"
     elif case == "encoded_competitor":
         context["competitor_tissue"] = "%2fetc"
-    elif case == "context_extra":
-        context["internalTable"] = "cell_context_expression"
     elif case == "nonfinite":
         context["heteromer_si"] = math.inf
     elif case == "bool_as_number":

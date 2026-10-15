@@ -1121,6 +1121,11 @@ HswaeJsonSchemaScalar: TypeAlias = str | int | float | bool | None
 _HswaePublicString: TypeAlias = Annotated[str, Field(min_length=1, max_length=2_000)]
 _HswaeNullablePublicString: TypeAlias = Annotated[str, Field(max_length=2_000)] | None
 _HswaeGene: TypeAlias = Annotated[str, Field(min_length=1, max_length=100)]
+#: One normalized query/canonical token in the resolver's provenance lists.
+_HswaeQueryToken: TypeAlias = Annotated[str, Field(min_length=1, max_length=200)]
+#: A free-text explanatory note. Longer than a label: the platform puts whole
+#: "this empty list is a filter artefact, not an absence" paragraphs in these.
+_HswaeNullableNote: TypeAlias = Annotated[str, Field(max_length=10_000)] | None
 
 _HSWAE_COMPLEX_SUBUNIT_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._-]*$")
 _HSWAE_COMPLEX_URI_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
@@ -1158,20 +1163,63 @@ def _validate_hswae_complex_public_label(value: str, *, allow_empty: bool = Fals
     return value
 
 
-class _HswaeClosedModel(BaseModel):
-    """Strict model used only for the signed external capability contract.
+class _HswaeContractModel(BaseModel):
+    """Type discipline shared by every H-SWAE capability-contract model.
 
-    The SDK's general response models deliberately allow additive fields. The
-    signed capability surface is different: every object is closed and must
-    fail rather than silently accept contract drift.
+    Declared fields are strictly typed, non-finite floats are rejected, and a
+    parsed object is immutable. This class sets NO ``extra`` policy — that is
+    the single decision made by the two subclasses below, and nothing else in
+    this module sets ``model_config`` on an H-SWAE model. One rule, one place:
+    the defect this replaced existed because the same rule had three
+    implementations (server TypeScript, capability boundary, this SDK).
     """
 
     model_config = ConfigDict(
-        extra="forbid",
         strict=True,
         allow_inf_nan=False,
         frozen=True,
     )
+
+
+class _HswaeClosedModel(_HswaeContractModel):
+    """Closed model for the parts of the contract the SDK itself asserts.
+
+    Used for CALLER INPUT — a caller's typo must fail before HTTP rather than
+    travel the wire and be silently dropped server-side — and for the
+    hash-pinned signed registry and its JSON-schema subset, where an unknown
+    key changes what the advertised contract MEANS (an unenforced keyword the
+    SDK quietly ignored would make it report a validation guarantee it is not
+    applying), so drift must fail.
+
+    ⛔ NOT for server response bodies. See :class:`_HswaeOpenModel`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _HswaeOpenModel(_HswaeContractModel):
+    """Server-response model for the capability surface.
+
+    Identical type discipline to :class:`_HswaeClosedModel` — strict types on
+    every declared field, no non-finite floats, frozen — but a field the
+    server sent and this module does not declare is KEPT (reachable through
+    ``model_extra`` and preserved by ``model_dump``) instead of raising.
+
+    ⛔ ``extra="forbid"`` here was a live regression. The platform added
+    resolution/ranking bookkeeping (bd-dre-pjhrp.10, bd-dre-pjhrp.11) and
+    every H-SWAE capability call through this SDK then raised
+    ``ValidationError`` against well-formed production payloads — measured
+    2026-10-15: 57 errors on ``hswae.v1.surface_markers``, 47 on
+    ``hswae.v2.compare_cell_types``, 15 on ``hswae.v2.resolve_cell_type``, 2
+    on ``hswae.v1.semantic_search``, every one of them ``extra_forbidden``,
+    with zero type errors and zero missing fields. Refusing a field the
+    server added protects nothing — the bytes already arrived in this
+    process; it only denies the caller their result. A wrong type on a
+    declared field, a missing required field, and a non-object where a model
+    belongs all still raise. [bd-dre-pjhrp.17]
+    """
+
+    model_config = ConfigDict(extra="allow")
 
 
 class HswaeJsonSchemaNode(_HswaeClosedModel):
@@ -1477,7 +1525,7 @@ def validate_hswae_capability_input(
     return cast(dict[str, Any], validated.model_dump(mode="json", exclude_none=True))
 
 
-class HswaeSemanticMatch(_HswaeClosedModel):
+class HswaeSemanticMatch(_HswaeOpenModel):
     tissue: _HswaePublicString
     score: float = Field(ge=-1, le=1)
     match_type: Literal["exact", "alias", "cell_to_tissue", "fuzzy", "embedding"]
@@ -1485,13 +1533,30 @@ class HswaeSemanticMatch(_HswaeClosedModel):
     cell_type: _HswaeNullablePublicString
 
 
-class HswaeSemanticSearchResult(_HswaeClosedModel):
+class HswaeSearchedVocabulary(_HswaeOpenModel):
+    """One vocabulary the search actually looked in, and its size.
+
+    An empty ``matches`` list is absence FROM THESE VOCABULARIES, not absence
+    from biology — this is the field that makes the two distinguishable.
+    """
+
+    name: _HswaePublicString
+    size: int | None = Field(default=None, ge=0)
+
+
+class HswaeSemanticSearchResult(_HswaeOpenModel):
     query: _HswaePublicString
     matches: list[HswaeSemanticMatch] = Field(max_length=50)
     count: int = Field(ge=0, le=50)
+    #: Why nothing matched, when ``matches`` is empty. [bd-dre-pjhrp.17]
+    unmatched_reason: _HswaeNullablePublicString = None
+    searched_vocabularies: list[HswaeSearchedVocabulary] | None = Field(
+        default=None,
+        max_length=20,
+    )
 
 
-class HswaeSurfaceMarker(_HswaeClosedModel):
+class HswaeSurfaceMarker(_HswaeOpenModel):
     gene: _HswaeGene
     target_context: _HswaePublicString = Field(alias="targetContext")
     method: Annotated[str, Field(min_length=1, max_length=200)]
@@ -1502,24 +1567,57 @@ class HswaeSurfaceMarker(_HswaeClosedModel):
     ensembl_gene: _HswaeNullablePublicString = Field(alias="ensemblGene")
     uniprot_id: _HswaeNullablePublicString = Field(alias="uniprotId")
     protein_name: _HswaeNullablePublicString = Field(alias="proteinName")
+    #: Embedding-space scores, reported alongside ``specificity_index`` so the
+    #: ranked list can be re-derived from the key that actually sorted it.
+    #: [bd-dre-pjhrp.10]
+    embedding_specificity: float | None = Field(default=None, alias="embeddingSpecificity")
+    embedding_combined_score: float | None = Field(default=None, alias="embeddingCombinedScore")
+    #: Fraction of samples in which the marker clears the floor.
+    consistency: float | None = None
 
 
-class HswaeSurfaceMarkersResult(_HswaeClosedModel):
+class HswaeSurfaceMarkersResult(_HswaeOpenModel):
+    """SI-ranked surface markers, with the ranking and filter accounting.
+
+    ⛔ A list shorter than ``markers_requested`` is a FILTER result, not a
+    measured absence: read ``markers_eligible`` against the three
+    ``markers_*_excluded`` counts and ``floor_note`` before concluding a gene
+    is not expressed. ``ranking_key`` names the field the list is sorted by —
+    do not assume it. [bd-dre-pjhrp.10]
+    """
+
     query: _HswaePublicString
     matched_tissues: list[HswaeSemanticMatch] = Field(max_length=5)
     primary_tissue: _HswaePublicString
     markers: list[HswaeSurfaceMarker] = Field(max_length=500)
     timing_ms: float = Field(ge=0)
     method: Literal["semantic_search_markers"]
+    #: The marker-selection backend behind this list (e.g. ``hswae_differential``).
+    marker_method: _HswaeNullablePublicString = None
+    #: The field ``markers`` is ordered by, and the raw sort key behind it.
+    ranking_key: _HswaeNullablePublicString = None
+    sort_key_field: _HswaeNullablePublicString = None
+    #: Expression floor applied, and the tissue its TPM was taken in.
+    expression_floor_tpm: float | None = Field(default=None, ge=0)
+    expression_floor_tissue: _HswaeNullablePublicString = None
+    #: Truncation / exclusion accounting. ``markers_eligible`` is the candidate
+    #: pool before ``top_n`` truncation.
+    markers_eligible: int | None = Field(default=None, ge=0)
+    markers_requested: int | None = Field(default=None, ge=0)
+    markers_returned: int | None = Field(default=None, ge=0)
+    markers_below_floor_excluded: int | None = Field(default=None, ge=0)
+    markers_unknown_expression_excluded: int | None = Field(default=None, ge=0)
+    markers_below_consistency_excluded: int | None = Field(default=None, ge=0)
+    floor_note: _HswaeNullableNote = None
 
 
-class HswaeSupportingGeneEvidence(_HswaeClosedModel):
+class HswaeSupportingGeneEvidence(_HswaeOpenModel):
     gene: _HswaeGene
     csi: float
     rank_for_gene: int = Field(alias="rankForGene", ge=1)
 
 
-class HswaeResolveCellTypeCandidate(_HswaeClosedModel):
+class HswaeResolveCellTypeCandidate(_HswaeOpenModel):
     cell_type: _HswaePublicString
     confidence: float = Field(ge=0, le=1)
     top_tissue: _HswaeNullablePublicString
@@ -1540,9 +1638,119 @@ class HswaeResolveCellTypeCandidate(_HswaeClosedModel):
     )
     vote_count: int | None = Field(ge=0)
     marker_score: float | None
+    #: Per-candidate resolution provenance [bd-dre-pjhrp.11]. ``match_type``
+    #: is the resolver stage that produced this candidate
+    #: (``exact`` / ``substring`` / ``ontology_synonym`` / ``token_set`` /
+    #: ``fuzzy`` / ``specialized_alias`` / ``marker_overlap``). Deliberately a
+    #: plain string, not a ``Literal``: a stage added later must not become a
+    #: hard parse failure, which is the defect this field shipped with.
+    match_type: _HswaeNullablePublicString = None
+    #: True when the canonical cell type is a PROXY for the query, not the
+    #: query itself — read ``proxy_note`` before treating it as the same cell.
+    resolution_is_proxy: bool | None = None
+    #: Tokens of the query this match did not account for, and the qualifier
+    #: subset of them that nothing in the atlas corroborates. A non-empty
+    #: ``uncorroborated_qualifiers`` means the match is broader than asked.
+    dropped_query_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    uncorroborated_qualifiers: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    #: Tokens the canonical label adds beyond the query, and specializations
+    #: the caller did not ask for.
+    added_canonical_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    unrequested_specializations: list[_HswaeQueryToken] | None = Field(
+        default=None,
+        max_length=50,
+    )
 
 
-class HswaeDeliveryContextHint(_HswaeClosedModel):
+class HswaeCellTypeAlternative(_HswaeOpenModel):
+    """A competing canonical cell type an ambiguous query also matched."""
+
+    cell_type: _HswaePublicString
+    score: float
+    match_type: _HswaeNullablePublicString = None
+
+
+class HswaeNearestCandidate(_HswaeOpenModel):
+    """A nearest atlas label, emitted even when nothing resolved.
+
+    ``accepted`` is False for the rows that explain an UNRESOLVED query —
+    they are why-not evidence, not results. [bd-dre-pjhrp.11]
+    """
+
+    cell_type: _HswaePublicString
+    score: float
+    match_type: _HswaeNullablePublicString = None
+    accepted: bool | None = None
+    shared_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    dropped_query_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+
+
+class HswaeResolutionSynonymTables(_HswaeOpenModel):
+    """Sizes of the synonym tables the resolver consulted."""
+
+    specialized_alias_keys: int | None = Field(default=None, ge=0)
+    specialized_alias_entries: int | None = Field(default=None, ge=0)
+    ontology_synonym_keys: int | None = Field(default=None, ge=0)
+    ontology_synonym_entries: int | None = Field(default=None, ge=0)
+
+
+class HswaeResolutionVocabulary(_HswaeOpenModel):
+    """The FIXED vocabulary this resolution ran against.
+
+    ⛔ Bounds the claim: an unresolved query is unresolved against ``size``
+    labels from ``source_datasets``, which is not the same as absent from the
+    biology. [bd-dre-pjhrp.11]
+    """
+
+    size: int | None = Field(default=None, ge=0)
+    source_datasets: list[_HswaePublicString] | None = Field(default=None, max_length=50)
+    tissue_count: int | None = Field(default=None, ge=0)
+    scope: _HswaeNullableNote = None
+    specificity_row_count: int | None = Field(default=None, ge=0)
+    synonym_tables: HswaeResolutionSynonymTables | None = None
+
+
+class HswaeCellTypeResolution(_HswaeOpenModel):
+    """How one query string became (or failed to become) a canonical label.
+
+    ``resolution_status`` and ``resolution_stage`` are plain strings rather
+    than ``Literal``s on purpose — a status or stage added later must not
+    become a hard parse failure. [bd-dre-pjhrp.11]
+    """
+
+    query: _HswaePublicString
+    canonical: _HswaeNullablePublicString = None
+    resolution_status: _HswaeNullablePublicString = None
+    resolution_stage: _HswaeNullablePublicString = None
+    resolution_is_proxy: bool | None = None
+    resolution_is_ambiguous: bool | None = None
+    ambiguous_alternatives: list[HswaeCellTypeAlternative] | None = Field(
+        default=None,
+        max_length=20,
+    )
+    stages_tried: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    unresolved_reason: _HswaeNullableNote = None
+
+
+class HswaeReferenceResolution(_HswaeOpenModel):
+    """How one requested comparator resolved, and whether it counted.
+
+    ⛔ ``contributes_to_differential`` False means this reference was NOT in
+    the comparison — a selectivity margin that silently dropped comparators
+    is not the margin the caller asked for. [bd-dre-pjhrp.11]
+    """
+
+    requested: _HswaePublicString
+    canonical: _HswaeNullablePublicString = None
+    resolution_status: _HswaeNullablePublicString = None
+    resolution_stage: _HswaeNullablePublicString = None
+    resolution_is_proxy: bool | None = None
+    specificity_row_count: int | None = Field(default=None, ge=0)
+    contributes_to_differential: bool | None = None
+    unresolved_reason: _HswaeNullableNote = None
+
+
+class HswaeDeliveryContextHint(_HswaeOpenModel):
     default_scope: Literal["topical", "tissue_resident", "systemic", "cluster_only"]
     rationale: Annotated[str, Field(min_length=1, max_length=10_000)]
     alternatives: list[Literal["topical", "tissue_resident", "systemic", "cluster_only"]] = Field(
@@ -1557,14 +1765,39 @@ class HswaeDeliveryContextHint(_HswaeClosedModel):
         return value
 
 
-class HswaeResolveCellTypeResult(_HswaeClosedModel):
+class HswaeResolveCellTypeResult(_HswaeOpenModel):
+    """A query resolved against the single-cell cell-type vocabulary.
+
+    ⛔ ``canonical`` alone does not say whether the resolution was exact, a
+    proxy, or ambiguous. Read ``resolution_status`` / ``resolution_stage`` /
+    ``resolution_is_proxy`` / ``resolution_is_ambiguous`` before treating
+    ``canonical`` as the cell type you asked for, and ``vocabulary`` to bound
+    what an unresolved query means. [bd-dre-pjhrp.11]
+    """
+
     query: _HswaePublicString
     canonical: _HswaeNullablePublicString
     candidates: list[HswaeResolveCellTypeCandidate] = Field(max_length=20)
     delivery_context_hint: HswaeDeliveryContextHint | None
+    #: ``resolved`` / ``unresolved``, and the stage that got there.
+    resolution_status: _HswaeNullablePublicString = None
+    resolution_stage: _HswaeNullablePublicString = None
+    resolution_is_proxy: bool | None = None
+    resolution_is_ambiguous: bool | None = None
+    ambiguous_alternatives: list[HswaeCellTypeAlternative] | None = Field(
+        default=None,
+        max_length=20,
+    )
+    #: Resolver stages attempted, in order — populated even on success.
+    stages_tried: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    #: Nearest labels with ``accepted`` False: why-not evidence for an
+    #: unresolved query, not results.
+    nearest_candidates: list[HswaeNearestCandidate] | None = Field(default=None, max_length=20)
+    unresolved_reason: _HswaeNullableNote = None
+    vocabulary: HswaeResolutionVocabulary | None = None
 
 
-class HswaeDifferentialCellTypeRow(_HswaeClosedModel):
+class HswaeDifferentialCellTypeRow(_HswaeOpenModel):
     gene_name: _HswaeGene
     target_cell_type: _HswaePublicString
     target_csi: float
@@ -1575,9 +1808,27 @@ class HswaeDifferentialCellTypeRow(_HswaeClosedModel):
     is_surface_annotated: bool
     top_tissue: _HswaeNullablePublicString
     top_organ_system: _HswaeNullablePublicString
+    #: The comparators ``max_reference_csi`` was actually taken over — a
+    #: shorter list than the request means this row's margin is against
+    #: FEWER references than asked for. [bd-dre-pjhrp.11]
+    reference_cell_types_matched: list[_HswaePublicString] | None = Field(
+        default=None,
+        max_length=200,
+    )
 
 
-class HswaeCompareCellTypesResult(_HswaeClosedModel):
+class HswaeCompareCellTypesResult(_HswaeOpenModel):
+    """Target-vs-reference differential specificity.
+
+    ⛔ An empty ``differential`` is not "nothing is differential": read
+    ``differential_status`` (``computed`` / ``target_unresolved`` /
+    ``no_references_resolved`` / ``no_rows_above_threshold``) and
+    ``differential_status_detail`` first, and check
+    ``reference_resolution`` for comparators that did not contribute.
+    ``differential_truncated_at_top_n`` distinguishes a truncated list from a
+    short one. [bd-dre-pjhrp.11]
+    """
+
     target_cell_type: _HswaePublicString
     target_query: _HswaePublicString
     target_proxy_note: _HswaeNullablePublicString
@@ -1594,9 +1845,28 @@ class HswaeCompareCellTypesResult(_HswaeClosedModel):
     )
     comparator_scope_source: Literal["request", "delivery_context", "none"]
     delivery_context: _HswaeNullablePublicString
+    #: Whether a differential was computed at all, and why not when it was not.
+    #: A plain string, not a ``Literal``: a new status must not break parsing.
+    differential_status: _HswaeNullablePublicString = None
+    differential_status_detail: _HswaeNullableNote = None
+    #: Per-side resolution provenance for the target and every comparator.
+    target_resolution: HswaeCellTypeResolution | None = None
+    reference_resolution: list[HswaeReferenceResolution] | None = Field(
+        default=None,
+        max_length=200,
+    )
+    #: What the caller asked for, before resolution and scope auto-population
+    #: — compare against ``reference_cell_types`` to see what was dropped.
+    reference_cell_types_requested: list[_HswaePublicString] | None = Field(
+        default=None,
+        max_length=200,
+    )
+    comparator_scope_note: _HswaeNullableNote = None
+    #: True when ``differential`` was cut at the requested ``top_n``.
+    differential_truncated_at_top_n: bool | None = None
 
 
-class HswaeIsoformExpressionContext(_HswaeClosedModel):
+class HswaeIsoformExpressionContext(_HswaeOpenModel):
     tissue: _HswaePublicString
     cell_type: _HswaeNullablePublicString
     context_name: _HswaePublicString
@@ -1605,9 +1875,13 @@ class HswaeIsoformExpressionContext(_HswaeClosedModel):
     max_tpm: float = Field(ge=0)
     prevalence_tpm1: float = Field(ge=0, le=1)
     sample_count: int = Field(ge=0)
+    #: Whether THIS row is tissue- or cell-type-resolved. ⛔ Per-row, because
+    #: the result-level ``resolution`` can claim ``cell_type`` while every
+    #: returned row is tissue-only. [bd-dre-pjhrp.11]
+    context_resolution: _HswaeNullablePublicString = None
 
 
-class HswaeIsoformSpecificityContext(_HswaeClosedModel):
+class HswaeIsoformSpecificityContext(_HswaeOpenModel):
     tissue: _HswaePublicString
     cell_type: _HswaeNullablePublicString
     transcript_si: float
@@ -1618,26 +1892,98 @@ class HswaeIsoformSpecificityContext(_HswaeClosedModel):
     gene_mean_tpm: float = Field(ge=0)
     rank_expression: int = Field(ge=1)
     rank_usage: int = Field(ge=1)
+    context_resolution: _HswaeNullablePublicString = None
 
 
-class HswaeIsoformResultRow(_HswaeClosedModel):
+class HswaeIsoformCellTypeExpressionContext(_HswaeOpenModel):
+    """A genuinely cell-type-resolved isoform row, from the narrower
+    single-cell transcript vocabulary. [bd-dre-pjhrp.11]"""
+
+    tissue: _HswaePublicString
+    cell_type: _HswaeNullablePublicString = None
+    cluster: _HswaeNullablePublicString = None
+    context_resolution: _HswaeNullablePublicString = None
+    transcript_expression: float | None = None
+    gene_expression: float | None = None
+    isoform_usage: float | None = None
+    expression_unit: _HswaeNullablePublicString = None
+    cell_count: int | None = Field(default=None, ge=0)
+    cell_transcript_si: float | None = None
+    cell_usage_ratio: float | None = None
+    cisi: float | None = None
+    rank_expression: int | None = Field(default=None, ge=1)
+    rank_usage: int | None = Field(default=None, ge=1)
+    competitor_cell_type: _HswaeNullablePublicString = None
+    competitor_tissue: _HswaeNullablePublicString = None
+    evidence_level: _HswaeNullablePublicString = None
+    platform: _HswaeNullablePublicString = None
+    source_dataset: _HswaeNullablePublicString = None
+
+
+class HswaeIsoformResultRow(_HswaeOpenModel):
     transcript_id: Annotated[str, Field(min_length=1, max_length=200)]
     transcript_id_versioned: Annotated[str, Field(min_length=1, max_length=200)]
     transcript_name: Annotated[str, Field(min_length=1, max_length=500)]
     transcript_type: Annotated[str, Field(min_length=1, max_length=200)]
     expression_by_context: list[HswaeIsoformExpressionContext] = Field(max_length=500)
     specificity_by_context: list[HswaeIsoformSpecificityContext] = Field(max_length=500)
+    cell_type_expression_by_context: list[HswaeIsoformCellTypeExpressionContext] | None = Field(
+        default=None,
+        max_length=500,
+    )
 
 
-class HswaeIsoformExpressionResult(_HswaeClosedModel):
+class HswaeIsoformResolutionScope(_HswaeOpenModel):
+    """Size of the cell-type transcript vocabulary this gene was looked up in.
+
+    ⛔ A SEPARATE, much narrower vocabulary than the cell-type resolution
+    layer: ``populated`` True with ``gene_row_count`` 0 means the atlas
+    exists but has no row for this gene. [bd-dre-pjhrp.11]
+    """
+
+    populated: bool | None = None
+    row_count: int | None = Field(default=None, ge=0)
+    gene_row_count: int | None = Field(default=None, ge=0)
+    cell_type_count: int | None = Field(default=None, ge=0)
+    tissue_count: int | None = Field(default=None, ge=0)
+    source_datasets: list[_HswaePublicString] | None = Field(default=None, max_length=50)
+    note: _HswaeNullableNote = None
+
+
+class HswaeIsoformReturnedRowCounts(_HswaeOpenModel):
+    """How the returned rows actually resolved, independent of the claim."""
+
+    tissue_resolved: int | None = Field(default=None, ge=0)
+    cell_type_resolved: int | None = Field(default=None, ge=0)
+    with_cell_type_label: int | None = Field(default=None, ge=0)
+    cell_type_rows_below_threshold: int | None = Field(default=None, ge=0)
+
+
+class HswaeIsoformExpressionResult(_HswaeOpenModel):
+    """Per-isoform expression and specificity for one gene.
+
+    ⛔ ``resolution`` is the backend's CLAIM; ``observed_resolution`` is what
+    the returned rows actually are (e.g. claim ``cell_type`` vs observed
+    ``tissue_only_in_returned_records``). Trust the observed value, and read
+    ``returned_row_counts`` for the split. [bd-dre-pjhrp.11]
+    """
+
     gene: Annotated[str, Field(min_length=1, max_length=64)]
     isoform_count: int = Field(ge=0, le=50)
     isoforms: list[HswaeIsoformResultRow] = Field(max_length=50)
     resolution: Literal["none", "tissue", "cell_type"]
     note: Annotated[str, Field(min_length=1, max_length=10_000)]
+    #: What the returned rows ARE, vs what the backend claimed. Plain strings:
+    #: the two vocabularies already differ (``no_records`` vs
+    #: ``no_rows_returned``) and may grow.
+    observed_resolution: _HswaeNullablePublicString = None
+    backend_observed_resolution: _HswaeNullablePublicString = None
+    cell_type_resolution_available: bool | None = None
+    cell_type_resolution_scope: HswaeIsoformResolutionScope | None = None
+    returned_row_counts: HswaeIsoformReturnedRowCounts | None = None
 
 
-class HswaeAnnotationCandidate(_HswaeClosedModel):
+class HswaeAnnotationCandidate(_HswaeOpenModel):
     cell_type: _HswaePublicString = Field(alias="cellType")
     confidence: float = Field(ge=0, le=1)
     supporting_genes: list[HswaeSupportingGeneEvidence] = Field(
@@ -1650,7 +1996,7 @@ class HswaeAnnotationCandidate(_HswaeClosedModel):
     top_organ_system: _HswaeNullablePublicString = Field(alias="topOrganSystem")
 
 
-class HswaeAnnotationAssignment(_HswaeClosedModel):
+class HswaeAnnotationAssignment(_HswaeOpenModel):
     cluster_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="clusterId")
     marker_count: int = Field(alias="markerCount", ge=0, le=50)
     candidates: list[HswaeAnnotationCandidate] = Field(max_length=10)
@@ -1658,7 +2004,7 @@ class HswaeAnnotationAssignment(_HswaeClosedModel):
     confidence: float = Field(ge=0, le=1)
 
 
-class HswaeAnnotateDatasetResult(_HswaeClosedModel):
+class HswaeAnnotateDatasetResult(_HswaeOpenModel):
     dataset_ref: Annotated[str, Field(min_length=1, max_length=2_000)] = Field(alias="datasetRef")
     cluster_assignments: list[HswaeAnnotationAssignment] = Field(
         alias="clusterAssignments",
@@ -1670,7 +2016,7 @@ class HswaeAnnotateDatasetResult(_HswaeClosedModel):
     note: _HswaeNullablePublicString
 
 
-class HswaeComplexSubunitExpression(_HswaeClosedModel):
+class HswaeComplexSubunitExpression(_HswaeOpenModel):
     subunit: Annotated[str, Field(min_length=1, max_length=100)]
     expression: float = Field(ge=0)
 
@@ -1682,7 +2028,7 @@ class HswaeComplexSubunitExpression(_HswaeClosedModel):
         return value
 
 
-class HswaeComplexSpecificityContext(_HswaeClosedModel):
+class HswaeComplexSpecificityContext(_HswaeOpenModel):
     tissue: _HswaePublicString
     cell_type: _HswaePublicString
     cluster: Annotated[str, Field(max_length=500)]
@@ -1744,7 +2090,7 @@ class HswaeComplexSpecificityContext(_HswaeClosedModel):
         return self
 
 
-class HswaeComplexSpecificityResult(_HswaeClosedModel):
+class HswaeComplexSpecificityResult(_HswaeOpenModel):
     complex_name: Annotated[str, Field(min_length=1, max_length=200)] = Field(alias="complexName")
     subunits: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
         min_length=2,
@@ -1776,12 +2122,12 @@ class HswaeComplexSpecificityResult(_HswaeClosedModel):
         return self
 
 
-class HswaeCapabilityOwner(_HswaeClosedModel):
+class HswaeCapabilityOwner(_HswaeOpenModel):
     user_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="userId")
     org_id: Annotated[str, Field(max_length=500)] | None = Field(alias="orgId")
 
 
-class _HswaeCapabilityReceiptBase(_HswaeClosedModel):
+class _HswaeCapabilityReceiptBase(_HswaeOpenModel):
     receipt_version: Literal["1"] = Field(alias="receiptVersion")
     contract_version: Literal["1.0.0"] = Field(alias="contractVersion")
     request_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="requestId")
