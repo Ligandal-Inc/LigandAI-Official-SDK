@@ -4572,11 +4572,34 @@ class Peptides(Resource):
                 Request provenance records ``cys_mode``, ``cysteine_enabled``
                 and the RESOLVED ``cysteine_fired`` so what actually ran is
                 recoverable after the fact.
-            quality_guided: Enable quality-guided generation. Defaults to True —
-                without it the base generator can collapse to low-diversity,
-                degenerate sequences, so it should stay on for normal use. Available
+            quality_guided: Request quality guidance. Defaults to True. Available
                 to all authenticated tiers, including free; server-side credits and
                 retention/licensing terms still apply.
+
+                ⛔ EVIDENCE LEVEL: NOT IN-LOOP STEERING on the Modal generator
+                deployments, which is where this call runs. Audited 2026-10-15
+                (bd-dre-hq6u6): none of the six deployed generator worker modules
+                contains any quality-head code, and the v6.5.12 quality heads live
+                in a separate Modal app invoked only AFTER generation. So this flag
+                does not change which sequences are sampled, and output from this
+                call must not be described as quality-guided GENERATION.
+
+                It is NOT inert. Measured: it selects the quality diffusion-step
+                tier (100 steps with the flag vs 50 without, recorded as
+                ``inference_config.num_diffusion_steps``), and the heads still
+                score the designs afterwards
+                (``guidance_heads.quality.role = post_generation_scoring``). The
+                run record states which roles applied —
+                ``guidance_heads.quality.in_loop_steering`` with a reason, plus a
+                ``guidance_warnings`` entry and a request-stage diagnostic readable
+                from the first status poll.
+
+                The previous wording here claimed that without this flag "the base
+                generator can collapse to low-diversity, degenerate sequences".
+                That describes a sampling-time effect this path does not have.
+                In-loop steering (Gumbel-softmax gradients through the quality
+                predictor) exists only on the parallel-v2 batch surface and the
+                local guided fallback.
             quality_guidance_scale: Scale for quality guidance (default 1.0).
             model: Generator model to design with, sent as ``generatorModelId``.
                 Leave it unset (``None``, the default) to use the platform
