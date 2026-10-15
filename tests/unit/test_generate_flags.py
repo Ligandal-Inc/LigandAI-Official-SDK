@@ -103,12 +103,34 @@ def test_segment_config_pydantic_serialized(httpx_mock: HTTPXMock, client: Ligan
     assert segs[1]["lengthRange"] == [20, 40]
 
 
-def test_segment_config_dict_passthrough(httpx_mock: HTTPXMock, client: LigandAI) -> None:
+def test_segment_config_dict_is_validated_not_passed_through(
+    httpx_mock: HTTPXMock, client: LigandAI
+) -> None:
+    """A dict ``segment_config`` is validated through ``SegmentConfig``.
+
+    This test used to assert ``body["segmentConfig"] == raw`` — byte-identical
+    passthrough. It stopped describing the code when `_validate_fixed_segments`
+    landed, and the normalising behaviour SHIPPED in the published 0.16.4
+    wheel (verified present in that wheel's `resources/peptides.py`), so this
+    is a stale assertion being brought up to date, not a behaviour change.
+
+    What matters, and what is pinned here: every value the CALLER gave
+    survives verbatim. Defaults are materialised around them; nothing the
+    caller set is rewritten.
+    """
     httpx_mock.add_response(url=GEN_URL, method="POST", json=_QUEUED)
-    raw = {"mode": "custom", "segments": [{"id": "s1", "type": "linker", "position": 0, "lengthRange": [3, 8]}]}
+    raw = {
+        "mode": "custom",
+        "segments": [{"id": "s1", "type": "linker", "position": 0, "lengthRange": [3, 8]}],
+    }
     client.peptides.generate(gene="EGFR", segment_config=raw)
-    body = _body(httpx_mock)
-    assert body["segmentConfig"] == raw
+    sent = _body(httpx_mock)["segmentConfig"]
+
+    assert sent["mode"] == "custom"
+    assert len(sent["segments"]) == 1
+    segment = sent["segments"][0]
+    for key, value in raw["segments"][0].items():  # type: ignore[union-attr]
+        assert segment[key] == value, f"caller's {key!r} was rewritten"
 
 
 def test_no_segment_config_omitted(httpx_mock: HTTPXMock, client: LigandAI) -> None:

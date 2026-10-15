@@ -26,8 +26,10 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
+from pydantic.functional_serializers import SerializerFunctionWrapHandler
 from typing_extensions import NotRequired
 
 from ligandai.errors import LigandAIAnalysisNotComputed
@@ -285,7 +287,12 @@ class TierLimits(_LGModel):
     max_peptides_per_generation: int | None = Field(default=None, alias="maxPeptidesPerGeneration")
     max_folds_per_target: int | None = Field(default=None, alias="maxFoldsPerTarget")
     max_concurrent_targets: int | None = Field(default=None, alias="maxConcurrentTargets")
-    max_concurrent_gpu_slots: int | None = Field(default=None, alias="maxConcurrentGpuSlots")
+    # /api/user-tier-limits emits gpuSlots; retain the canonical SDK wire name.
+    max_concurrent_gpu_slots: int | None = Field(
+        default=None,
+        alias="maxConcurrentGpuSlots",
+        validation_alias=AliasChoices("maxConcurrentGpuSlots", "gpuSlots"),
+    )
     rate_limit_per_minute: int | None = Field(default=None, alias="rateLimitPerMinute")
 
 
@@ -1038,18 +1045,101 @@ class ComparisonResponse(_LGModel):
 
 
 class GeoDataset(_LGModel):
-    accession: str
+    accession: str = Field(min_length=1, pattern=r"^GSE\d+$")
     title: str | None = None
     organism: str | None = None
     sample_count: int | None = Field(default=None, alias="sampleCount")
     summary: str | None = None
+    provenance: Any = None
+
+
+class GeoSearchResponse(_LGModel):
+    """Public GEO search envelope, including warnings and additive source metadata."""
+
+    results: list[GeoDataset]
+    success: bool | None = None
+    query: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class GeoInspectionFile(_LGModel):
+    name: str
+    url: str
+    format: str
+    supported: bool
+    container: bool
+    sample_id: str | None = Field(default=None, alias="sampleId")
+    source_allowed: bool | None = Field(default=None, alias="sourceAllowed")
+
+
+class GeoInspectionSample(_LGModel):
+    id: str
+    title: str
+    source: str
+    characteristics: list[str]
+    fields: dict[str, list[str]]
+    files: list[GeoInspectionFile]
+
+
+class GeoInspectionSource(_LGModel):
+    repository: Literal["GEO"]
+    url: str
+    metadata_sha256: str = Field(alias="metadataSha256", pattern=r"^[0-9a-f]{64}$")
+    metadata_completeness: str = Field(alias="metadataCompleteness")
+    retrieved_at: datetime | None = Field(alias="retrievedAt")
+
+
+class GeoFieldCoverage(_LGModel):
+    samples_with_value: int = Field(alias="samplesWithValue", ge=0)
+    distinct_values: list[str] = Field(alias="distinctValues")
+
+
+class GeoMetadataCoverage(_LGModel):
+    samples_resolved: int = Field(alias="samplesResolved", ge=0)
+    declared_samples: int = Field(alias="declaredSamples", ge=0)
+    fields: dict[str, GeoFieldCoverage]
+
+
+class GeoParserInspection(_LGModel):
+    status: Literal["inspection_required"]
+    formats: list[str]
+    requires_selection: bool = Field(alias="requiresSelection")
+    expression_unit: Literal["unknown"] = Field(alias="expressionUnit")
+
+
+class GeoInspection(_LGModel):
+    """Official metadata and parser readiness; inspection does not download expression data.
+
+    Sample annotations and parser coverage are preserved verbatim. Unknown
+    expression units and cohort labels are not inferred by the SDK.
+    """
+
+    inspection_schema: Literal["transcriptomic-dataset-inspection/1"] = Field(alias="schema")
+    accession: str = Field(min_length=1, pattern=r"^GSE\d+$")
+    title: str
+    source: GeoInspectionSource
+    organism: str
+    sample_count: int = Field(alias="sampleCount", ge=0)
+    samples: list[GeoInspectionSample]
+    files: list[GeoInspectionFile]
+    metadata_coverage: GeoMetadataCoverage = Field(alias="metadataCoverage")
+    parser: GeoParserInspection
+    warnings: list[str]
+    downloaded: Literal[False]
 
 
 class GeoImportJob(_LGModel):
-    job_id: str = Field(alias="jobId")
-    accession: str
-    status: str
+    job_id: str = Field(alias="jobId", min_length=1)
+    accession: str = Field(min_length=1, pattern=r"^GSE\d+$")
+    status: str = Field(min_length=1)
     progress: float | None = None
+    dataset_id: str | int | None = Field(default=None, alias="datasetId")
+    metadata: dict[str, Any] | None = None
+    provenance: Any = None
+    result_summary: dict[str, Any] | None = Field(default=None, alias="resultSummary")
+    error: str | None = None
+    started_at: datetime | None = Field(default=None, alias="startedAt")
+    completed_at: datetime | None = Field(default=None, alias="completedAt")
 
 
 class Dataset(_LGModel):
@@ -1598,8 +1688,26 @@ class HswaeSurfaceMarkersResult(_HswaeOpenModel):
     ranking_key: _HswaeNullablePublicString = None
     sort_key_field: _HswaeNullablePublicString = None
     #: Expression floor applied, and the tissue its TPM was taken in.
+    #:
+    #: ⛔ ``expression_floor_tpm`` is NOT applied to a marker's ``mean_tpm``. It
+    #: is evaluated on the basis named by ``expression_floor_basis`` — for a
+    #: context resolving to more than one tissue, max-across-tissues — so a
+    #: marker can correctly report a ``mean_tpm`` BELOW this floor. Measured:
+    #: context ``colon`` resolves to colon_sigmoid + colon_transverse, and
+    #: MRGPRD clears a 1.0 floor on its max of 1.38 while reporting mean 0.97.
+    #: Read ``expression_floor_basis`` before calling such a row a filter bug.
     expression_floor_tpm: float | None = Field(default=None, ge=0)
     expression_floor_tissue: _HswaeNullablePublicString = None
+    #: What the floor is evaluated ON (e.g. ``max_tpm_across_target_tissues``) —
+    #: the field that reconciles a sub-floor ``mean_tpm`` with the stated floor.
+    #:
+    #: The backend has computed this since the beginning and the capability
+    #: boundary projected it out, so the receipt contradicted itself with
+    #: nothing in it to explain why [bd-dre-pjhrp.19]. Declared here ahead of
+    #: that server fix deploying: verified absent from both the live signed
+    #: output schema and live payloads on 2026-10-15, so it parses as ``None``
+    #: until the boundary ships it, and reaches callers the moment it does.
+    expression_floor_basis: _HswaeNullablePublicString = None
     #: Truncation / exclusion accounting. ``markers_eligible`` is the candidate
     #: pool before ``top_n`` truncation.
     markers_eligible: int | None = Field(default=None, ge=0)
@@ -1615,6 +1723,59 @@ class HswaeSupportingGeneEvidence(_HswaeOpenModel):
     gene: _HswaeGene
     csi: float
     rank_for_gene: int = Field(alias="rankForGene", ge=1)
+
+
+class HswaeMatchDetail(_HswaeOpenModel):
+    """What the resolver stage actually measured to produce a candidate.
+
+    Every member is optional because WHICH ones appear is determined by the
+    stage named in :attr:`HswaeResolveCellTypeCandidate.match_type`: ``{}`` for
+    the stages that measure nothing, ``matched_term`` for ``ontology_synonym``,
+    the Jaccard/containment group for ``token_set``, and ``ratio`` for
+    ``fuzzy``. The backend emits only the members its stage computed —
+    filling the others with nulls would invent precision never measured — so
+    ``None`` here means NOT MEASURED, not "measured as zero".
+
+    ⛔ This model SERIALISES back to exactly the members it received, which is
+    the one place in these types that departs from "every declared field
+    appears in ``model_dump``". The signed schema permits a real ``null`` for
+    each member, so a materialised ``None`` would be indistinguishable from a
+    measured null and would state that a stage reported a number it never
+    computed. A receipt is an audit object; inventing that is worse than
+    omitting it, and the backend omits for the same reason.
+
+    Declared ahead of the server fix deploying [bd-dre-pjhrp.19]: verified
+    absent from both the live signed output schema and live payloads on
+    2026-10-15. Inherits ``extra="allow"``, so a fifth stage shape added later
+    is kept rather than refused — the member set is deliberately not closed on
+    this side, which is the defect this whole release exists to undo.
+    """
+
+    matched_term: _HswaeNullablePublicString = None
+    jaccard: float | None = None
+    containment_canonical: float | None = None
+    containment_query: float | None = None
+    ratio: float | None = None
+    shared_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+
+    @model_serializer(mode="wrap")
+    def _omit_members_the_stage_never_measured(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Project back the member set that arrived, and nothing else.
+
+        Declared members that were never sent are dropped; members that WERE
+        sent are kept even when their value is ``None`` (a measured null), and
+        anything undeclared is kept because this model is ``extra="allow"``.
+        """
+        serialized = handler(self)
+        declared = type(self).model_fields
+        return {
+            key: value
+            for key, value in serialized.items()
+            if key not in declared or key in self.model_fields_set
+        }
 
 
 class HswaeResolveCellTypeCandidate(_HswaeOpenModel):
@@ -1653,6 +1814,15 @@ class HswaeResolveCellTypeCandidate(_HswaeOpenModel):
     #: ``uncorroborated_qualifiers`` means the match is broader than asked.
     dropped_query_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
     uncorroborated_qualifiers: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    #: The OTHER half of the qualifier evidence: dropped tokens the atlas does
+    #: corroborate. Reading ``uncorroborated_qualifiers`` without this one
+    #: makes a well-corroborated match look as doubtful as an unsupported one.
+    #: Declared ahead of the server fix deploying [bd-dre-pjhrp.19] — verified
+    #: absent from the live signed schema and live payloads on 2026-10-15.
+    corroborated_qualifiers: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
+    #: What the resolver stage measured; see :class:`HswaeMatchDetail`. ``None``
+    #: means the stage reported nothing, not that the match was unmeasured.
+    match_detail: HswaeMatchDetail | None = None
     #: Tokens the canonical label adds beyond the query, and specializations
     #: the caller did not ask for.
     added_canonical_tokens: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)

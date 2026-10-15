@@ -1,0 +1,2685 @@
+{
+  "capabilities": [
+    {
+      "operation": "hswae.v1.semantic_search",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "hswae.v1.semantic_search"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "maximum": 50,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "matches": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "match_type": {
+                      "enum": [
+                        "exact",
+                        "alias",
+                        "cell_to_tissue",
+                        "fuzzy",
+                        "embedding"
+                      ],
+                      "type": "string"
+                    },
+                    "score": {
+                      "maximum": 1,
+                      "minimum": -1,
+                      "type": "number"
+                    },
+                    "source_entity": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "tissue": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "tissue",
+                    "score",
+                    "match_type",
+                    "source_entity",
+                    "cell_type"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              "query": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "searched_vocabularies": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "size": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "size"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              "unmatched_reason": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "query",
+              "matches",
+              "count",
+              "unmatched_reason",
+              "searched_vocabularies"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "operation": "hswae.v1.surface_markers",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "hswae.v1.surface_markers"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "expression_floor_tissue": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expression_floor_tpm": {
+                "minimum": 0,
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "floor_note": {
+                "maxLength": 10000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "marker_method": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "markers": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "consistency": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "embeddingCombinedScore": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "embeddingSpecificity": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "ensemblGene": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "gene": {
+                      "maxLength": 100,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "meanTpm": {
+                      "minimum": 0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "method": {
+                      "maxLength": 200,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "proteinName": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "rank": {
+                      "minimum": 1,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "similarity": {
+                      "maximum": 1,
+                      "minimum": -1,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "specificityIndex": {
+                      "minimum": 0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "targetContext": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "uniprotId": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "gene",
+                    "targetContext",
+                    "method",
+                    "similarity",
+                    "meanTpm",
+                    "specificityIndex",
+                    "rank",
+                    "ensemblGene",
+                    "uniprotId",
+                    "proteinName",
+                    "embeddingSpecificity",
+                    "embeddingCombinedScore",
+                    "consistency"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              "markers_below_consistency_excluded": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "markers_below_floor_excluded": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "markers_eligible": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "markers_requested": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "markers_returned": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "markers_unknown_expression_excluded": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "matched_tissues": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "match_type": {
+                      "enum": [
+                        "exact",
+                        "alias",
+                        "cell_to_tissue",
+                        "fuzzy",
+                        "embedding"
+                      ],
+                      "type": "string"
+                    },
+                    "score": {
+                      "maximum": 1,
+                      "minimum": -1,
+                      "type": "number"
+                    },
+                    "source_entity": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "tissue": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "tissue",
+                    "score",
+                    "match_type",
+                    "source_entity",
+                    "cell_type"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 5,
+                "type": "array"
+              },
+              "method": {
+                "enum": [
+                  "semantic_search_markers"
+                ],
+                "type": "string"
+              },
+              "primary_tissue": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "query": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "ranking_key": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sort_key_field": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timing_ms": {
+                "minimum": 0,
+                "type": "number"
+              }
+            },
+            "required": [
+              "query",
+              "matched_tissues",
+              "primary_tissue",
+              "markers",
+              "timing_ms",
+              "method",
+              "marker_method",
+              "markers_requested",
+              "markers_returned",
+              "markers_eligible",
+              "markers_below_floor_excluded",
+              "markers_unknown_expression_excluded",
+              "markers_below_consistency_excluded",
+              "expression_floor_tpm",
+              "expression_floor_tissue",
+              "ranking_key",
+              "sort_key_field",
+              "floor_note"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "operation": "hswae.v2.resolve_cell_type",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "hswae.v2.resolve_cell_type"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "ambiguous_alternatives": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "match_type": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "score": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "cell_type",
+                    "score",
+                    "match_type"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              "candidates": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "added_canonical_tokens": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "alias_marker_genes": {
+                      "items": {
+                        "maxLength": 100,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 500,
+                      "type": "array"
+                    },
+                    "alias_query": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "cell_type": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "confidence": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "dropped_query_tokens": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "marker_score": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "match_type": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "proxy_for": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "proxy_note": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "requires_geo_ingest": {
+                      "items": {
+                        "maxLength": 2000,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "resolution_is_proxy": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "source": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "supportingGenes": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "csi": {
+                            "type": "number"
+                          },
+                          "gene": {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "rankForGene": {
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "gene",
+                          "csi",
+                          "rankForGene"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 10,
+                      "type": "array"
+                    },
+                    "top_organ_system": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "top_tissue": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "uncorroborated_qualifiers": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "unrequested_specializations": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "vote_count": {
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "cell_type",
+                    "confidence",
+                    "top_tissue",
+                    "top_organ_system",
+                    "source",
+                    "proxy_for",
+                    "proxy_note",
+                    "alias_query",
+                    "alias_marker_genes",
+                    "requires_geo_ingest",
+                    "supportingGenes",
+                    "vote_count",
+                    "marker_score",
+                    "match_type",
+                    "resolution_is_proxy",
+                    "dropped_query_tokens",
+                    "uncorroborated_qualifiers",
+                    "added_canonical_tokens",
+                    "unrequested_specializations"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              "canonical": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivery_context_hint": {
+                "additionalProperties": false,
+                "properties": {
+                  "alternatives": {
+                    "items": {
+                      "enum": [
+                        "topical",
+                        "tissue_resident",
+                        "systemic",
+                        "cluster_only"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 4,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "default_scope": {
+                    "enum": [
+                      "topical",
+                      "tissue_resident",
+                      "systemic",
+                      "cluster_only"
+                    ],
+                    "type": "string"
+                  },
+                  "rationale": {
+                    "maxLength": 10000,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "default_scope",
+                  "rationale",
+                  "alternatives"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "nearest_candidates": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "accepted": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "cell_type": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "dropped_query_tokens": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "match_type": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "score": {
+                      "type": "number"
+                    },
+                    "shared_tokens": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "cell_type",
+                    "score",
+                    "match_type",
+                    "accepted",
+                    "shared_tokens",
+                    "dropped_query_tokens"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              "query": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "resolution_is_ambiguous": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "resolution_is_proxy": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "resolution_stage": {
+                "enum": [
+                  "exact",
+                  "substring",
+                  "ontology_synonym",
+                  "token_set",
+                  "fuzzy",
+                  "specialized_alias",
+                  "marker_overlap",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "resolution_status": {
+                "enum": [
+                  "resolved",
+                  "unresolved"
+                ],
+                "type": "string"
+              },
+              "stages_tried": {
+                "items": {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              "unresolved_reason": {
+                "maxLength": 10000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vocabulary": {
+                "additionalProperties": false,
+                "properties": {
+                  "scope": {
+                    "maxLength": 10000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "source_datasets": {
+                    "items": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 50,
+                    "type": "array"
+                  },
+                  "specificity_row_count": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "synonym_tables": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "ontology_synonym_entries": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "ontology_synonym_keys": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "specialized_alias_entries": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "specialized_alias_keys": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "specialized_alias_keys",
+                      "specialized_alias_entries",
+                      "ontology_synonym_keys",
+                      "ontology_synonym_entries"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "tissue_count": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "size",
+                  "source_datasets",
+                  "tissue_count",
+                  "scope",
+                  "specificity_row_count",
+                  "synonym_tables"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "query",
+              "canonical",
+              "candidates",
+              "delivery_context_hint",
+              "resolution_status",
+              "resolution_stage",
+              "resolution_is_proxy",
+              "resolution_is_ambiguous",
+              "ambiguous_alternatives",
+              "stages_tried",
+              "nearest_candidates",
+              "unresolved_reason",
+              "vocabulary"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "operation": "hswae.v2.compare_cell_types",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "hswae.v2.compare_cell_types"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "comparator_scope": {
+                "enum": [
+                  "topical",
+                  "tissue_resident",
+                  "systemic",
+                  "cluster_only",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "comparator_scope_note": {
+                "maxLength": 10000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "comparator_scope_source": {
+                "enum": [
+                  "request",
+                  "delivery_context",
+                  "none"
+                ],
+                "type": "string"
+              },
+              "delivery_context": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "differential": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "delta_csi": {
+                      "type": "number"
+                    },
+                    "gene_name": {
+                      "maxLength": 100,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "is_surface_annotated": {
+                      "type": "boolean"
+                    },
+                    "max_reference_csi": {
+                      "type": "number"
+                    },
+                    "reference_cell_types_matched": {
+                      "items": {
+                        "maxLength": 2000,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 200,
+                      "type": "array"
+                    },
+                    "target_cell_type": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "target_csi": {
+                      "type": "number"
+                    },
+                    "target_mean_expression": {
+                      "minimum": 0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "target_rank_global": {
+                      "minimum": 1,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "top_organ_system": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "top_tissue": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "gene_name",
+                    "target_cell_type",
+                    "target_csi",
+                    "target_rank_global",
+                    "target_mean_expression",
+                    "max_reference_csi",
+                    "delta_csi",
+                    "is_surface_annotated",
+                    "top_tissue",
+                    "top_organ_system",
+                    "reference_cell_types_matched"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "differential_status": {
+                "enum": [
+                  "computed",
+                  "target_unresolved",
+                  "no_references_resolved",
+                  "no_rows_above_threshold"
+                ],
+                "type": "string"
+              },
+              "differential_status_detail": {
+                "maxLength": 10000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "differential_truncated_at_top_n": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "reference_cell_types": {
+                "items": {
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "reference_cell_types_requested": {
+                "items": {
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "reference_resolution": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "canonical": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contributes_to_differential": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "requested": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "resolution_is_proxy": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "resolution_stage": {
+                      "enum": [
+                        "exact",
+                        "substring",
+                        "ontology_synonym",
+                        "token_set",
+                        "fuzzy",
+                        "specialized_alias",
+                        "marker_overlap",
+                        null
+                      ],
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolution_status": {
+                      "enum": [
+                        "resolved",
+                        "unresolved"
+                      ],
+                      "type": "string"
+                    },
+                    "specificity_row_count": {
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "unresolved_reason": {
+                      "maxLength": 10000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "requested",
+                    "canonical",
+                    "resolution_status",
+                    "resolution_stage",
+                    "resolution_is_proxy",
+                    "specificity_row_count",
+                    "contributes_to_differential",
+                    "unresolved_reason"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "target_cell_type": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target_proxy_note": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target_query": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "target_resolution": {
+                "additionalProperties": false,
+                "properties": {
+                  "ambiguous_alternatives": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "cell_type": {
+                          "maxLength": 2000,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "match_type": {
+                          "maxLength": 200,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "score": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "cell_type",
+                        "score",
+                        "match_type"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 20,
+                    "type": "array"
+                  },
+                  "canonical": {
+                    "maxLength": 2000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "query": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "resolution_is_ambiguous": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "resolution_is_proxy": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "resolution_stage": {
+                    "enum": [
+                      "exact",
+                      "substring",
+                      "ontology_synonym",
+                      "token_set",
+                      "fuzzy",
+                      "specialized_alias",
+                      "marker_overlap",
+                      null
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "resolution_status": {
+                    "enum": [
+                      "resolved",
+                      "unresolved"
+                    ],
+                    "type": "string"
+                  },
+                  "stages_tried": {
+                    "items": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 50,
+                    "type": "array"
+                  },
+                  "unresolved_reason": {
+                    "maxLength": 10000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "query",
+                  "canonical",
+                  "resolution_status",
+                  "resolution_stage",
+                  "resolution_is_proxy",
+                  "resolution_is_ambiguous",
+                  "ambiguous_alternatives",
+                  "stages_tried",
+                  "unresolved_reason"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "target_cell_type",
+              "target_query",
+              "target_proxy_note",
+              "reference_cell_types",
+              "differential",
+              "comparator_scope",
+              "comparator_scope_source",
+              "delivery_context",
+              "differential_status",
+              "differential_status_detail",
+              "target_resolution",
+              "reference_resolution",
+              "reference_cell_types_requested",
+              "comparator_scope_note",
+              "differential_truncated_at_top_n"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "operation": "hswae.v2.isoform_expression",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "hswae.v2.isoform_expression"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "backend_observed_resolution": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cell_type_resolution_available": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "cell_type_resolution_scope": {
+                "additionalProperties": false,
+                "properties": {
+                  "cell_type_count": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "gene_row_count": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "note": {
+                    "maxLength": 10000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "populated": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "row_count": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "source_datasets": {
+                    "items": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 50,
+                    "type": "array"
+                  },
+                  "tissue_count": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "populated",
+                  "row_count",
+                  "gene_row_count",
+                  "cell_type_count",
+                  "tissue_count",
+                  "source_datasets",
+                  "note"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "gene": {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              "isoform_count": {
+                "maximum": 50,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "isoforms": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type_expression_by_context": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "cell_count": {
+                            "minimum": 0,
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "cell_transcript_si": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "cell_type": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "cell_usage_ratio": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "cisi": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "cluster": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "competitor_cell_type": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "competitor_tissue": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "context_resolution": {
+                            "enum": [
+                              "tissue",
+                              "cell_type"
+                            ],
+                            "type": "string"
+                          },
+                          "evidence_level": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "expression_unit": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "gene_expression": {
+                            "minimum": 0,
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "isoform_usage": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "platform": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "rank_expression": {
+                            "minimum": 1,
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "rank_usage": {
+                            "minimum": 1,
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "source_dataset": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "tissue": {
+                            "maxLength": 2000,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "transcript_expression": {
+                            "minimum": 0,
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "tissue",
+                          "cell_type",
+                          "cluster",
+                          "context_resolution",
+                          "transcript_expression",
+                          "gene_expression",
+                          "isoform_usage",
+                          "expression_unit",
+                          "cell_count",
+                          "cell_transcript_si",
+                          "cell_usage_ratio",
+                          "cisi",
+                          "rank_expression",
+                          "rank_usage",
+                          "competitor_cell_type",
+                          "competitor_tissue",
+                          "evidence_level",
+                          "platform",
+                          "source_dataset"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 500,
+                      "type": "array"
+                    },
+                    "expression_by_context": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "cell_type": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "context_name": {
+                            "maxLength": 2000,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "context_resolution": {
+                            "enum": [
+                              "tissue",
+                              "cell_type"
+                            ],
+                            "type": "string"
+                          },
+                          "max_tpm": {
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "mean_tpm": {
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "median_tpm": {
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "prevalence_tpm1": {
+                            "maximum": 1,
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "sample_count": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "tissue": {
+                            "maxLength": 2000,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "tissue",
+                          "cell_type",
+                          "context_name",
+                          "mean_tpm",
+                          "median_tpm",
+                          "max_tpm",
+                          "prevalence_tpm1",
+                          "sample_count",
+                          "context_resolution"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 500,
+                      "type": "array"
+                    },
+                    "specificity_by_context": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "cell_type": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "context_resolution": {
+                            "enum": [
+                              "tissue",
+                              "cell_type"
+                            ],
+                            "type": "string"
+                          },
+                          "gene_mean_tpm": {
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "isi": {
+                            "type": "number"
+                          },
+                          "isoform_usage": {
+                            "type": "number"
+                          },
+                          "rank_expression": {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "rank_usage": {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "target_mean_tpm": {
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "tissue": {
+                            "maxLength": 2000,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "transcript_si": {
+                            "type": "number"
+                          },
+                          "usage_ratio": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "tissue",
+                          "cell_type",
+                          "transcript_si",
+                          "usage_ratio",
+                          "isi",
+                          "isoform_usage",
+                          "target_mean_tpm",
+                          "gene_mean_tpm",
+                          "rank_expression",
+                          "rank_usage",
+                          "context_resolution"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 500,
+                      "type": "array"
+                    },
+                    "transcript_id": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "transcript_id_versioned": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "transcript_name": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "transcript_type": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "transcript_id",
+                    "transcript_id_versioned",
+                    "transcript_name",
+                    "transcript_type",
+                    "expression_by_context",
+                    "specificity_by_context",
+                    "cell_type_expression_by_context"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              "note": {
+                "maxLength": 10000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "observed_resolution": {
+                "enum": [
+                  "cell_type_in_returned_records",
+                  "tissue_only_in_returned_records",
+                  "no_records"
+                ],
+                "type": "string"
+              },
+              "resolution": {
+                "enum": [
+                  "none",
+                  "tissue",
+                  "cell_type"
+                ],
+                "type": "string"
+              },
+              "returned_row_counts": {
+                "additionalProperties": false,
+                "properties": {
+                  "cell_type_resolved": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "cell_type_rows_below_threshold": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "tissue_resolved": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "with_cell_type_label": {
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "tissue_resolved",
+                  "cell_type_resolved",
+                  "with_cell_type_label",
+                  "cell_type_rows_below_threshold"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "gene",
+              "isoform_count",
+              "isoforms",
+              "resolution",
+              "observed_resolution",
+              "backend_observed_resolution",
+              "cell_type_resolution_available",
+              "cell_type_resolution_scope",
+              "returned_row_counts",
+              "note"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "operation": "hswae.v2.annotate_dataset",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "hswae.v2.annotate_dataset"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "clusterAssignments": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "candidates": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "cellType": {
+                            "maxLength": 2000,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "confidence": {
+                            "maximum": 1,
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "markerScore": {
+                            "type": "number"
+                          },
+                          "supportingGenes": {
+                            "items": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "csi": {
+                                  "type": "number"
+                                },
+                                "gene": {
+                                  "maxLength": 100,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "rankForGene": {
+                                  "minimum": 1,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [
+                                "gene",
+                                "csi",
+                                "rankForGene"
+                              ],
+                              "type": "object"
+                            },
+                            "maxItems": 10,
+                            "type": "array"
+                          },
+                          "topOrganSystem": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "topTissue": {
+                            "maxLength": 2000,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "voteCount": {
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "cellType",
+                          "confidence",
+                          "supportingGenes",
+                          "voteCount",
+                          "markerScore",
+                          "topTissue",
+                          "topOrganSystem"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 10,
+                      "type": "array"
+                    },
+                    "clusterId": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "confidence": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "markerCount": {
+                      "maximum": 50,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "topAssignment": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "clusterId",
+                    "markerCount",
+                    "candidates",
+                    "topAssignment",
+                    "confidence"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              "datasetRef": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "method": {
+                "enum": [
+                  "marker_overlap_vote"
+                ],
+                "type": "string"
+              },
+              "note": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reference": {
+                "enum": [
+                  "HSWAE-2 cell_type_global_specificity (HPA v25 surfaceome)"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "authorized_user_dataset",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "datasetRef",
+              "clusterAssignments",
+              "method",
+              "reference",
+              "source",
+              "note"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "operation": "predictive_interactomics.complex_specificity",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contractVersion": {
+            "enum": [
+              "1.0.0"
+            ],
+            "type": "string"
+          },
+          "createdAt": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "read_local"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "predictive_interactomics.complex_specificity"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "additionalProperties": false,
+            "properties": {
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "userId": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ],
+            "type": "object"
+          },
+          "receiptVersion": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "complexName": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "contexts": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "balance_score": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "cell_type": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "cluster": {
+                      "maxLength": 500,
+                      "type": "string"
+                    },
+                    "competitor_below_floor": {
+                      "type": "boolean"
+                    },
+                    "competitor_cell_type": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "competitor_signal": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "competitor_tissue": {
+                      "maxLength": 2000,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "complex_signal": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "expressed_subunits": {
+                      "maximum": 32,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "geometric_mean_expression": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "heteromer_si": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "heteromer_si_denominator": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "limiting_expression": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "limiting_subunit": {
+                      "maxLength": 100,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "max_subunit_expression": {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "rank": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "required_subunits": {
+                      "maximum": 32,
+                      "minimum": 2,
+                      "type": "integer"
+                    },
+                    "source_dataset": {
+                      "enum": [
+                        "single_cell_expression",
+                        "hpa_v25_single_cell_cluster",
+                        "ligandai_specialized_reference"
+                      ],
+                      "type": "string"
+                    },
+                    "subunit_expression": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "expression": {
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "subunit": {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "subunit",
+                          "expression"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 32,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "tissue": {
+                      "maxLength": 2000,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "tissue",
+                    "cell_type",
+                    "cluster",
+                    "subunit_expression",
+                    "expressed_subunits",
+                    "required_subunits",
+                    "limiting_subunit",
+                    "limiting_expression",
+                    "max_subunit_expression",
+                    "geometric_mean_expression",
+                    "balance_score",
+                    "complex_signal",
+                    "heteromer_si",
+                    "heteromer_si_denominator",
+                    "competitor_below_floor",
+                    "competitor_tissue",
+                    "competitor_cell_type",
+                    "competitor_signal",
+                    "rank",
+                    "source_dataset"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              "subunits": {
+                "items": {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "minItems": 2,
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "complexName",
+              "subunits",
+              "contexts"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "executed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "contractVersion": "1.0.0"
+}

@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-10-15
+
+Every H-SWAE capability call made through this SDK raised `pydantic.ValidationError`
+in **0.15.0 through 0.16.4**. The `hswae.v1.*` / `hswae.v2.*` capabilities are not
+enterprise-gated, so this broke every caller who reached them. `bd-dre-pjhrp.18`.
+
+### Fixed
+
+- **H-SWAE receipt and result models no longer refuse fields the platform adds.**
+  The response models were `extra="forbid"`. The platform added resolution and
+  ranking bookkeeping (`bd-dre-pjhrp.10`, `bd-dre-pjhrp.11`) and that additive
+  change became a hard client-side failure.
+
+  Measured against live production on 2026-10-15, feeding real payloads to the
+  **published 0.16.4 wheel** — not the source tree, because a source-tree test
+  would have missed exactly this:
+
+  | operation | errors | error types |
+  |---|---|---|
+  | `hswae.v2.isoform_expression` | 256 | 100% `extra_forbidden` |
+  | `hswae.v1.surface_markers` | 162 | 100% `extra_forbidden` |
+  | `hswae.v2.compare_cell_types` | 17 | 100% `extra_forbidden` |
+  | `hswae.v2.resolve_cell_type` | 15 | 100% `extra_forbidden` |
+  | `hswae.v1.semantic_search` | 2 | 100% `extra_forbidden` |
+  | `predictive_interactomics.complex_specificity` | 0 | — |
+
+  452 errors in total, **every one** of them `extra_forbidden`: zero type errors,
+  zero missing fields. The server output was correct and the client refused it
+  purely for carrying keys it did not declare. Refusing a field the server sent
+  protects nothing — the bytes have already arrived in the process; it only
+  denies the caller the result. Same failure class that nearly had an
+  undeclared backend key read as an H-SWAE outage.
+
+  The type discipline now lives in one place (`_HswaeContractModel`: strict
+  types, no non-finite floats, frozen) and the extra policy is a single named
+  choice:
+
+  - `_HswaeClosedModel` (`extra="forbid"`) — caller **input**, where a typo must
+    fail before HTTP rather than travel the wire and be dropped server-side, and
+    the hash-pinned signed registry and its JSON-schema subset, where an unknown
+    key changes what the advertised contract *means*.
+  - `_HswaeOpenModel` (`extra="allow"`) — the 22 server-response models. A wrong
+    type on a declared field, a missing required field, and a non-object where a
+    model belongs all still raise.
+
+  All six capability operations now parse live production payloads with zero
+  undeclared keys.
+
+### Added
+
+- **A projection gate, because `extra="allow"` removed the one that existed.**
+  `extra="forbid"` was the only thing that noticed a field the SDK failed to
+  declare; opening the models to fix the outage means such a field now lands
+  silently in `model_extra` and never reaches the typed surface. That is the
+  mirror image of `bd-dre-pjhrp.19`, where three fields were *declared* and
+  never *projected*, so the server's own `getHswaeContractDrift()` read clean
+  while the receipt was incomplete — a drift audit cannot see that class.
+
+  `tests/unit/test_hswae_projection_contract.py` pins both directions against a
+  recorded live production payload set and the live signed `outputSchema`:
+
+  - every property the signed output schema declares is declared by the SDK
+    (currently exact: 23/23, 47/47, 68/68, 57/57, 78/78, 32/32, 36/36 across the
+    seven operations);
+  - `model_dump(by_alias=True)` reproduces every key and value the server sent,
+    so nothing is parsed and then dropped on the way out.
+
+### Known gap
+
+- `expression_floor_basis` and `match_detail` are emitted by the backend as of
+  server commit `90aeca34ff` (`bd-dre-pjhrp.19`) but are **not yet deployed** —
+  verified absent from both the live signed schema and live payloads on
+  2026-10-15. They are declared here so they reach callers the moment that
+  deploys; `expression_floor_basis` is what reconciles a reported `meanTpm` with
+  the `expression_floor_tpm` the same receipt states.
+
+## [0.16.4] - 2026-10-06
+
+### Added
+- First-class `bind_ph` / `release_ph` on `peptides.generate` (and client convenience wrappers).
+- `ligandai.ph` helpers: `validate_ph_pair`, `ph_generation_fields`, `henderson_hasselbalch_fraction`.
+- Wire fields: `phBind`/`phAvoid` (challenge activity) and `bindPh`/`releasePh` (challenge spec).
+
+Pocket-conditioned generation, `fold_batch`, and `organism` / species selection are unchanged.
+
+> ⛔ **Release-bookkeeping correction.** This section was written at the top of
+> this file, above its own title, and the 0.16.4 wheel was built and published
+> from an **uncommitted working tree** — none of its source was in git. The
+> section is placed correctly here and that source is committed as of 0.16.5.
+
 ## [0.16.3] - 2026-10-02
 
 Ten defects found by running the **published** 0.16.0/0.16.1 wheels against

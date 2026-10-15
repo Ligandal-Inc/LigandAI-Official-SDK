@@ -1,0 +1,124 @@
+{
+  "contractVersion": "1.0.0",
+  "createdAt": "2026-10-15T14:29:55.154Z",
+  "effect": "read_local",
+  "operation": "hswae.v1.surface_markers",
+  "owner": {
+    "orgId": "fixture-org-0001",
+    "userId": "fixture-user-0001"
+  },
+  "receiptVersion": "1",
+  "requestId": "fixture-request-00000000-0000-0000-0000-000000000000",
+  "result": {
+    "expression_floor_tissue": "colon_sigmoid",
+    "expression_floor_tpm": 1,
+    "floor_note": "A list shorter than markers_requested means the expression floor or the consistency threshold excluded candidates, NOT that the tissue has no further markers; lower expression_floor_tpm to see them.",
+    "marker_method": "hswae_differential",
+    "markers": [
+      {
+        "consistency": 1,
+        "embeddingCombinedScore": 0.1565171182155609,
+        "embeddingSpecificity": 0.1565171182155609,
+        "ensemblGene": "ENSG00000101188",
+        "gene": "NTSR1",
+        "meanTpm": 30.97,
+        "method": "hswae_differential",
+        "proteinName": null,
+        "rank": null,
+        "similarity": 0.3369002938270569,
+        "specificityIndex": 6.62,
+        "targetContext": "colon_sigmoid",
+        "uniprotId": "P30989"
+      },
+      {
+        "consistency": 1,
+        "embeddingCombinedScore": 0.12403056025505066,
+        "embeddingSpecificity": 0.12403056025505066,
+        "ensemblGene": "ENSG00000091138",
+        "gene": "SLC26A3",
+        "meanTpm": 287.61,
+        "method": "hswae_differential",
+        "proteinName": null,
+        "rank": null,
+        "similarity": 0.5367788672447205,
+        "specificityIndex": 6.18,
+        "targetContext": "colon_sigmoid",
+        "uniprotId": "P40879"
+      },
+      {
+        "consistency": 1,
+        "embeddingCombinedScore": 0.09539061784744263,
+        "embeddingSpecificity": 0.09539061784744263,
+        "ensemblGene": "ENSG00000007306",
+        "gene": "CEACAM7",
+        "meanTpm": 193.975,
+        "method": "hswae_differential",
+        "proteinName": null,
+        "rank": null,
+        "similarity": 0.5385532975196838,
+        "specificityIndex": 6.083,
+        "targetContext": "colon_sigmoid",
+        "uniprotId": "Q14002"
+      },
+      {
+        "consistency": 1,
+        "embeddingCombinedScore": 0.1450812816619873,
+        "embeddingSpecificity": 0.1450812816619873,
+        "ensemblGene": "ENSG00000205277",
+        "gene": "MUC12",
+        "meanTpm": 18.96,
+        "method": "hswae_differential",
+        "proteinName": null,
+        "rank": null,
+        "similarity": 0.4879518151283264,
+        "specificityIndex": 4.419,
+        "targetContext": "colon_sigmoid",
+        "uniprotId": "Q9UKN1"
+      },
+      {
+        "consistency": 1,
+        "embeddingCombinedScore": 0.1461368203163147,
+        "embeddingSpecificity": 0.1461368203163147,
+        "ensemblGene": "ENSG00000155850",
+        "gene": "SLC26A2",
+        "meanTpm": 79.59,
+        "method": "hswae_differential",
+        "proteinName": null,
+        "rank": null,
+        "similarity": 0.36646953225135803,
+        "specificityIndex": 2.311,
+        "targetContext": "colon_sigmoid",
+        "uniprotId": "P50443"
+      }
+    ],
+    "markers_below_consistency_excluded": 0,
+    "markers_below_floor_excluded": 1154,
+    "markers_eligible": 1535,
+    "markers_requested": 5,
+    "markers_returned": 5,
+    "markers_unknown_expression_excluded": 0,
+    "matched_tissues": [
+      {
+        "cell_type": null,
+        "match_type": "alias",
+        "score": 0.9,
+        "source_entity": "colon",
+        "tissue": "colon_sigmoid"
+      },
+      {
+        "cell_type": null,
+        "match_type": "alias",
+        "score": 0.9,
+        "source_entity": "colon",
+        "tissue": "colon_transverse"
+      }
+    ],
+    "method": "semantic_search_markers",
+    "primary_tissue": "colon_sigmoid",
+    "query": "colon",
+    "ranking_key": "specificity_index",
+    "sort_key_field": "specificity_index",
+    "timing_ms": 524.95
+  },
+  "status": "executed"
+}

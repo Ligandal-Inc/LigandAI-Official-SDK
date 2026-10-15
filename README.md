@@ -24,7 +24,25 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.3** — ten defects found by running the *published* 0.16.0/0.16.1
+> **v0.16.5** — **every H-SWAE capability call raised `ValidationError` in
+> 0.15.0 through 0.16.4.** The receipt models were `extra="forbid"`, so when the
+> platform added resolution and ranking bookkeeping, a correct production
+> payload was refused by the client for carrying fields it did not declare.
+> Measured against live production on 2026-10-15, the published 0.16.4 wheel
+> raised on 5 of 6 operations — 452 errors, **every one** of them
+> `extra_forbidden`, with zero type errors and zero missing fields. The server
+> output was right; the client threw it away. Response models are now
+> `extra="allow"`: a field the platform adds is kept and reachable, while a
+> wrong type, a missing required field and a non-object where a model belongs
+> all still raise. Caller **input** stays closed, so a typo still fails before
+> the request is sent. If you call `discovery.invoke_capability()` or any
+> `hswae.v1.*` / `hswae.v2.*` operation, upgrade — these capabilities are not
+> enterprise-gated and the break was total.
+>
+> 0.16.4 added first-class `bind_ph` / `release_ph` on `peptides.generate` and
+> the `ligandai.ph` helpers.
+>
+> 0.16.3 fixed ten defects found by running the *published* 0.16.0/0.16.1
 > wheels against production, each one answering with a clean, plausible value
 > that no caller could tell from a real measurement. `jobs.stream()` called a
 > route the server does not have, so every call 404'd and read as "that job does
@@ -80,6 +98,27 @@ design, structure prediction, scoring, and discovery.
 > it is yanked.)
 >
 > See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+## pH-switch objectives (`bind_ph` / `release_ph`)
+
+First-class on `client.generate` / `peptides.generate` since **0.16.4**:
+
+```python
+job = client.generate(
+    gene="TNF",
+    num_peptides=200,
+    target_residues=[82, 83, 84, 85, 86],
+    bind_ph=7.4,      # bind condition (TNF challenge week-2)
+    release_ph=6.5,   # release condition
+    organism="human",
+)
+```
+
+These values are screening objectives on the request (also emitted as `phBind`/`phAvoid`).
+They do not by themselves establish pH-selective binding — fold or measure at both pH values.
+
+Helpers: `ligandai.validate_ph_pair`, `ligandai.ph_generation_fields`, `ligandai.henderson_hasselbalch_fraction`.
+
 
 ## Concurrency & Quota
 

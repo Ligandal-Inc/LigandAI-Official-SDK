@@ -1,0 +1,29 @@
+{
+  "contractVersion": "1.0.0",
+  "createdAt": "2026-10-15T14:29:55.125Z",
+  "effect": "read_local",
+  "operation": "hswae.v1.semantic_search",
+  "owner": {
+    "orgId": "fixture-org-0001",
+    "userId": "fixture-user-0001"
+  },
+  "receiptVersion": "1",
+  "requestId": "fixture-request-00000000-0000-0000-0000-000000000000",
+  "result": {
+    "count": 0,
+    "matches": [],
+    "query": "colon epithelium",
+    "searched_vocabularies": [
+      {
+        "name": "tissues",
+        "size": 73
+      },
+      {
+        "name": "cell_types",
+        "size": 85
+      }
+    ],
+    "unmatched_reason": "No entry in the searched vocabularies matched 'colon epithelium' above the match threshold. Vocabulary sizes: tissues=73, cell_types=85. This is a SEARCH miss \u2014 a multi-concept free-text query ('internalizing receptor kidney proximal tubule') will not match a single tissue or cell-type label. It is NOT evidence that the index is empty or that the biology is absent. For a cell-type term use POST /hswae/resolve-cell-type, which resolves against the HSWAE-2 cell-type vocabulary and returns nearest_candidates on a miss."
+  },
+  "status": "executed"
+}

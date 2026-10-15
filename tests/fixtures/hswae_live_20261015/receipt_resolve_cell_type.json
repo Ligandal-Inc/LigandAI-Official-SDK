@@ -1,0 +1,121 @@
+{
+  "contractVersion": "1.0.0",
+  "createdAt": "2026-10-15T14:29:55.714Z",
+  "effect": "read_local",
+  "operation": "hswae.v2.resolve_cell_type",
+  "owner": {
+    "orgId": "fixture-org-0001",
+    "userId": "fixture-user-0001"
+  },
+  "receiptVersion": "1",
+  "requestId": "fixture-request-00000000-0000-0000-0000-000000000000",
+  "result": {
+    "ambiguous_alternatives": [],
+    "candidates": [
+      {
+        "added_canonical_tokens": [],
+        "alias_marker_genes": [],
+        "alias_query": null,
+        "cell_type": "enterocytes",
+        "confidence": 0.95,
+        "dropped_query_tokens": [],
+        "marker_score": null,
+        "match_type": "ontology_synonym",
+        "proxy_for": null,
+        "proxy_note": null,
+        "requires_geo_ingest": [],
+        "resolution_is_proxy": false,
+        "source": "canonical_ontology_synonym",
+        "supportingGenes": [],
+        "top_organ_system": "Digestive",
+        "top_tissue": "small intestine",
+        "uncorroborated_qualifiers": [],
+        "unrequested_specializations": [],
+        "vote_count": null
+      }
+    ],
+    "canonical": "enterocytes",
+    "delivery_context_hint": null,
+    "nearest_candidates": [
+      {
+        "accepted": true,
+        "cell_type": "enterocytes",
+        "dropped_query_tokens": [],
+        "match_type": "ontology_synonym",
+        "score": 0.95,
+        "shared_tokens": []
+      },
+      {
+        "accepted": false,
+        "cell_type": "epithelial cells",
+        "dropped_query_tokens": [
+          "enterocyte"
+        ],
+        "match_type": "fuzzy",
+        "score": 0.2492,
+        "shared_tokens": []
+      },
+      {
+        "accepted": false,
+        "cell_type": "erythrocytes",
+        "dropped_query_tokens": [
+          "enterocyte"
+        ],
+        "match_type": "fuzzy",
+        "score": 0.1866,
+        "shared_tokens": []
+      },
+      {
+        "accepted": false,
+        "cell_type": "astrocytes",
+        "dropped_query_tokens": [
+          "enterocyte"
+        ],
+        "match_type": "fuzzy",
+        "score": 0.1836,
+        "shared_tokens": []
+      },
+      {
+        "accepted": false,
+        "cell_type": "pericyte",
+        "dropped_query_tokens": [
+          "enterocyte"
+        ],
+        "match_type": "fuzzy",
+        "score": 0.18,
+        "shared_tokens": []
+      }
+    ],
+    "query": "enterocyte",
+    "resolution_is_ambiguous": false,
+    "resolution_is_proxy": false,
+    "resolution_stage": "ontology_synonym",
+    "resolution_status": "resolved",
+    "stages_tried": [
+      "exact",
+      "substring",
+      "ontology_synonym",
+      "token_set",
+      "fuzzy",
+      "specialized_alias"
+    ],
+    "unresolved_reason": null,
+    "vocabulary": {
+      "scope": "This layer resolves against a FIXED set of HPA v25 single-cell cluster labels plus specialized reference cell contexts, NOT an open Cell Ontology \u2014 an unresolved term means the term is outside this vocabulary, not that the cell type does not exist.",
+      "size": 202,
+      "source_datasets": [
+        "hpa_v25_single_cell_cluster",
+        "specialized_reference_cell_context"
+      ],
+      "specificity_row_count": 477692,
+      "synonym_tables": {
+        "ontology_synonym_entries": 88,
+        "ontology_synonym_keys": 254,
+        "specialized_alias_entries": 16,
+        "specialized_alias_keys": 66
+      },
+      "tissue_count": 38
+    }
+  },
+  "status": "executed"
+}

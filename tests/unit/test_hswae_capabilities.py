@@ -152,6 +152,9 @@ def _surface_result() -> dict[str, Any]:
         "sort_key_field": "specificity_index",
         "expression_floor_tpm": 1.0,
         "expression_floor_tissue": "Liver",
+        # What the floor is evaluated ON, so a sub-floor mean_tpm is
+        # reconcilable from the receipt alone [bd-dre-pjhrp.19].
+        "expression_floor_basis": "max_tpm_across_target_tissues",
         "markers_eligible": 1413,
         "markers_requested": 25,
         "markers_returned": 1,
@@ -188,6 +191,13 @@ def _resolve_result() -> dict[str, Any]:
                 "resolution_is_proxy": False,
                 "dropped_query_tokens": [],
                 "uncorroborated_qualifiers": [],
+                # Both halves of the qualifier evidence, and the detail the
+                # stage named by match_type actually measured — an
+                # ontology_synonym match emits {matched_term} and nothing
+                # else, because the other stages' numbers were never computed
+                # [bd-dre-pjhrp.19].
+                "corroborated_qualifiers": [],
+                "match_detail": {"matched_term": "hepatocyte"},
                 "added_canonical_tokens": ["cells"],
                 "unrequested_specializations": [],
             }
@@ -935,6 +945,11 @@ def test_pre_bookkeeping_server_payloads_still_parse(
         "match_type", "dropped_query_tokens", "uncorroborated_qualifiers",
         "added_canonical_tokens", "unrequested_specializations",
         "embeddingSpecificity", "embeddingCombinedScore", "consistency",
+        # bd-dre-pjhrp.19: emitted by server commit 90aeca34ff, not yet
+        # deployed. Verified absent from the live signed schema and live
+        # payloads 2026-10-15, so TODAY'S production is one of the "older
+        # deployments" this test models.
+        "expression_floor_basis", "corroborated_qualifiers", "match_detail",
     }
     keep_match_type = {"matches", "matched_tissues", "contexts"}
 

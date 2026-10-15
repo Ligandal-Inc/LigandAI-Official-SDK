@@ -522,6 +522,31 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
         "remediation": "Every design the generator supplied has been folded, and the criterion is still unmet. Generate a further candidate set, or relax the criterion. The campaign has stopped rather than re-folding designs it has already judged, which would add cost without adding evidence.",
         "doc_anchor": "guides/run-until-criteria#candidates",
     },
+    # Three codes the platform registered and this copy had drifted behind, so
+    # the SDK could not enrich a diagnostic the server was already sending.
+    # Copied verbatim from shared/warnings.json; the drift guard in
+    # tests/unit/test_diagnostics.py pins every field byte-for-byte.
+    "design_surface_chain_scoped": {
+        "severity": "info",
+        "stage": "generate",
+        "title": "Design surface was scoped to the chains you named",
+        "remediation": "No action needed. target_chains narrowed the receptor conformation and the conditioning pocket to the chains you declared; the partner chains were excluded from the surface the generator sees.",
+        "doc_anchor": "sdk/python/pocket-hotspot#target-chains",
+    },
+    "target_chains_unmatched": {
+        "severity": "warning",
+        "stage": "generate",
+        "title": "The chains you named do not match this structure",
+        "remediation": "target_chains had NO EFFECT: no conformation of this receptor carries that chain set, so generation ran against the full assembly including the partner chains. Check the chain letters in the structure you are designing against - uploaded and EC-trimmed receptors are routinely relabelled - or upload a single-chain frame.",
+        "doc_anchor": "sdk/python/pocket-hotspot#target-chains",
+    },
+    "quality_guided_not_applied_in_loop": {
+        "severity": "warning",
+        "stage": "request",
+        "title": "Quality guidance will not steer generation on this generator",
+        "remediation": "The learned v6.5.12 quality heads do not run inside the sampling loop on the Modal generator deployments: audited 2026-10-15, none of the six generator worker modules contains any quality-head code, and the heads live in a separate Modal app that is only called AFTER generation. Your request is NOT inert - it selects the quality diffusion-step tier (recorded as inference_config.num_diffusion_steps; measured 100 steps with the flag vs 50 without) and the heads still score the designs afterwards (guidance_heads.quality.role = post_generation_scoring). What it does not do is change which sequences are sampled, so do not describe the output as quality-guided GENERATION. In-loop steering is implemented only on the parallel-v2 batch surface (Gumbel-softmax gradients through the quality predictor) and on the local guided fallback.",
+        "doc_anchor": "guides/guidance-knobs#quality-guided",
+    },
 }
 
 

@@ -1,0 +1,115 @@
+{
+  "contractVersion": "1.0.0",
+  "createdAt": "2026-10-15T14:29:57.723Z",
+  "effect": "read_local",
+  "operation": "predictive_interactomics.complex_specificity",
+  "owner": {
+    "orgId": "fixture-org-0001",
+    "userId": "fixture-user-0001"
+  },
+  "receiptVersion": "1",
+  "requestId": "fixture-request-00000000-0000-0000-0000-000000000000",
+  "result": {
+    "complexName": "CD8A/CD8B",
+    "contexts": [
+      {
+        "balance_score": 0.7835370343101163,
+        "cell_type": "t-cells",
+        "cluster": "c-14",
+        "competitor_below_floor": false,
+        "competitor_cell_type": "t-cells",
+        "competitor_signal": 433.4592295413615,
+        "competitor_tissue": "fallopian tube",
+        "complex_signal": 471.00229487169946,
+        "expressed_subunits": 2,
+        "geometric_mean_expression": 601.1232070050204,
+        "heteromer_si": 1.0866126795132771,
+        "heteromer_si_denominator": 433.4592295413615,
+        "limiting_expression": 532.1,
+        "limiting_subunit": "CD8B",
+        "max_subunit_expression": 679.1,
+        "rank": 1,
+        "required_subunits": 2,
+        "source_dataset": "hpa_v25_single_cell_cluster",
+        "subunit_expression": [
+          {
+            "expression": 679.1,
+            "subunit": "CD8A"
+          },
+          {
+            "expression": 532.1,
+            "subunit": "CD8B"
+          }
+        ],
+        "tissue": "colon"
+      },
+      {
+        "balance_score": 0.6181879345144651,
+        "cell_type": "t-cells",
+        "cluster": "c-5",
+        "competitor_below_floor": false,
+        "competitor_cell_type": "t-cells",
+        "competitor_signal": 471.00229487169946,
+        "competitor_tissue": "colon",
+        "complex_signal": 433.4592295413615,
+        "expressed_subunits": 2,
+        "geometric_mean_expression": 701.1771102938259,
+        "heteromer_si": 0.920291120151411,
+        "heteromer_si_denominator": 471.00229487169946,
+        "limiting_expression": 551.3,
+        "limiting_subunit": "CD8B",
+        "max_subunit_expression": 891.8,
+        "rank": 2,
+        "required_subunits": 2,
+        "source_dataset": "hpa_v25_single_cell_cluster",
+        "subunit_expression": [
+          {
+            "expression": 891.8,
+            "subunit": "CD8A"
+          },
+          {
+            "expression": 551.3,
+            "subunit": "CD8B"
+          }
+        ],
+        "tissue": "fallopian tube"
+      },
+      {
+        "balance_score": 0.6971770744225835,
+        "cell_type": "t-cells",
+        "cluster": "c-8",
+        "competitor_below_floor": false,
+        "competitor_cell_type": "t-cells",
+        "competitor_signal": 471.00229487169946,
+        "competitor_tissue": "colon",
+        "complex_signal": 408.30096646101947,
+        "expressed_subunits": 2,
+        "geometric_mean_expression": 585.6488709115728,
+        "heteromer_si": 0.8668768091082024,
+        "heteromer_si_denominator": 471.00229487169946,
+        "limiting_expression": 489,
+        "limiting_subunit": "CD8B",
+        "max_subunit_expression": 701.4,
+        "rank": 3,
+        "required_subunits": 2,
+        "source_dataset": "hpa_v25_single_cell_cluster",
+        "subunit_expression": [
+          {
+            "expression": 701.4,
+            "subunit": "CD8A"
+          },
+          {
+            "expression": 489,
+            "subunit": "CD8B"
+          }
+        ],
+        "tissue": "esophagus"
+      }
+    ],
+    "subunits": [
+      "CD8A",
+      "CD8B"
+    ]
+  },
+  "status": "executed"
+}
