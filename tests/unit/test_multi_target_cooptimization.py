@@ -52,7 +52,10 @@ A = "ACDEFGHIKLMNP"
 B = "WYVTSRQNKHGFE"
 C = "LLLLIIIVVVAAA"
 
-MOUSE_PDB = "ATOM      1  N   MET A   1      11.104   6.134  -6.504  1.00 00.00           N\n"
+MOUSE_PDB = (
+    "ATOM      1  N   MET A   1      11.104   6.134  -6.504  1.00 00.00           N\n"
+    "ATOM      2  CA  MET A   1      12.104   6.134  -6.504  1.00 00.00           C\n"
+)
 
 
 def _human() -> TargetSpec:
@@ -446,13 +449,16 @@ def test_a_missing_off_target_is_still_an_upper_bound_under_worst_case():
     assert partial[0].delta_upper_bound == pytest.approx(0.60)
 
 
-def test_no_positive_leg_at_all_produces_no_row_of_any_kind():
+def test_no_positive_leg_is_retained_as_an_indeterminate_row():
     p = _panel(
         {(A, "O1"): [0.20]},
         targets=["T1", "T2"], off_targets=["O1"], aggregate="worst_case",
     )
     complete, partial, summary = p.deltas(band=0.10, target_leg_min=0.66)
-    assert complete == [] and partial == []
+    assert complete == [] and len(partial) == 1
+    assert partial[0].targets_missing == ("T1", "T2")
+    assert partial[0].delta_upper_bound is None
+    assert partial[0].bound_kind == "indeterminate"
     assert summary["n_no_target_leg"] == 1
 
 

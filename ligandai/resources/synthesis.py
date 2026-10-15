@@ -165,7 +165,12 @@ _ADAPTYV_DEFAULT_ANTIGEN_CONCENTRATIONS: list[float] = [1000.0, 316.2, 100.0, 31
 
 def _adaptyv_tag_location(tag_position: str | None) -> str:
     """``n_term``/``c_term`` → the ``tag_location`` letter Adaptyv expects."""
-    return "C" if str(tag_position or "").lower().startswith("c") else "N"
+    value = str(tag_position or "c_term").strip().lower()
+    if value in {"n", "n_term", "n_terminal"}:
+        return "N"
+    if value in {"c", "c_term", "c_terminal"}:
+        return "C"
+    raise ValueError("tag_position must explicitly select n_term or c_term")
 
 
 def _adaptyv_sequence_entry(
@@ -203,10 +208,12 @@ def _adaptyv_sequence_entry(
     name = key_hint or raw.get("name") or raw.get("id") or f"seq-{index + 1}"
     name = str(name).strip() or f"seq-{index + 1}"
 
+    metadata = dict(raw.get("metadata") or {})
+    metadata.setdefault("tag_location", tag_location)
     entry: dict[str, Any] = {
         "aa_string": aa,
         "control": bool(raw.get("control", False)),
-        "metadata": dict(raw.get("metadata") or {"tag_location": tag_location}),
+        "metadata": metadata,
     }
     # Anything else the caller attached (quantity, notes, ...) rides along
     # untouched rather than being silently dropped by an allow-list.
@@ -343,7 +350,7 @@ _ADAPTYV_CREATE_DOC = """Create a draft Adaptyv experiment and populate it with 
         :param antigen_concentrations: Titration series in nM. Defaults to
             ``[1000.0, 316.2, 100.0, 31.6, 0.0]``.
         :param synthesis_mode: ``"recombinant"`` (default) or ``"chemical"``.
-        :param tag_position: ``"n_term"`` (default) or ``"c_term"``. Drives the
+        :param tag_position: ``"c_term"`` (default) or ``"n_term"``. Drives the
             per-sequence ``metadata.tag_location``.
         :param parameters: Extra ``experiment_spec.parameters`` entries.
         :param experiment_spec: A pre-built spec used as the base, for fields
@@ -549,7 +556,7 @@ class Synthesis(Resource):
         n_replicates: int = 3,
         antigen_concentrations: _Sequence[float] | None = None,
         synthesis_mode: str = "recombinant",
-        tag_position: str = "n_term",
+        tag_position: str = "c_term",
         parameters: Mapping[str, Any] | None = None,
         experiment_spec: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
@@ -931,7 +938,7 @@ class AsyncSynthesis(AsyncResource):
         n_replicates: int = 3,
         antigen_concentrations: _Sequence[float] | None = None,
         synthesis_mode: str = "recombinant",
-        tag_position: str = "n_term",
+        tag_position: str = "c_term",
         parameters: Mapping[str, Any] | None = None,
         experiment_spec: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,

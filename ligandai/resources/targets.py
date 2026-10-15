@@ -45,6 +45,8 @@ Three behaviours worth knowing before you rely on a name:
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import re
 
 from ligandai.errors import LigandAIValidationError
 from ligandai.resources._base import AsyncResource, Resource
@@ -52,6 +54,54 @@ from ligandai.resources._base import AsyncResource, Resource
 #: Name-match tiers, strongest first. `custom_name`/`gene_label` is what the
 #: user typed; `filename_stem` is what they happened to call the file.
 NAME_MATCH_TIERS: tuple[str, ...] = ("gene_label", "gene", "filename_stem")
+
+
+def _structure_params(name, upload_id, expected_sha256):
+    if (name is None) == (upload_id is None):
+        raise LigandAIValidationError("Provide exactly one of name or upload_id.")
+    params = {}
+    if name is not None:
+        params["name"] = _require_name(name)
+    if upload_id is not None:
+        if not isinstance(upload_id, str) or not re.fullmatch(r"(?:userpdb|userprotein)_[1-9]\d*", upload_id):
+            raise LigandAIValidationError("upload_id must be store-qualified, e.g. userprotein_123.")
+        params["uploadId"] = upload_id
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", expected_sha256):
+            raise LigandAIValidationError("expected_sha256 must be a 64-character SHA-256 hex digest.")
+        params["expectedSha256"] = expected_sha256.lower()
+    return params
+
+
+class SavedTargetStructure:
+    """Exact saved PDB/mmCIF text, verified against its returned content hash.
+
+    This is a user's upload, not a gene-level replacement. Residue numbers and
+    chains remain as stored. Pin ``upload_id`` and ``content_sha256`` for reuse.
+    ``format`` is ``pdb`` or ``cif``; ``content`` is never converted or trimmed.
+    """
+
+    def __init__(self, payload: Any, *, params: dict[str, str]) -> None:
+        if not isinstance(payload, dict):
+            raise LigandAIValidationError("Saved structure response was not an object.")
+        content, digest, upload_id = (payload.get(k) for k in ("content", "contentSha256", "uploadId"))
+        if (payload.get("source") != "user_upload" or
+            payload.get("format") not in ("pdb", "cif") or
+            not isinstance(content, str) or not content or
+            not isinstance(upload_id, str) or
+            not re.fullmatch(r"(?:userpdb|userprotein)_[1-9]\d*", upload_id) or
+            digest != hashlib.sha256(content.encode("utf-8")).hexdigest() or
+            payload.get("byteLength") != len(content.encode("utf-8")) or
+            ("uploadId" in params and upload_id != params["uploadId"]) or
+            ("name" in params and payload.get("requestedName") != params["name"]) or
+            ("expectedSha256" in params and digest != params["expectedSha256"])):
+            raise LigandAIValidationError("Saved structure identity or content hash did not match. No canonical fallback was accepted.")
+        self.content: str = content
+        self.format: str = payload["format"]
+        self.upload_id: str = upload_id
+        self.content_sha256: str = digest
+        self.gene: str | None = payload.get("gene")
+        self.choice: dict[str, Any] | None = payload.get("choice")
 
 
 def _require_name(name: str) -> str:
@@ -316,6 +366,19 @@ class TargetResolution:
 class Targets(Resource):
     """The index of names your account can target."""
 
+    def structure(self, name: str | None = None, *, upload_id: str | None = None,
+                  expected_sha256: str | None = None) -> SavedTargetStructure:
+        """Download your saved construct, never the public gene structure.
+
+        Supply either a saved name or an exact store-qualified upload ID.
+        Ambiguous names return HTTP 409 with candidates; choose explicitly via
+        ``candidates()`` then use ``upload_id``. Pass ``expected_sha256`` on
+        subsequent downloads to refuse changed content. No folding is launched.
+        """
+        params = _structure_params(name, upload_id, expected_sha256)
+        payload = self._transport.request("GET", "/api/targets/structure", params=params)
+        return SavedTargetStructure(payload, params=params)
+
     def list(self) -> TargetIndex:
         """Every addressable name on this account, with its match tier.
 
@@ -417,6 +480,13 @@ class Targets(Resource):
 
 
 class AsyncTargets(AsyncResource):
+    async def structure(self, name: str | None = None, *, upload_id: str | None = None,
+                        expected_sha256: str | None = None) -> SavedTargetStructure:
+        """Async variant of :meth:`Targets.structure`."""
+        params = _structure_params(name, upload_id, expected_sha256)
+        payload = await self._transport.request("GET", "/api/targets/structure", params=params)
+        return SavedTargetStructure(payload, params=params)
+
     """Async variant of :class:`Targets`."""
 
     async def list(self) -> TargetIndex:

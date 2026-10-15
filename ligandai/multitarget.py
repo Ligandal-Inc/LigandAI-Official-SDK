@@ -367,6 +367,24 @@ class TargetSpec:
                 "provenance or folded against."
             )
         object.__setattr__(self, "gene", gene)
+        selectors = [name for name in (
+            "receptor_pdb", "receptor_sequence", "user_pdb_id", "pdb_code"
+        ) if getattr(self, name) is not None]
+        if len(selectors) > 1:
+            raise LigandAIValidationError(
+                f"target {gene!r} has conflicting structure selectors {selectors}. "
+                "Choose one exact receptor source; their identities cannot be "
+                "assumed equivalent. uniprot_id remains descriptive metadata."
+            )
+        for name in ("receptor_pdb", "receptor_sequence", "pdb_code"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise LigandAIValidationError(f"{name} must be a non-empty string")
+        if self.user_pdb_id is not None and (
+            isinstance(self.user_pdb_id, bool) or not str(self.user_pdb_id).isdigit()
+            or int(self.user_pdb_id) < 1
+        ):
+            raise LigandAIValidationError("user_pdb_id must be a positive upload identifier")
         object.__setattr__(
             self, "hotspot_residues",
             _clean_resnums(self.hotspot_residues, f"{gene} hotspot_residues"),
@@ -499,9 +517,20 @@ class TargetSpec:
         elif self.receptor_sequence:
             out["receptor_sequence"] = self.receptor_sequence
             out["receptor_name"] = self.receptor_name or self.key
+        elif self.user_pdb_id is not None or self.pdb_code:
+            raise LigandAIValidationError(
+                f"target {self.key!r} selects {self.structure_route}, but fold_batch "
+                "cannot resolve that identifier. Supply the exact receptor_pdb "
+                "or receptor_sequence before folding; canonical-gene fallback "
+                "would change the requested target."
+            )
         else:
             out["target_gene"] = self.gene
         if self.msa_source_gene:
+            if "receptor_sequence" not in out:
+                raise LigandAIValidationError(
+                    "msa_source_gene requires receptor_sequence on the folding route."
+                )
             out["msa_source_gene"] = self.msa_source_gene
         return out
 
@@ -512,11 +541,31 @@ class TargetSpec:
         uploaded structure supplies the coordinates), and residue-level
         targeting travels with ``numbering`` so the frame is never implicit.
         """
-        out: dict[str, Any] = {"gene": self.gene}
+        if self.receptor_sequence:
+            raise LigandAIValidationError(
+                f"target {self.key!r} supplies receptor_sequence, but the generation "
+                "endpoint requires receptor coordinates and has no sequence-bound "
+                "target route. Supply the exact receptor_pdb instead; the sequence "
+                "cannot be dropped or replaced by a gene lookup."
+            )
+        wire = self.to_wire()
+        if self.receptor_pdb:
+            from ligandai.resources.peptides import _resolve_receptor_pdb_arg
+
+            pdb = _resolve_receptor_pdb_arg(self.receptor_pdb)
+            # Express dispatch selects inline coordinates only above 100 bytes.
+            # Refuse shorter/malformed inputs rather than entering its gene route.
+            if not pdb or len(pdb) <= 100 or not any(
+                line.startswith(("ATOM  ", "HETATM")) for line in pdb.splitlines()
+            ):
+                raise LigandAIValidationError(
+                    "receptor_pdb must contain dispatchable inline PDB coordinates "
+                    "(ATOM/HETATM records, more than 100 characters)."
+                )
+            wire["pdbData"] = pdb
+        out: dict[str, Any] = {"gene": self.gene, "targets": [wire]}
         if self.user_pdb_id is not None:
             out["user_pdb_id"] = self.user_pdb_id
-        if self.pdb_code:
-            out["pdb_code"] = self.pdb_code
         if self.chains:
             out["target_chains"] = [c.strip() for c in self.chains.split(",") if c.strip()]
         if self.hotspot_residues:

@@ -3,12 +3,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
 from pydantic import TypeAdapter
 
+from ligandai._geo import (
+    GEO_PATH,
+    GEO_TERMINAL_STATUSES,
+    GeoImportTimeout,
+    geo_accession,
+    geo_import_selection,
+    geo_job_id,
+    geo_poll_parameters,
+    geo_search_params,
+    parse_geo_inspection,
+    parse_geo_job,
+    parse_geo_search,
+)
 from ligandai.errors import (
     LigandAILegalAcceptanceRequired,
     resolve_mutation_failure,
@@ -22,6 +37,8 @@ from ligandai.types import (
     ExpressionProfile,
     GeoDataset,
     GeoImportJob,
+    GeoInspection,
+    GeoSearchResponse,
     HswaeAnnotateDatasetInput,
     HswaeAnnotateDatasetReceipt,
     HswaeCapabilityDiscovery,
@@ -134,7 +151,7 @@ class Discovery(Resource):
     cell-type X", or "discover binders for disease Y".
 
     Backed by ``/api/transcriptomics/*``, ``/api/scrna/*``,
-    ``/api/geo-import/*`` and ``/api/transport-vasculome/*``. The platform has
+    ``/api/datasets/geo/*`` and ``/api/transport-vasculome/*``. The platform has
     already done the specificity-index (SI) ranking server-side over GTEx and
     its single-cell atlases — so you do NOT hand-stitch GTEx + CellGuide /
     CellxGene yourself. Resolve identifiers, ask for SI-ranked surface
@@ -499,24 +516,93 @@ class Discovery(Resource):
             or {"targetGroup": target_group.name, "referenceGroups": [], "mode": mode, "results": []}
         )
 
-    def search_geo(self, query: str) -> list[GeoDataset]:
+    def search_geo(self, query: str, *, limit: int = 10) -> list[GeoDataset]:
+        """Search public GEO metadata; preserve complete fields on each result.
+
+        Use :meth:`search_geo_response` for envelope warnings and source metadata,
+        including when no datasets matched. This call does not import datasets.
+        """
+        response = self.search_geo_response(query, limit=limit)
+        return response.results
+
+    def search_geo_response(self, query: str, *, limit: int = 10) -> GeoSearchResponse:
+        """Return the complete public GEO search envelope from the canonical API."""
         payload = self._transport.request(
-            "GET", "/api/geo-import/search", params={"query": query}
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
-        return [GeoDataset.model_validate(d) for d in items]
-
-    def import_geo(self, accession: str) -> GeoImportJob:
-        return GeoImportJob.model_validate(
-            self._transport.request("POST", "/api/geo-import/start", json={"accession": accession})
-            or {"jobId": "", "accession": accession, "status": "queued"}
+            "GET", f"{GEO_PATH}/search", params=geo_search_params(query, limit),
         )
+        return parse_geo_search(payload)
 
-    def import_status(self, job_id: str) -> GeoImportJob:
-        return GeoImportJob.model_validate(
-            self._transport.request("GET", f"/api/geo-import/status/{job_id}")
-            or {"jobId": job_id, "accession": "", "status": "unknown"}
+    def inspect_geo(self, accession: str) -> GeoInspection:
+        """Inspect official sample metadata and supported formats without importing.
+
+        Parser readiness is not evidence that expression values were downloaded,
+        parsed, normalized or analyzed. Read ``warnings`` and ``metadata_coverage``.
+        """
+        accession = geo_accession(accession)
+        payload = self._transport.request("GET", f"{GEO_PATH}/inspect/{accession}")
+        return parse_geo_inspection(payload, accession)
+
+    def import_geo(self, accession: str, *, force: bool = False, selection: dict[str, Any] | None = None) -> GeoImportJob:
+        """Explicitly start an owner-scoped import; a queued receipt is not completion.
+
+        ``force=True`` asks the server to re-import an already imported accession.
+        ``selection`` preserves exact published file names and an explicit parse plan.
+        Archive-relative paths are resolved by the server; no local path or URL is uploaded.
+        """
+        accession = geo_accession(accession)
+        if type(force) is not bool:
+            raise ValueError("force must be a boolean")
+        selection = geo_import_selection(selection)
+        body: dict[str, Any] = {"accession": accession, "force": force}
+        if selection is not None:
+            body["selection"] = selection
+        payload = self._transport.request(
+            "POST", f"{GEO_PATH}/import", json=body,
         )
+        return parse_geo_job(payload, accession=accession)
+
+    def import_status(self, job_id: str, *, accession: str | None = None) -> GeoImportJob:
+        """Fetch the actual import receipt, with optional owner-scoped restart fallback."""
+        job_id = geo_job_id(job_id)
+        accession = geo_accession(accession) if accession is not None else None
+        payload = self._transport.request(
+            "GET", f"{GEO_PATH}/status/{job_id}",
+            params={"accession": accession} if accession else None,
+        )
+        return parse_geo_job(payload, job_id=job_id, accession=accession)
+
+    def wait_for_import(
+        self, job_id: str, *, accession: str | None = None,
+        timeout: float = 300, poll_interval: float = 2,
+    ) -> GeoImportJob:
+        """Poll until a completed/failed/cancelled receipt or a finite deadline.
+
+        Failed receipts are returned intact. ``TimeoutError`` includes ``last_job``
+        when a server receipt was observed. The monotonic deadline caps sleeps and
+        each request timeout; an in-flight transport retry can extend wall time.
+        No further poll starts after the deadline. This never submits an import.
+        """
+        job_id = geo_job_id(job_id)
+        accession = geo_accession(accession) if accession is not None else None
+        geo_poll_parameters(timeout, poll_interval)
+        deadline = time.monotonic() + timeout
+        last_job: GeoImportJob | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GeoImportTimeout(job_id, last_job)
+            payload = self._transport.request(
+                "GET", f"{GEO_PATH}/status/{job_id}",
+                params={"accession": accession} if accession else None,
+                timeout=remaining,
+            )
+            last_job = parse_geo_job(payload, job_id=job_id, accession=accession)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GeoImportTimeout(job_id, last_job)
+            if last_job.status in GEO_TERMINAL_STATUSES:
+                return last_job
+            time.sleep(min(poll_interval, remaining))
 
     def list_datasets(self) -> list[Dataset]:
         payload = self._transport.request("GET", "/api/transcriptomics/datasets") or []
@@ -971,24 +1057,93 @@ class AsyncDiscovery(AsyncResource):
             or {"targetGroup": target_group.name, "referenceGroups": [], "mode": mode, "results": []}
         )
 
-    async def search_geo(self, query: str) -> list[GeoDataset]:
+    async def search_geo(self, query: str, *, limit: int = 10) -> list[GeoDataset]:
+        """Search public GEO metadata; preserve complete fields on each result.
+
+        Use :meth:`search_geo_response` for envelope warnings and source metadata,
+        including when no datasets matched. This call does not import datasets.
+        """
+        response = await self.search_geo_response(query, limit=limit)
+        return response.results
+
+    async def search_geo_response(self, query: str, *, limit: int = 10) -> GeoSearchResponse:
+        """Return the complete public GEO search envelope from the canonical API."""
         payload = await self._transport.request(
-            "GET", "/api/geo-import/search", params={"query": query}
-        ) or []
-        items = payload if isinstance(payload, list) else payload.get("results", [])
-        return [GeoDataset.model_validate(d) for d in items]
-
-    async def import_geo(self, accession: str) -> GeoImportJob:
-        return GeoImportJob.model_validate(
-            await self._transport.request("POST", "/api/geo-import/start", json={"accession": accession})
-            or {"jobId": "", "accession": accession, "status": "queued"}
+            "GET", f"{GEO_PATH}/search", params=geo_search_params(query, limit),
         )
+        return parse_geo_search(payload)
 
-    async def import_status(self, job_id: str) -> GeoImportJob:
-        return GeoImportJob.model_validate(
-            await self._transport.request("GET", f"/api/geo-import/status/{job_id}")
-            or {"jobId": job_id, "accession": "", "status": "unknown"}
+    async def inspect_geo(self, accession: str) -> GeoInspection:
+        """Inspect official sample metadata and supported formats without importing.
+
+        Parser readiness is not evidence that expression values were downloaded,
+        parsed, normalized or analyzed. Read ``warnings`` and ``metadata_coverage``.
+        """
+        accession = geo_accession(accession)
+        payload = await self._transport.request("GET", f"{GEO_PATH}/inspect/{accession}")
+        return parse_geo_inspection(payload, accession)
+
+    async def import_geo(self, accession: str, *, force: bool = False, selection: dict[str, Any] | None = None) -> GeoImportJob:
+        """Explicitly start an owner-scoped import; a queued receipt is not completion.
+
+        ``force=True`` asks the server to re-import an already imported accession.
+        ``selection`` preserves exact published file names and an explicit parse plan.
+        Archive-relative paths are resolved by the server; no local path or URL is uploaded.
+        """
+        accession = geo_accession(accession)
+        if type(force) is not bool:
+            raise ValueError("force must be a boolean")
+        selection = geo_import_selection(selection)
+        body: dict[str, Any] = {"accession": accession, "force": force}
+        if selection is not None:
+            body["selection"] = selection
+        payload = await self._transport.request(
+            "POST", f"{GEO_PATH}/import", json=body,
         )
+        return parse_geo_job(payload, accession=accession)
+
+    async def import_status(self, job_id: str, *, accession: str | None = None) -> GeoImportJob:
+        """Fetch the actual import receipt, with optional owner-scoped restart fallback."""
+        job_id = geo_job_id(job_id)
+        accession = geo_accession(accession) if accession is not None else None
+        payload = await self._transport.request(
+            "GET", f"{GEO_PATH}/status/{job_id}",
+            params={"accession": accession} if accession else None,
+        )
+        return parse_geo_job(payload, job_id=job_id, accession=accession)
+
+    async def wait_for_import(
+        self, job_id: str, *, accession: str | None = None,
+        timeout: float = 300, poll_interval: float = 2,
+    ) -> GeoImportJob:
+        """Poll until a completed/failed/cancelled receipt or a finite deadline.
+
+        Failed receipts are returned intact. ``TimeoutError`` includes ``last_job``
+        when a server receipt was observed. The monotonic deadline caps sleeps and
+        each request timeout; an in-flight transport retry can extend wall time.
+        No further poll starts after the deadline. This never submits an import.
+        """
+        job_id = geo_job_id(job_id)
+        accession = geo_accession(accession) if accession is not None else None
+        geo_poll_parameters(timeout, poll_interval)
+        deadline = time.monotonic() + timeout
+        last_job: GeoImportJob | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GeoImportTimeout(job_id, last_job)
+            payload = await self._transport.request(
+                "GET", f"{GEO_PATH}/status/{job_id}",
+                params={"accession": accession} if accession else None,
+                timeout=remaining,
+            )
+            last_job = parse_geo_job(payload, job_id=job_id, accession=accession)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GeoImportTimeout(job_id, last_job)
+            if last_job.status in GEO_TERMINAL_STATUSES:
+                return last_job
+            await asyncio.sleep(min(poll_interval, remaining))
 
     async def list_datasets(self) -> list[Dataset]:
         payload = await self._transport.request("GET", "/api/transcriptomics/datasets") or []

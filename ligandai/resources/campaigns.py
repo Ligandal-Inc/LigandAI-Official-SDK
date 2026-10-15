@@ -82,6 +82,7 @@ Refs: bd-dre-if562, bd-LIGANDAI_ALPHA_V2-jb73b.
 from __future__ import annotations
 
 import math
+import hashlib
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -1193,11 +1194,11 @@ class PartialDelta:
 
     sequence: str
     target: str
-    target_ipsae: float
+    target_ipsae: float | None
     comparators_present: tuple[str, ...]
     comparators_missing: tuple[str, ...]
-    delta_upper_bound: float
-    worst_present: str
+    delta_upper_bound: float | None
+    worst_present: str | None
     # ─── the thermodynamic objective [bd-LIGANDAI_ALPHA_V2-jb73b.2] ─────────
     target_kd_nm: float | None = None
     off_target_kd_nm: dict[str, float] = field(default_factory=dict)
@@ -1206,6 +1207,8 @@ class PartialDelta:
     doubly so, and never a verdict under any reading."""
     kd_comparators_missing: tuple[str, ...] = ()
     target_peptide_length: int | None = None
+    targets_missing: tuple[str, ...] = ()
+    bound_kind: str = "upper_bound"
 
 
 @dataclass(frozen=True)
@@ -1575,6 +1578,7 @@ class PanelResult:
         statistic: LegStatistic = "median",
         aggregate: CrossTargetAggregate | None = None,
         specs: dict[str, TargetSpec] | None = None,
+        requested_sequences: Sequence[str] | None = None,
     ) -> None:
         # ⛔ Exactly one of target= / targets=. Accepting both would make the
         # panel's arity ambiguous, and the arity decides which selection rule
@@ -1615,6 +1619,21 @@ class PanelResult:
         self.targets = tuple(keys)
         self.off_targets = tuple(off_targets)
         self.legs = legs
+        requested = (
+            [_norm_seq(s) for s in requested_sequences]
+            if requested_sequences is not None else sorted({seq for seq, _ in legs})
+        )
+        self.requested_sequences = tuple(dict.fromkeys(requested))
+        input_indices: dict[str, list[int]] = {}
+        for index, seq in enumerate(requested):
+            input_indices.setdefault(seq, []).append(index)
+        self.candidate_input_indices = {seq: tuple(indices) for seq, indices in input_indices.items()}
+        self.candidate_sha256 = {
+            seq: hashlib.sha256(seq.encode()).hexdigest() for seq in self.requested_sequences
+        }
+        if any(seq not in self.candidate_sha256 for seq, _ in legs):
+            raise LigandAIValidationError("panel contains an unrequested candidate")
+        self.submission_issues: list[dict[str, Any]] = []
         self.requested_draws = int(requested_draws)
         self.statistic: LegStatistic = statistic
         #: The cross-target rule this panel was built for. None only when there
@@ -1665,7 +1684,7 @@ class PanelResult:
 
     @property
     def sequences(self) -> list[str]:
-        return sorted({seq for (seq, _r) in self.legs})
+        return list(self.requested_sequences)
 
     @property
     def receptors(self) -> tuple[str, ...]:
@@ -2057,10 +2076,9 @@ class PanelResult:
                     primary_leg = leg
 
             if not pos_present:
-                # ⛔ Not a zero and not a negative: nothing was measured on the
-                # positive side, so there is no row of any kind to report.
+                # Keep the requested candidate visible as indeterminate even
+                # when every positive measurement is absent.
                 n_no_positive_leg += 1
-                continue
 
             # ─── off-target side ─────────────────────────────────────────────
             off_present: dict[str, float] = {}
@@ -2097,7 +2115,7 @@ class PanelResult:
                 #     be PARTIAL_PANEL_INFLATES_THE_WORST_CASE under a new name.
                 bound_kind: str = "upper_bound"
                 bound: float | None = None
-                if pos_missing and effective_rule == "mean":
+                if not pos_present or not off_present or (pos_missing and effective_rule == "mean"):
                     bound_kind = "indeterminate"
                 elif worst_present is not None:
                     agg_present, _lim = (
@@ -2283,23 +2301,20 @@ class PanelResult:
                 PartialDelta(
                     sequence=r["sequence"],
                     target=only,
-                    target_ipsae=next(iter(r["per_target_ipsae"].values())),
+                    target_ipsae=next(iter(r["per_target_ipsae"].values()), None),
                     comparators_present=r["comparators_present"],
                     comparators_missing=r["comparators_missing"],
-                    delta_upper_bound=(
-                        r["delta_upper_bound"] if r["delta_upper_bound"] is not None else 0.0
-                    ),
-                    worst_present=r["worst_present"] or "",
+                    delta_upper_bound=r["delta_upper_bound"],
+                    worst_present=r["worst_present"],
                     target_kd_nm=r["aggregate_kd_nm"],
                     off_target_kd_nm=r["off_target_kd_nm"],
                     kd_upper_bound=r["kd_upper_bound"],
                     kd_comparators_missing=r["kd_comparators_missing"],
                     target_peptide_length=r["target_peptide_length"],
+                    targets_missing=r["targets_missing"],
+                    bound_kind=r["bound_kind"],
                 )
                 for r in partial_rows
-                # A single-positive panel with no comparator measured has no
-                # bound to report, exactly as before.
-                if r["worst_present"] is not None
             ]
 
         exact_worst: dict[str, int] = {}
@@ -2333,7 +2348,12 @@ class PanelResult:
             ),
             "tie_tolerance": tie_tolerance,
             "n_complete": len(complete),
-            "n_partial_upper_bounds_not_verdicts": len(partial),
+            "n_requested_candidates": len(self.requested_sequences),
+            "n_expected_legs": len(self.requested_sequences) * len(self.receptors),
+            "n_partial": len(partial),
+            "n_partial_upper_bounds_not_verdicts": sum(
+                1 for r in partial_rows if r["delta_upper_bound"] is not None
+            ),
             "n_partial_indeterminate": sum(
                 1 for r in partial_rows if r["bound_kind"] == "indeterminate"
             ),
@@ -3043,7 +3063,9 @@ class Campaigns(Resource):
         seqs = [_norm_seq(s) for s in sequences]
         if not seqs:
             raise LigandAIValidationError("fold_panel needs at least one sequence")
+        requested_inputs = tuple(seqs)
         seqs = list(dict.fromkeys(seqs))
+        candidate_set = set(seqs)
 
         # ─── the positive side ──────────────────────────────────────────────
         if (target is None) == (targets is None):
@@ -3124,14 +3146,17 @@ class Campaigns(Resource):
         if peptides_res is None:
             raise LigandAIError("fold_panel requires a full client (client.campaigns)")
 
-        submissions: list[tuple[str, Any]] = []
+        # Resolve every leg before the first paid request. A later unsupported
+        # ortholog route must not leave earlier targets submitted already.
+        routes = {key: spec.fold_kwargs() for key, spec in specs_by_key.items()}
+        submissions: list[tuple[str, int, Any]] = []
         for receptor in (*pos_keys, *offs):
             # ⛔ EVERY RECEPTOR THROUGH ITS OWN STRUCTURE ROUTE. `target_gene=`
             # resolves the canonical (human) structure, so an ortholog leg must
             # travel as receptor_pdb/receptor_name — fold_batch has no species
             # parameter, and sending the gene symbol for a leg labelled "mouse"
             # would fold the human receptor and report it as the mouse one.
-            receptor_kwargs = specs_by_key[receptor].fold_kwargs()
+            receptor_kwargs = routes[receptor]
             for draw in range(replicates):
                 job = peptides_res.fold_batch(
                     peptides=seqs,
@@ -3151,33 +3176,69 @@ class Campaigns(Resource):
                     force_resubmit=bool(force_fresh) or draw > 0,
                     **fold_kwargs,
                 )
-                submissions.append((receptor, job))
+                submissions.append((receptor, draw, job))
 
         legs: dict[tuple[str, str], PanelLeg] = {}
         job_index: dict[str, tuple[str, str]] = {}
+        job_draws: dict[str, tuple[str, str, int]] = {}
         unmapped: list[str] = []
-        for receptor, job in submissions:
+        submission_issues: list[dict[str, Any]] = []
+        for receptor, draw, job in submissions:
             entries = list(getattr(job, "jobs", None) or [])
             if not entries:
                 # A batch handle with no sub-job entries cannot be mapped back to
                 # a (sequence, receptor) leg. Recorded rather than silently
                 # yielding an empty panel that reads like a measured null.
                 unmapped.append(receptor)
-                continue
+            seen: dict[str, str] = {}
             for entry in entries:
-                jid = str(entry.get("job_id") or entry.get("jobId") or "").strip()
-                idx = entry.get("peptide_index")
+                if not isinstance(entry, dict):
+                    raise LigandAIValidationError("panel result entry must be an object")
+                ids = [str(entry[k]).strip() for k in ("job_id", "jobId") if entry.get(k) is not None]
+                if len(set(ids)) > 1:
+                    raise LigandAIValidationError("conflicting panel job_id/jobId aliases")
+                jid = ids[0] if ids else ""
+                indices = [entry[k] for k in ("peptide_index", "peptideIndex") if entry.get(k) is not None]
+                if any(type(i) is not int or not 0 <= i < len(seqs) for i in indices):
+                    raise LigandAIValidationError("panel peptide index is outside the requested candidates")
+                if len(set(indices)) > 1:
+                    raise LigandAIValidationError("conflicting panel peptide index aliases")
+                idx = indices[0] if indices else None
                 raw_seq = entry.get("sequence")
-                if raw_seq:
+                if raw_seq is not None:
+                    if not isinstance(raw_seq, str):
+                        raise LigandAIValidationError("panel result sequence must be a string")
                     seq = _norm_seq(raw_seq)
-                elif isinstance(idx, int) and 0 <= idx < len(seqs):
+                    if seq not in candidate_set:
+                        raise LigandAIValidationError("panel result contains an unrequested candidate")
+                    if idx is not None and seq != seqs[idx]:
+                        raise LigandAIValidationError("panel result sequence and peptide index disagree")
+                elif idx is not None:
                     seq = seqs[idx]
                 else:
+                    raise LigandAIValidationError("panel result has no requested sequence or peptide index")
+                if seq in seen:
+                    if seen[seq] != jid:
+                        raise LigandAIValidationError("conflicting duplicate jobs for one panel candidate and draw")
+                    submission_issues.append({"kind": "duplicate_response_row", "sequence": seq,
+                                              "receptor": receptor, "draw": draw, "job_id": jid or None})
                     continue
+                seen[seq] = jid
+                identity = (seq, receptor, draw)
+                if jid and jid in job_draws:
+                    raise LigandAIValidationError("one panel job was reused across candidate, receptor, or independent draw")
                 leg = legs.setdefault((seq, receptor), PanelLeg(sequence=seq, receptor=receptor))
                 if jid:
+                    job_draws[jid] = identity
                     leg.fold_job_ids.append(jid)
                     job_index[jid] = (seq, receptor)
+                else:
+                    submission_issues.append({"kind": "missing_job_id", "sequence": seq,
+                                              "receptor": receptor, "draw": draw})
+            for seq in seqs:
+                if seq not in seen:
+                    submission_issues.append({"kind": "missing_submission", "sequence": seq,
+                                              "receptor": receptor, "draw": draw})
 
         result = PanelResult(
             targets=pos_keys,
@@ -3187,8 +3248,10 @@ class Campaigns(Resource):
             statistic=statistic,
             aggregate=panel_aggregate,
             specs=specs_by_key,
+            requested_sequences=requested_inputs,
         )
         result.unmapped_submissions = unmapped
+        result.submission_issues = submission_issues
         if not wait:
             return result
 
@@ -3199,7 +3262,7 @@ class Campaigns(Resource):
         # bare TypeError AFTER submitting (and paying for) the whole panel. The
         # kwarg was also unnecessary: `wait()` already counts failed sub-jobs and
         # returns, raising only on timeout. [bd-dre-if562]
-        for _receptor, job in submissions:
+        for _receptor, _draw, job in submissions:
             try:
                 job.wait(timeout=timeout, poll_interval=poll_interval)
             except LigandAIError as exc:
@@ -4231,7 +4294,27 @@ class RecursiveCampaign:
                 "caller did not choose to name that way."
             )
         self.generate_kwargs = dict(generate_kwargs or {})
+        self._validate_generation_overrides()
         self.rounds: list[CampaignRound] = []
+
+    def _validate_generation_overrides(self) -> None:
+        """TargetSpec owns identity and residue frames on every generation leg."""
+        reserved = {
+            "gene", "target_gene", "targetGene", "targets", "coOptimization", "co_optimization",
+            "organism", "species", "label", "targetKey", "target_key", "originalGene",
+            "receptor_pdb", "receptorPdb", "receptor_sequence", "receptorSequence",
+            "receptor_name", "receptorName", "pdb_data", "pdbData", "pdb_code", "pdbCode",
+            "pdb_id", "pdbId", "user_pdb_id", "userPdbId", "variant_id", "variantId",
+            "uniprot_id", "uniprotId", "target_chains", "targetChains", "targetChain", "chains",
+            "hotspot_residues", "hotspotResidues", "target_residues", "targetResidues",
+            "numbering", "residueNumbering", "hotspot_frame_attested", "hotspotFrameAttested",
+        }
+        conflicts = sorted(reserved.intersection(self.generate_kwargs))
+        if conflicts:
+            raise LigandAIValidationError(
+                f"shared generation kwargs cannot override target identity or residue "
+                f"frames: {conflicts}. Put these fields on each TargetSpec."
+            )
 
     # ─── the positive side ──────────────────────────────────────────────────
 
@@ -4907,6 +4990,8 @@ class RecursiveCampaign:
             raise LigandAIError("RecursiveCampaign requires a full client")
 
         specs = list(self.co_optimization.targets)
+        self._validate_generation_overrides()
+        target_kwargs = [spec.generate_kwargs() for spec in specs]
         n_targets = len(specs)
         # Split the round's budget across the legs so `num_peptides` keeps
         # meaning "this round's pool size" rather than silently multiplying by
@@ -4920,15 +5005,15 @@ class RecursiveCampaign:
             )
 
         pooled: list[str] = []
-        for spec in specs:
+        for spec, identity in zip(specs, target_kwargs):
             kwargs: dict[str, Any] = {
                 "num_peptides": per_leg,
                 "length_range": self.length_range,
                 "model": self.model,
                 "cysteine_mode": self.cysteine_mode,
-                **spec.generate_kwargs(),
                 **self.avoidance.generation_kwargs(),
                 **self.generate_kwargs,
+                **identity,
             }
             panel = self.contrastive_by_target.get(spec.key, self.contrastive)
             if panel is not None:

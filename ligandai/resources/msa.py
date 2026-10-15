@@ -31,7 +31,7 @@ Example::
 from __future__ import annotations
 
 from ligandai.resources._base import AsyncResource, Resource
-from ligandai.types import MSAResult
+from ligandai.resources.msa_contract import PreparedMSAResult, validate_prepared_msa
 
 
 class MSA(Resource):
@@ -41,7 +41,7 @@ class MSA(Resource):
         self,
         sequences: dict[str, str],
         gene: str | None = None,
-    ) -> MSAResult:
+    ) -> PreparedMSAResult:
         """``POST /api/msa/generate`` — generate MSA for one or more protein chains.
 
         Args:
@@ -53,8 +53,10 @@ class MSA(Resource):
                 you know the target gene.
 
         Returns:
-            :class:`~ligandai.types.MSAResult` with per-chain CSV data
-            (Boltz-2 compatible), hit counts, and a ``cached`` flag.
+            A compatible MSAResult subclass with per-chain CSV data, hit
+            counts and a ``cached`` flag. ``chain.prepared`` binds the exact
+            query and CSV bytes after alignment validation; it does not claim
+            native featurization or model consumption.
 
         Raises:
             :class:`~ligandai.errors.LigandAIError`: on validation errors or
@@ -64,7 +66,7 @@ class MSA(Resource):
         if gene is not None:
             payload["gene"] = gene
         raw = self._transport.request("POST", "/api/msa/generate", json=payload) or {}
-        return MSAResult.model_validate(raw)
+        return validate_prepared_msa(raw, sequences)
 
 
 class AsyncMSA(AsyncResource):
@@ -72,9 +74,9 @@ class AsyncMSA(AsyncResource):
         self,
         sequences: dict[str, str],
         gene: str | None = None,
-    ) -> MSAResult:
+    ) -> PreparedMSAResult:
         payload: dict = {"sequences": sequences}
         if gene is not None:
             payload["gene"] = gene
         raw = await self._transport.request("POST", "/api/msa/generate", json=payload) or {}
-        return MSAResult.model_validate(raw)
+        return validate_prepared_msa(raw, sequences)

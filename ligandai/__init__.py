@@ -45,6 +45,7 @@ from ligandai._fold_time_model import (
 from ligandai._guide import guide
 from ligandai._version import __version__
 from ligandai.client import AsyncLigandAI, LigandAI
+from ligandai.bli import BliConfig, BliFoldFrame, BliFoldPlan, BliFoldRun
 from ligandai.diagnostics import (
     DIAGNOSTIC_CODES,
     DIAGNOSTIC_EVENT,
@@ -218,6 +219,11 @@ from ligandai.resources.linker_modifications import (
     ReceptorChain,
 )
 from ligandai.resources.peptides import AsyncBatchFoldJob, BatchFoldJob
+from ligandai.ph import (
+    henderson_hasselbalch_fraction,
+    ph_generation_fields,
+    validate_ph_pair,
+)
 from ligandai.species import (
     DEFAULT_SPECIES,
     SPECIES_TARGETING_CAPABILITY,
@@ -451,6 +457,10 @@ __all__ = [
     "ReplicationReport",
     "ResidueRange",
     "SegmentConfig",
+    "BliConfig",
+    "BliFoldFrame",
+    "BliFoldPlan",
+    "BliFoldRun",
     "SelectivityDelta",
     "Species",
     "SpeciesEntitlement",
@@ -491,6 +501,9 @@ __all__ = [
     "normalize_engine",
     "normalize_metric",
     "normalize_species",
+    "validate_ph_pair",
+    "ph_generation_fields",
+    "henderson_hasselbalch_fraction",
     "percentile_label",
     "rank_peptides",
     "serve_comparison_dashboard",

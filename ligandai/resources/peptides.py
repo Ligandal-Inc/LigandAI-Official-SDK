@@ -39,6 +39,7 @@ from collections.abc import Sequence as _StrSequence
 from typing import Any, Callable, Literal, Union
 
 from ligandai._targeting import validate_and_normalize_targeting
+from ligandai.resources.construct_contract import ConstructFoldResult, fold_linker_metadata, get_construct_regions
 from ligandai.contrastive import (
     AvoidancePolicy,
     CfgReferenceProvenance,
@@ -59,6 +60,7 @@ from ligandai.errors import (
 )
 from ligandai.jobs import AsyncJob, Job
 from ligandai.resources._base import AsyncResource, Resource, unwrap_rows
+from ligandai.resources.msa_contract import get_native_msa_receipt
 from ligandai.types import (
     CostEstimate,
     DeltaForgeScore,
@@ -1143,6 +1145,9 @@ def _generation_body(
     # ContrastiveGuidance panel — the customer-reachable surface for the same
     # capability. See ligandai.contrastive.normalize_avoid_paralogs.
     avoid_paralogs: _StrSequence[str] | None = None,
+    # pH-switch screening objectives (v0.16.4).
+    bind_ph: float | None = None,
+    release_ph: float | None = None,
     # SUPERADMIN-ONLY GPU routing. Emitted ONLY when true, so a body from a
     # caller who never heard of this flag is byte-identical to before.
     local: bool = False,
@@ -1647,6 +1652,10 @@ def _generation_body(
 
     if extra:
         body.update(extra)
+    # pH-switch screening objectives (bind at bind_ph, release at release_ph).
+    if bind_ph is not None or release_ph is not None:
+        from ligandai.ph import ph_generation_fields
+        body.update(ph_generation_fields(bind_ph=bind_ph, release_ph=release_ph))
     # Final defensive pass: convert any stray ResidueRange (e.g. arriving via
     # **extra, or nested in a user-provided dict) into its JSON dict form so the
     # body is always json.dumps-able regardless of how residues entered it.
@@ -1672,7 +1681,10 @@ def _resolve_segment_config(
     from ligandai.types import PeptideSegment, SegmentConfig
 
     if segments is None:
-        return segment_config
+        if segment_config is None:
+            return None
+        resolved = segment_config if isinstance(segment_config, SegmentConfig) else SegmentConfig.model_validate(segment_config)
+        return _validate_fixed_segments(resolved)
     if segment_config is not None:
         raise ValueError(
             "Pass either segments=[...] or segment_config=SegmentConfig(...), "
@@ -1682,7 +1694,27 @@ def _resolve_segment_config(
     coerced: list[PeptideSegment] = [
         s if isinstance(s, PeptideSegment) else PeptideSegment(**s) for s in segments
     ]
-    return SegmentConfig(mode="custom", segments=coerced)
+    return _validate_fixed_segments(SegmentConfig(mode="custom", segments=coerced))
+
+
+def _validate_fixed_segments(config: SegmentConfig) -> SegmentConfig:
+    """Reject ambiguous fixed constructs before generation, preserving exact segments."""
+    ids, positions = set(), set()
+    for segment in config.segments:
+        if segment.id in ids or segment.position in positions:
+            raise ValueError("segment ids and positions must each be unique")
+        ids.add(segment.id); positions.add(segment.position)
+        if segment.type == "premade" or segment.locked:
+            sequence = segment.sequence
+            if not sequence or any(c not in "ACDEFGHIKLMNPQRSTVWYXBZUO" for c in sequence):
+                raise ValueError("fixed/premade segments require an exact uppercase amino-acid sequence")
+            if segment.length_range is not None and not segment.length_range[0] <= len(sequence) <= segment.length_range[1]:
+                raise ValueError("fixed segment sequence length conflicts with lengthRange")
+        if segment.length_range is not None:
+            low, high = segment.length_range
+            if low < 1 or high < low:
+                raise ValueError("segment lengthRange must be positive and ordered")
+    return config
 
 
 _VALID_FOLD_APPROACHES = ("boltz2_affinity", "esmfold2", "esmfold2_fast")
@@ -1835,7 +1867,9 @@ def _fold_body(
     if pegylation:
         body["pegylation"] = {"enabled": True}
 
-    if len(normalized) == 1 and not normalized[0].get("chainId"):
+    single_chain_metadata = {"msaSourceGene", "msa_source_gene", "geneRange", "gene_range",
+                             "linker_metadata", "linkerMetadata"}
+    if len(normalized) == 1 and not normalized[0].get("chainId") and not single_chain_metadata.intersection(normalized[0]):
         body["sequence"] = normalized[0]["sequence"]
         if "name" in normalized[0]:
             body["name"] = normalized[0]["name"]
@@ -1906,6 +1940,30 @@ def _fold_entity(s: dict[str, Any], index: int) -> dict[str, Any]:
         entity["geneName"] = s["geneName"]
     if "role" in s:
         entity["role"] = s["role"]
+    linker_metadata = fold_linker_metadata(s, entity["sequence"])
+    if linker_metadata is not None:
+        if entity["type"] != "protein" or not is_peptide_chain(s):
+            raise ValueError("linker_metadata requires an explicitly identified protein binder")
+        entity["linker_metadata"] = linker_metadata
+        entity["sequence_sha256"] = linker_metadata["sequence_sha256"]
+    # These accepted per-chain fields identify a parent-gene/crop request.
+    # Preserve them exactly; equal lengths alone never prove MSA column mapping.
+    source_gene = s.get("msaSourceGene", s.get("msa_source_gene"))
+    if source_gene is not None:
+        if not isinstance(source_gene, str) or not source_gene.strip():
+            raise ValueError("msaSourceGene must be a nonempty gene identity")
+        if s.get("msaSourceGene") is not None and s.get("msa_source_gene") is not None and s["msaSourceGene"] != s["msa_source_gene"]:
+            raise ValueError("conflicting MSA source-gene identities")
+        entity["msaSourceGene"] = source_gene
+    gene_range = s.get("geneRange", s.get("gene_range"))
+    if gene_range is not None:
+        if (not isinstance(gene_range, (list, tuple)) or len(gene_range) != 2
+                or any(type(v) is not int for v in gene_range)
+                or gene_range[0] < 1 or gene_range[1] < gene_range[0]):
+            raise ValueError("geneRange must be an explicit 1-based inclusive integer range")
+        if s.get("geneRange") is not None and s.get("gene_range") is not None and list(s["geneRange"]) != list(s["gene_range"]):
+            raise ValueError("conflicting gene ranges")
+        entity["geneRange"] = list(gene_range)
     # A non-polypeptide (ligand / dna / rna) is never MSA'd and is never
     # labelled a peptide — it carries its own Boltz-2 entity type instead.
     if entity["type"] != "protein":
@@ -1948,6 +2006,11 @@ def _norm_seq(s: Sequence | str | dict[str, Any]) -> dict[str, Any]:
             out["type"] = s.type
         if s.role:
             out["role"] = s.role
+        extras = s.model_extra or {}
+        for key in ("msaSourceGene", "msa_source_gene", "geneRange", "gene_range",
+                    "linker_metadata", "linkerMetadata", "sequence_sha256"):
+            if key in extras:
+                out[key] = extras[key]
         if s.is_peptide is not None:
             out["isPeptide"] = bool(s.is_peptide)
             out["is_peptide"] = bool(s.is_peptide)
@@ -2190,7 +2253,7 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
     has_struct_flag = _first("hasStructure", "has_structure")
     has_structure = bool(has_struct_flag) or bool(pdb_data) or bool(cif_data)
 
-    return FoldResult.model_validate(
+    return ConstructFoldResult.model_validate(
         {
             "jobId": payload.get("jobId") or payload.get("id") or _first("jobId", "id") or "",
             "pdbUrl": pdb_url,
@@ -2246,6 +2309,8 @@ def _parse_fold(payload: dict[str, Any]) -> FoldResult:
             "metrics": metrics or None,
             "scores": scores if isinstance(scores, dict) and scores else None,
             "qualityTier": quality_tier if isinstance(quality_tier, dict) else None,
+            "msa_consumption": get_native_msa_receipt(payload),
+            "construct_regions": get_construct_regions(payload),
         }
     )
 
@@ -2419,7 +2484,23 @@ def _parse_cofold(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     result = payload.get("result")
-    return result if isinstance(result, dict) else payload
+    result = dict(result if isinstance(result, dict) else payload)
+    engines = result.get("engines")
+    if isinstance(engines, dict):
+        checked = {}
+        for engine, record in engines.items():
+            if isinstance(record, dict):
+                record = dict(record)
+                receipt = get_native_msa_receipt(record)
+                record["msa_consumption_status"] = "native_featurizer" if receipt is not None else "unavailable"
+                if receipt is not None:
+                    record["msa_consumption"] = receipt.model_dump(mode="json", by_alias=True)
+                regions = get_construct_regions(record)
+                if regions is not None:
+                    record["construct_regions"] = regions.model_dump(mode="json", by_alias=True)
+            checked[engine] = record
+        result["engines"] = checked
+    return result
 
 
 # ─── Batch fold helpers (v0.5.5) ────────────────────────────────────────────
@@ -2643,6 +2724,20 @@ def _normalize_group_target(target: Any, *, group_index: int) -> dict[str, Any]:
         out["pdb"] = _resolve_receptor_pdb_arg(str(target["pdb"]))
     if target.get("name"):
         out["name"] = str(target["name"])
+    source = target.get("msa_source_gene", target.get("parent_gene"))
+    if source is not None:
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("group target msa_source_gene must be an explicit gene identity")
+        if target.get("msa_source_gene") is not None and target.get("parent_gene") is not None and target["msa_source_gene"] != target["parent_gene"]:
+            raise ValueError("conflicting group target source-gene identities")
+        out["msa_source_gene"] = source
+    gene_range = target.get("gene_range")
+    if gene_range is not None:
+        if (not isinstance(gene_range, (list, tuple)) or len(gene_range) != 2
+                or any(type(value) is not int for value in gene_range)
+                or gene_range[0] < 1 or gene_range[1] < gene_range[0]):
+            raise ValueError("group target gene_range must be an explicit 1-based inclusive range")
+        out["gene_range"] = list(gene_range)
     return out
 
 
@@ -2679,6 +2774,8 @@ def _normalize_group_partner(partner: Any, *, group_index: int, partner_index: i
     # partner) folded a zinc ion as a one-residue PROTEIN chain — a plausible
     # structure for the wrong complex, which is worse than a rejection.
     if ptype in _NON_PROTEIN_PARTNER_TYPES:
+        if partner.get("linker_metadata") is not None or partner.get("linkerMetadata") is not None:
+            raise ValueError("linker_metadata belongs to an explicitly identified protein binder")
         seq_clean = seq.strip().upper() if ptype == "ligand" else seq.strip()
         if ptype == "ligand" and not _CCD_RE.match(seq_clean):
             raise ValueError(
@@ -2725,6 +2822,13 @@ def _normalize_group_partner(partner: Any, *, group_index: int, partner_index: i
         out["role"] = "peptide"
     if partner.get("name"):
         out["name"] = str(partner["name"])
+    # Declared construct identity forbids silent sequence normalization.
+    metadata = fold_linker_metadata(partner, seq)
+    if metadata is not None:
+        if not is_peptide and not is_peptide_chain(partner):
+            raise ValueError("linker_metadata requires an explicitly identified protein binder")
+        out.update(linker_metadata=metadata, sequence_sha256=metadata["sequence_sha256"],
+                   isPeptide=True, is_peptide=True, role="peptide", use_msa=False)
     return out
 
 
@@ -4432,6 +4536,8 @@ class Peptides(Resource):
         # and applies its own real paralog references — you are just not
         # choosing which ones.
         avoid_paralogs: _StrSequence[str] | None = None,
+        bind_ph: float | None = None,
+        release_ph: float | None = None,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
@@ -5022,6 +5128,8 @@ class Peptides(Resource):
             contrastive=contrastive,
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
             avoid_paralogs=avoid_paralogs,
+            bind_ph=bind_ph,
+            release_ph=release_ph,
             local=local,
             extra=extra,
         )
@@ -7666,6 +7774,8 @@ class AsyncPeptides(AsyncResource):
         # and applies its own real paralog references — you are just not
         # choosing which ones.
         avoid_paralogs: _StrSequence[str] | None = None,
+        bind_ph: float | None = None,
+        release_ph: float | None = None,
         foldEngines: list[str] | None = None,
         foldPerEngine: dict[str, Any] | None = None,
         foldSharedMsa: str | dict[str, Any] | None = None,
@@ -7825,6 +7935,8 @@ class AsyncPeptides(AsyncResource):
             contrastive=contrastive,
             allow_unforwarded_contrastive=allow_unforwarded_contrastive,
             avoid_paralogs=avoid_paralogs,
+            bind_ph=bind_ph,
+            release_ph=release_ph,
             local=local,
             extra=extra,
         )

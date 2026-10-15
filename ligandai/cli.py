@@ -278,6 +278,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", title="commands")
 
+    from ligandai.discovery_cli import add_discovery_parser
+
+    add_discovery_parser(sub)
+
     # ── keys ──────────────────────────────────────────────────────────────────
     keys_parser = sub.add_parser("keys", help="Manage rotating-JWT key wallets.")
     keys_sub = keys_parser.add_subparsers(dest="keys_command", title="keys sub-commands")
@@ -852,7 +856,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "keys":
+    if args.command == "discovery":
+        from ligandai.discovery_cli import run_discovery
+
+        return run_discovery(args, parser)
+    elif args.command == "keys":
         if args.keys_command == "mint":
             return cmd_keys_mint(args)
         elif args.keys_command == "status":

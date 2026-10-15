@@ -159,12 +159,15 @@ Refs: bd-dre-rp11j.9, bd-dre-rp11j.9.1, bd-dre-vd1fk.4, bd-dre-xfs48.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import chain
 from typing import Any
 
 from ligandai.errors import (
@@ -173,6 +176,7 @@ from ligandai.errors import (
     LigandAIValidationError,
 )
 from ligandai.resources._base import AsyncResource, Resource
+from ligandai.resources.construct_contract import fold_linker_metadata
 from ligandai.resources.objectives import (
     _QUOTE_STALE_CODES,
     CampaignQuote,
@@ -326,6 +330,9 @@ class ObjectiveMode(str, Enum):
     #: did: avoidance is a constraint to hold, and a seed that already violates
     #: it is admissible — refinement neither fixes nor breaks it.
     AFFINITY_AVOIDING = "affinity_avoiding"
+    #: Improve the weakest structural leg across explicitly desired targets.
+    #: Each query has its own target_id; an ortholog is not an off-target.
+    JOINT_POSITIVE = "joint_positive"
 
 
 class GateReason(str, Enum):
@@ -555,11 +562,16 @@ class Seed:
     :attr:`TargetReadout.avoid_hit_inherited_from_seed` answerable without
     walking N parents. Name your seeds if you intend to follow one of your own
     leads through the cycles; the server assigns ``seed_000``-style ids otherwise.
+
+    ``sequence`` is the entire folded construct. Supply ``linker_metadata`` to
+    preserve its exact core/linker/tag boundaries; fixed sequence masks do not
+    model a sensor attachment or constrain coordinates.
     """
 
     sequence: str
     name: str | None = None
     seed_id: str | None = None
+    linker_metadata: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         seq = (self.sequence or "").strip().upper()
@@ -581,6 +593,12 @@ class Seed:
                 "(server code: SEED_NON_CANONICAL)"
             )
         object.__setattr__(self, "sequence", seq)
+        if self.linker_metadata is not None:
+            try:
+                metadata = fold_linker_metadata({"linker_metadata": self.linker_metadata}, seq)
+            except ValueError as exc:
+                raise LigandAIValidationError(f"seed.linker_metadata: {exc}") from exc
+            object.__setattr__(self, "linker_metadata", metadata)
 
     def to_wire(self) -> dict[str, Any]:
         out: dict[str, Any] = {"sequence": self.sequence}
@@ -588,6 +606,13 @@ class Seed:
             out["name"] = self.name
         if self.seed_id:
             out["seed_id"] = self.seed_id
+        if self.linker_metadata is not None:
+            # Revalidate mutable metadata at the transport boundary, too.
+            try:
+                out["linker_metadata"] = fold_linker_metadata(
+                    {"linker_metadata": self.linker_metadata}, self.sequence)
+            except ValueError as exc:
+                raise LigandAIValidationError(f"seed.linker_metadata: {exc}") from exc
         return out
 
 
@@ -600,6 +625,12 @@ class Receptor:
     without its own pocket is a 422 (``PANEL_FRAME_MISSING``), not an inheritance
     from the target: folding a paralog against the on-target's resnums answers a
     question about the wrong residues and reads as a clean, wrong result.
+
+    ``target_id`` identifies a particular query independently of its gene. Joint
+    positives require distinct IDs and sequences, so human and mouse may both
+    be named EGFR. ``msa_csv`` carries literal query-first ``key,sequence`` CSV
+    for this receptor's chain, preserving insertion characters and pairing keys.
+    The SDK does not open ``msa_path`` or infer species from an MSA filename.
     """
 
     gene: str
@@ -610,6 +641,8 @@ class Receptor:
     receptor_chain: str = "A"
     msa_path: str | None = None
     structure_pdb: str | None = None
+    target_id: str | None = None
+    msa_csv: str | None = None
 
     def __post_init__(self) -> None:
         if not (self.gene or "").strip():
@@ -626,6 +659,34 @@ class Receptor:
                 f"receptor {self.gene!r} needs pocket_residues in its OWN residue "
                 "frame (server code: PANEL_FRAME_MISSING)"
             )
+        if self.target_id is not None and (
+            not isinstance(self.target_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.target_id)
+        ):
+            raise LigandAIValidationError("receptor.target_id must be a stable nonempty identifier")
+        if self.msa_csv is not None:
+            if self.msa_path is not None:
+                raise LigandAIValidationError("use inline msa_csv or msa_path, never both")
+            if not isinstance(self.msa_csv, str) or len(self.msa_csv) > 20000000:
+                raise LigandAIValidationError("receptor.msa_csv must contain inline CSV text (maximum 20000000 characters)")
+            try:
+                rows = csv.DictReader(io.StringIO(self.msa_csv), strict=True)
+                if rows.fieldnames != ["key", "sequence"]:
+                    raise ValueError("header must be key,sequence")
+                first = next(rows, None)
+                if first is None or first.get("sequence") != self.receptor_sequence:
+                    raise ValueError("first sequence must exactly equal receptor_sequence")
+                for row in chain((first,), rows):
+                    if set(row) != {"key", "sequence"} or not row["key"] or not row["sequence"]:
+                        raise ValueError("every row needs one key and one sequence")
+                    int(row["key"])
+                    sequence = row["sequence"]
+                    if not re.fullmatch(r"[A-Za-z-]+", sequence, re.ASCII):
+                        raise ValueError("invalid alignment sequence characters")
+                    if len(re.sub(r"[a-z]", "", sequence)) != len(self.receptor_sequence):
+                        raise ValueError("alignment row width differs from the receptor query")
+            except (ValueError, csv.Error) as exc:
+                raise LigandAIValidationError(f"receptor.msa_csv: {exc}") from exc
 
     def to_wire(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -641,6 +702,10 @@ class Receptor:
             out["msa_path"] = self.msa_path
         if self.structure_pdb:
             out["structure_pdb"] = self.structure_pdb
+        if self.target_id is not None:
+            out["target_id"] = self.target_id
+        if self.msa_csv is not None:
+            out["msa_csv"] = self.msa_csv
         return out
 
 
@@ -720,6 +785,14 @@ class Screening:
     it returns ``min(native, relaxed)``, a best-of-2 selection estimator with a
     downward bias. Exposing the flag here would advertise a quality knob that is
     inert at best and certifies a biased estimator at worst.
+
+    Optional ``seed``, ``sampling_steps`` and ``recycling_steps`` bind the
+    folding protocol. Omitted legacy values retain the server's 50/3 defaults.
+    A supplied seed is an unsigned 32-bit integer (0 through 4294967295).
+    Joint requests require a seed and emit the defaults explicitly. This route
+    ``fold_engine='protenix_v2'`` is explicit and requires its own supplied
+    protocol (normally 200 sampling steps and 10 recycles), plus disabled pocket
+    conditioning. It is never silently substituted for Boltz-2.
     """
 
     diffusion_samples: int = 4
@@ -728,9 +801,28 @@ class Screening:
     negative_control: bool = True
     contact_cutoff_angstrom: float = 5.0
     fold_timeout_s: int = 5400
+    seed: int | None = None
+    sampling_steps: int | None = None
+    recycling_steps: int | None = None
+    fold_engine: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, minimum, maximum in (("seed", 0, 2**32 - 1),
+                                       ("sampling_steps", 1, 1000),
+                                       ("recycling_steps", 1, 100)):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < minimum
+                                      or (maximum is not None and value > maximum)):
+                raise LigandAIValidationError(f"screening.{name} must be an integer in [{minimum}, {maximum}]")
+        if self.fold_engine not in (None, "boltz2", "protenix_v2"):
+            raise LigandAIValidationError("fold_engine must be 'boltz2' or 'protenix_v2'")
+        if self.fold_engine == "protenix_v2" and (
+            self.sampling_steps is None or self.recycling_steps is None
+        ):
+            raise LigandAIValidationError("protenix_v2 requires explicit sampling_steps and recycling_steps")
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        out = {
             "screen_batch_size": int(self.screen_batch_size),
             "diffusion_samples": int(self.diffusion_samples),
             "promote_top_n": int(self.promote_top_n),
@@ -738,6 +830,11 @@ class Screening:
             "contact_cutoff_angstrom": float(self.contact_cutoff_angstrom),
             "fold_timeout_s": int(self.fold_timeout_s),
         }
+        for name in ("seed", "sampling_steps", "recycling_steps", "fold_engine"):
+            value = getattr(self, name)
+            if value is not None:
+                out[name] = value
+        return out
 
 
 @dataclass(frozen=True)
@@ -835,6 +932,12 @@ class MaturationSpec:
     Every local refusal below mirrors a coded server 422 and names the same code,
     so the message you get from a typo and the message you get from the server are
     the same message.
+
+    ``joint_positive`` folds each candidate and same-cycle parent against the
+    primary ``target`` and all ``positive_targets``. It compares the weakest
+    structural leg; passing that gate is not an affinity or binding measurement.
+    The legacy ``objective.target_kd_nM`` field remains in the wire model but is
+    not a joint-positive ranking or stopping criterion.
     """
 
     seeds: Sequence[Seed]
@@ -847,6 +950,7 @@ class MaturationSpec:
     maturation: MaturationSettings = field(default_factory=MaturationSettings)
     name: str | None = None
     resume_from: str | None = None
+    positive_targets: Sequence[Receptor] = ()
 
     def __post_init__(self) -> None:
         if not list(self.seeds):
@@ -858,6 +962,42 @@ class MaturationSpec:
         if not isinstance(mode, ObjectiveMode):
             mode = ObjectiveMode(str(mode))
         object.__setattr__(self, "objective_mode", mode)
+        if self.screening.fold_engine == "protenix_v2" and (
+            PocketConditioning(self.maturation.pocket_conditioning) is not PocketConditioning.NONE
+        ):
+            raise LigandAIValidationError("protenix_v2 requires maturation.pocket_conditioning='none'")
+        if self.screening.fold_engine == "protenix_v2" and mode is not ObjectiveMode.JOINT_POSITIVE:
+            raise LigandAIValidationError("protenix_v2 maturation requires objective_mode='joint_positive'")
+        if mode is ObjectiveMode.JOINT_POSITIVE:
+            if not self.positive_targets:
+                raise LigandAIValidationError("joint_positive requires at least one additional positive_targets entry")
+            if self.panel:
+                raise LigandAIValidationError("joint_positive does not accept an off-target panel")
+            if self.screening.seed is None:
+                raise LigandAIValidationError("joint_positive requires screening.seed for reproducible paired folds")
+            if type(self.screening.diffusion_samples) is not int or not 2 <= self.screening.diffusion_samples <= 16:
+                raise LigandAIValidationError("joint_positive requires 2 to 16 integer diffusion_samples per receptor")
+            targets = (self.target, *self.positive_targets)
+            ids = [r.target_id for r in targets]
+            if any(value is None for value in ids) or len(set(ids)) != len(ids):
+                raise LigandAIValidationError("joint_positive requires unique target_id on the primary and every positive target")
+            queries = [r.receptor_sequence for r in targets]
+            if any(not query or set(query) - _CANONICAL_AA for query in queries):
+                raise LigandAIValidationError("joint_positive requires exact canonical uppercase receptor_sequence queries")
+            if len(set(queries)) != len(queries):
+                raise LigandAIValidationError("joint_positive requires distinct exact receptor_sequence queries")
+            if any(r.msa_path is not None for r in targets):
+                raise LigandAIValidationError("joint_positive uses inline msa_csv; API-local msa_path is not accepted")
+            for receptor in targets:
+                residues = (*receptor.pocket_residues, *receptor.avoid_residues)
+                if any(type(r) is not int or r < 1 for r in residues):
+                    raise LigandAIValidationError("joint receptor residue frames require positive integers")
+                if not receptor.structure_pdb and any(r > len(receptor.receptor_sequence) for r in residues):
+                    raise LigandAIValidationError("joint receptor residue frame exceeds its exact query")
+        elif self.positive_targets:
+            raise LigandAIValidationError("positive_targets requires objective_mode='joint_positive'")
+        elif any(seed.linker_metadata is not None for seed in self.seeds):
+            raise LigandAIValidationError("seed.linker_metadata currently requires objective_mode='joint_positive'")
 
         # ⛔ A seed id is the lineage anchor; two roots sharing one make the
         # inherited-avoidance readout resolve to whichever was written last.
@@ -920,6 +1060,8 @@ class MaturationSpec:
         422, never ignored. A silently-dropped field is how a customer spends a
         campaign's worth of credits on settings the server never read.
         """
+        # The frozen dataclass can still contain caller-owned mutable lists.
+        self.__post_init__()
         payload: dict[str, Any] = {
             "seeds": [s.to_wire() for s in self.seeds],
             "target": self.target.to_wire(),
@@ -934,6 +1076,11 @@ class MaturationSpec:
             payload["name"] = self.name
         if self.resume_from:
             payload["resume_from"] = self.resume_from
+        if self.positive_targets:
+            payload["positive_targets"] = [r.to_wire() for r in self.positive_targets]
+            payload["screening"].setdefault("sampling_steps", 50)
+            payload["screening"].setdefault("recycling_steps", 3)
+            payload["screening"].setdefault("fold_engine", "boltz2")
         return payload
 
 
@@ -1488,6 +1635,8 @@ class MaturedDesign:
     parent_delta: ParentDelta | None = None
     meets_objective: bool = False
     structure_url: str | None = None
+    positive_readouts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    joint: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -1519,6 +1668,11 @@ class MaturedDesign:
             parent_delta=ParentDelta.from_wire(data.get("parent_delta")),
             meets_objective=bool(data.get("meets_objective")),
             structure_url=data.get("structure_url"),
+            positive_readouts={
+                str(key): dict(value) for key, value in (data.get("positive_readouts") or {}).items()
+                if isinstance(value, Mapping)
+            },
+            joint=dict(data["joint"]) if isinstance(data.get("joint"), Mapping) else None,
             raw=dict(data),
         )
 

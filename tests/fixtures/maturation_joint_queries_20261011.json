@@ -1,0 +1,26 @@
+{
+  "about": "Exact human/mouse receptor queries and construct from existing gkY1 fold inputs. Transport validation only; no molecular result is synthesized.",
+  "human": {
+    "sequence": "RKVCNGIGIGEFKDSLSINATNIKHFKNCTSISGDLHILPVAFRGDSFTHTPPLDPQELDILKTVKEITGFLLIQAWPENRTDLHAFENLEIIRGRTKQHGQFSLAVVSLNITSLGLRSLKEISDGDVIISGNKNLCYANTINWKKLFGTSGQKTKIISNRGENSCKATGQVCHALCSPEGCWGPEPRDCVSCRNVSRGRECVDK",
+    "source": "/home/dre/hermes_joint_repair_20261011/inputs/gkY1_20261002/gkY_human/gk1_e0476e735ca3_pc_human_s004_human.yaml",
+    "source_sha256": "d1b4e5ae31aafb9aaef7be6543f2682760b4457bf14e514e107fb9bfa3aea6e6"
+  },
+  "construct": "SNELSERQREYHEKVTQEQMDKAYAKYQNNPEYKKEVEDFYKWYTGGSGGSGGSGG",
+  "pocket_residues": [
+    67,
+    91,
+    122,
+    125
+  ],
+  "mouse": {
+    "sequence": "RKVCNGIGIGEFKDTLSINATNIKHFKYCTAISGDLHILPVAFKGDSFTRTPPLDPRELEILKTVKEITGFLLIQAWPDNWTDLHAFENLEIIRGRTKQHGQFSLAVVGLNITSLGLRSLKEISDGDVIISGNRNLCYANTINWKKLFGTPNQKTKIMNNRAEKDCKAVNHVCNPLCSSEGCWGPEPRDCVSCQNVSRGRECVEK",
+    "source": "/home/dre/hermes_joint_repair_20261011/inputs/gkY1_20261002/gkY_mouse/gk1_e0476e735ca3_pc_human_s004_mouse.yaml",
+    "source_sha256": "71dcbb423daabfb023f126d7b398374de2de049aa85697c35be9709f55e73629"
+  },
+  "linker_metadata": {
+    "novel_length": 45,
+    "linker_residues": "GGSGGSGGSGG",
+    "linker_terminus": "C",
+    "linker_origin": "fixed"
+  }
+}

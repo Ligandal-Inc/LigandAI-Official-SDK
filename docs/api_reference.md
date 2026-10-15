@@ -574,8 +574,21 @@ Dataclasses exposed at the top level: `LinkerModification`, `CovalentAttachment`
 
 | Endpoint | Method | Tier | SDK |
 |----------|--------|------|-----|
-| `/api/v1/auth/verify` | GET | All | `client.tier`, `client.email` |
-| `/api/v1/credits` | GET | Paid | `client.credits`, `client.account.credits()` |
+| `/api/auth/user` | GET | All | `client.account.me()` — id, email, tier, organization |
+| `/api/credits` | GET | All | `client.credits`, `client.account.credits()` |
+
+`client.tier` makes **no HTTP call at all** — it is derived locally from the API-key
+prefix at construction time (`_detect_tier()`, `ligandai/client.py:328`). Reading it
+never reaches the server, so it cannot be used to check that a key is live.
+
+> **`GET /api/v1/auth/verify` is not the way to get your identity, and this table
+> used to say it was.** That endpoint does exist and does return
+> `{valid, user{id, email, tier, organization}}`, but no SDK method calls it, and it
+> is a dead end for discovering the rest of the API — it was the only `/api/v1` path
+> this table named, so a reader who started there found no next step for folding or
+> generation and stopped. To check a key is live, use `client.account.me()`
+> (`GET /api/auth/user`). To discover the whole API-key surface, fetch the served
+> OpenAPI 3 spec: `GET https://ligandai.com/api/v1/openapi.json` with your API key.
 
 ## CSV Exports (UI / browser auth — not API key)
 
