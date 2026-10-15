@@ -1,6 +1,6 @@
 {
   "contractVersion": "1.0.0",
-  "createdAt": "2026-10-15T14:29:55.714Z",
+  "createdAt": "2026-10-15T14:48:08.266Z",
   "effect": "read_local",
   "operation": "hswae.v2.resolve_cell_type",
   "owner": {
@@ -18,8 +18,12 @@
         "alias_query": null,
         "cell_type": "enterocytes",
         "confidence": 0.95,
+        "corroborated_qualifiers": [],
         "dropped_query_tokens": [],
         "marker_score": null,
+        "match_detail": {
+          "matched_term": "enterocyte"
+        },
         "match_type": "ontology_synonym",
         "proxy_for": null,
         "proxy_note": null,

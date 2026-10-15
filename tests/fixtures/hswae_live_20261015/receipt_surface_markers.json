@@ -1,6 +1,6 @@
 {
   "contractVersion": "1.0.0",
-  "createdAt": "2026-10-15T14:29:55.154Z",
+  "createdAt": "2026-10-15T14:48:07.851Z",
   "effect": "read_local",
   "operation": "hswae.v1.surface_markers",
   "owner": {
@@ -10,6 +10,7 @@
   "receiptVersion": "1",
   "requestId": "fixture-request-00000000-0000-0000-0000-000000000000",
   "result": {
+    "expression_floor_basis": "max_tpm_across_target_tissues",
     "expression_floor_tissue": "colon_sigmoid",
     "expression_floor_tpm": 1,
     "floor_note": "A list shorter than markers_requested means the expression floor or the consistency threshold excluded candidates, NOT that the tissue has no further markers; lower expression_floor_tpm to see them.",
@@ -118,7 +119,7 @@
     "query": "colon",
     "ranking_key": "specificity_index",
     "sort_key_field": "specificity_index",
-    "timing_ms": 524.95
+    "timing_ms": 380.39
   },
   "status": "executed"
 }

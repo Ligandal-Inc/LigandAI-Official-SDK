@@ -1,6 +1,6 @@
 {
   "contractVersion": "1.0.0",
-  "createdAt": "2026-10-15T14:29:55.125Z",
+  "createdAt": "2026-10-15T14:48:07.819Z",
   "effect": "read_local",
   "operation": "hswae.v1.semantic_search",
   "owner": {

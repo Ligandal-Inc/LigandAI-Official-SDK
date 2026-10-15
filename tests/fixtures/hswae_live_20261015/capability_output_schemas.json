@@ -246,6 +246,13 @@
           "result": {
             "additionalProperties": false,
             "properties": {
+              "expression_floor_basis": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "expression_floor_tissue": {
                 "maxLength": 2000,
                 "type": [
@@ -520,6 +527,7 @@
               "markers_below_consistency_excluded",
               "expression_floor_tpm",
               "expression_floor_tissue",
+              "expression_floor_basis",
               "ranking_key",
               "sort_key_field",
               "floor_note"
@@ -677,6 +685,15 @@
                       "minimum": 0,
                       "type": "number"
                     },
+                    "corroborated_qualifiers": {
+                      "items": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
                     "dropped_query_tokens": {
                       "items": {
                         "maxLength": 200,
@@ -689,6 +706,55 @@
                     "marker_score": {
                       "type": [
                         "number",
+                        "null"
+                      ]
+                    },
+                    "match_detail": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "containment_canonical": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "containment_query": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "jaccard": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "matched_term": {
+                          "maxLength": 2000,
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "ratio": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "shared_tokens": {
+                          "items": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 50,
+                          "type": "array"
+                        }
+                      },
+                      "type": [
+                        "object",
                         "null"
                       ]
                     },
@@ -818,6 +884,8 @@
                     "resolution_is_proxy",
                     "dropped_query_tokens",
                     "uncorroborated_qualifiers",
+                    "corroborated_qualifiers",
+                    "match_detail",
                     "added_canonical_tokens",
                     "unrequested_specializations"
                   ],

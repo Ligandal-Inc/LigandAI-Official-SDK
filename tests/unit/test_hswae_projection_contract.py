@@ -91,27 +91,25 @@ FIXTURE_FILES = {
 }
 
 #: Fields the SDK declares AHEAD of the backend deploying them, so they reach
-#: callers the moment it does. Each is emitted by server commit 90aeca34ff
-#: (bd-dre-pjhrp.19) and was verified absent from both the live signed schema
-#: and live payloads on 2026-10-15.
+#: callers the moment it does.
 #:
-#: ⛔ This is an allowlist, not a licence. Anything here is invisible to check
-#: (1) — it cannot be read off the schema — so a NEW entry must be justified
-#: against the server source that emits it, and an entry should be DELETED once
+#: ⛔ An allowlist, not a licence. Anything here is invisible to the parity
+#: check — it cannot be read off the schema — so a NEW entry must be justified
+#: against the server source that emits it, and an entry MUST be deleted once
 #: the schema carries it, which turns it back into a pinned contract.
-FORWARD_DECLARED: frozenset[str] = frozenset(
-    {
-        "result.expression_floor_basis",
-        "result.candidates[].corroborated_qualifiers",
-        "result.candidates[].match_detail",
-        "result.candidates[].match_detail.matched_term",
-        "result.candidates[].match_detail.jaccard",
-        "result.candidates[].match_detail.containment_canonical",
-        "result.candidates[].match_detail.containment_query",
-        "result.candidates[].match_detail.ratio",
-        "result.candidates[].match_detail.shared_tokens",
-    }
-)
+#: :func:`test_forward_declared_fields_are_still_absent_from_the_schema` is
+#: what forces that deletion.
+#:
+#: Currently empty, and the emptying is the worked example. On 2026-10-15 this
+#: held the nine paths of bd-dre-pjhrp.19 — ``expression_floor_basis``,
+#: ``corroborated_qualifiers`` and ``match_detail`` with its six members —
+#: declared from server commit 90aeca34ff while they were still absent from
+#: live. The backend deployed that commit during this release's own
+#: verification (absent at 10:12, present at 10:47), the test above went red
+#: exactly as designed, and the nine paths moved out of this exemption and
+#: into the parity check: surface_markers went 47 -> 48 schema properties and
+#: resolve_cell_type 68 -> 76, with the SDK matching both.
+FORWARD_DECLARED: frozenset[str] = frozenset()
 
 
 def _load(name: str) -> Any:

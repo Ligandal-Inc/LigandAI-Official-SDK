@@ -74,14 +74,44 @@ enterprise-gated, so this broke every caller who reached them. `bd-dre-pjhrp.18`
   - `model_dump(by_alias=True)` reproduces every key and value the server sent,
     so nothing is parsed and then dropped on the way out.
 
+- **The three fields `bd-dre-pjhrp.19` restored to the capability boundary are
+  now surfaced**, so a caller gets them as typed attributes rather than as
+  untyped `model_extra` keys:
+
+  - `expression_floor_basis` on the `surface_markers` result — what the floor
+    is evaluated ON, and therefore the field that reconciles a reported
+    `meanTpm` with the `expression_floor_tpm` the same receipt states. Context
+    `colon` resolves to two tissues, so MRGPRD clears a 1.0 floor on its max of
+    1.38 while reporting mean 0.97; without this field that row reads as a
+    broken filter. `expression_floor_tpm`'s own docs now say it is not applied
+    to `mean_tpm`.
+  - `corroborated_qualifiers` on a `resolve_cell_type` candidate — the other
+    half of the qualifier evidence. Read alone, `uncorroborated_qualifiers`
+    makes a well-corroborated match look as doubtful as an unsupported one.
+  - `match_detail` on a `resolve_cell_type` candidate (`HswaeMatchDetail`) —
+    what the resolver stage actually measured. Every member is optional
+    because which ones appear depends on the stage, and the model serialises
+    back exactly the members it received: the schema permits a real `null` for
+    each, so materialising an unmeasured member as `None` would claim a stage
+    reported a number it never computed.
+
+  > These were declared from server commit `90aeca34ff` while still absent
+  > from live, as forward declarations. The backend deployed that commit
+  > during this release's own verification — absent from the signed schema at
+  > 10:12 on 2026-10-15, present at 10:47 — and the projection gate's
+  > allowlist test went red exactly as designed, so the fixtures were
+  > re-recorded and all nine paths are now pinned by the parity check instead
+  > of exempted from it. `surface_markers` went 47 → 48 schema properties and
+  > `resolve_cell_type` 68 → 76, with the SDK matching both.
+
 ### Known gap
 
-- `expression_floor_basis` and `match_detail` are emitted by the backend as of
-  server commit `90aeca34ff` (`bd-dre-pjhrp.19`) but are **not yet deployed** —
-  verified absent from both the live signed schema and live payloads on
-  2026-10-15. They are declared here so they reach callers the moment that
-  deploys; `expression_floor_basis` is what reconciles a reported `meanTpm` with
-  the `expression_floor_tpm` the same receipt states.
+- One un-yanked published release, **0.6.9**, declares `requires-python >=3.9`
+  while this project declares `>=3.10`, so `pip` can resolve backwards to it on
+  an unsupported interpreter and install it without a word.
+  `test_no_published_release_declares_a_lower_python_floor` fails on that and
+  cannot be made to pass from source — the remedy is yanking 0.6.9 on PyPI. The
+  hazard predates this release and is unchanged by it (`bd-dre-rp89u`).
 
 ## [0.16.4] - 2026-10-06
 

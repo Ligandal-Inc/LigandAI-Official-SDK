@@ -1,6 +1,6 @@
 {
   "contractVersion": "1.0.0",
-  "createdAt": "2026-10-15T14:29:57.181Z",
+  "createdAt": "2026-10-15T14:48:09.142Z",
   "effect": "read_local",
   "operation": "hswae.v2.isoform_expression",
   "owner": {

@@ -1701,12 +1701,12 @@ class HswaeSurfaceMarkersResult(_HswaeOpenModel):
     #: What the floor is evaluated ON (e.g. ``max_tpm_across_target_tissues``) —
     #: the field that reconciles a sub-floor ``mean_tpm`` with the stated floor.
     #:
-    #: The backend has computed this since the beginning and the capability
-    #: boundary projected it out, so the receipt contradicted itself with
-    #: nothing in it to explain why [bd-dre-pjhrp.19]. Declared here ahead of
-    #: that server fix deploying: verified absent from both the live signed
-    #: output schema and live payloads on 2026-10-15, so it parses as ``None``
-    #: until the boundary ships it, and reaches callers the moment it does.
+    #: The backend computed this from the beginning and the capability boundary
+    #: projected it out, so the receipt contradicted itself with nothing in it
+    #: to explain why [bd-dre-pjhrp.19]. Live as of 2026-10-15 (server commit
+    #: 90aeca34ff) and confirmed against production, where ``colon`` reports
+    #: ``max_tpm_across_target_tissues``. Optional so a deployment older than
+    #: that fix still parses, reading ``None`` rather than raising.
     expression_floor_basis: _HswaeNullablePublicString = None
     #: Truncation / exclusion accounting. ``markers_eligible`` is the candidate
     #: pool before ``top_n`` truncation.
@@ -1744,11 +1744,14 @@ class HswaeMatchDetail(_HswaeOpenModel):
     computed. A receipt is an audit object; inventing that is worse than
     omitting it, and the backend omits for the same reason.
 
-    Declared ahead of the server fix deploying [bd-dre-pjhrp.19]: verified
-    absent from both the live signed output schema and live payloads on
-    2026-10-15. Inherits ``extra="allow"``, so a fifth stage shape added later
-    is kept rather than refused — the member set is deliberately not closed on
-    this side, which is the defect this whole release exists to undo.
+    Live as of 2026-10-15, server commit 90aeca34ff [bd-dre-pjhrp.19]. The
+    boundary had been dropping it because a union of four stage shapes was
+    awkward to declare, which is not a reason to withhold a measurement.
+
+    Inherits ``extra="allow"``, so a fifth stage shape added later is kept
+    rather than refused — the member set is deliberately NOT closed on this
+    side, even though the backend's is, because a closed member set is the
+    defect this whole release exists to undo.
     """
 
     matched_term: _HswaeNullablePublicString = None
@@ -1817,8 +1820,8 @@ class HswaeResolveCellTypeCandidate(_HswaeOpenModel):
     #: The OTHER half of the qualifier evidence: dropped tokens the atlas does
     #: corroborate. Reading ``uncorroborated_qualifiers`` without this one
     #: makes a well-corroborated match look as doubtful as an unsupported one.
-    #: Declared ahead of the server fix deploying [bd-dre-pjhrp.19] — verified
-    #: absent from the live signed schema and live payloads on 2026-10-15.
+    #: Live as of 2026-10-15, server commit 90aeca34ff [bd-dre-pjhrp.19];
+    #: optional so an older deployment still parses.
     corroborated_qualifiers: list[_HswaeQueryToken] | None = Field(default=None, max_length=50)
     #: What the resolver stage measured; see :class:`HswaeMatchDetail`. ``None``
     #: means the stage reported nothing, not that the match was unmeasured.

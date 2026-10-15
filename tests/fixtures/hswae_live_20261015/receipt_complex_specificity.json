@@ -1,6 +1,6 @@
 {
   "contractVersion": "1.0.0",
-  "createdAt": "2026-10-15T14:29:57.723Z",
+  "createdAt": "2026-10-15T14:48:09.574Z",
   "effect": "read_local",
   "operation": "predictive_interactomics.complex_specificity",
   "owner": {

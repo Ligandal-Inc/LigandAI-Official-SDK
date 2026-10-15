@@ -945,10 +945,9 @@ def test_pre_bookkeeping_server_payloads_still_parse(
         "match_type", "dropped_query_tokens", "uncorroborated_qualifiers",
         "added_canonical_tokens", "unrequested_specializations",
         "embeddingSpecificity", "embeddingCombinedScore", "consistency",
-        # bd-dre-pjhrp.19: emitted by server commit 90aeca34ff, not yet
-        # deployed. Verified absent from the live signed schema and live
-        # payloads 2026-10-15, so TODAY'S production is one of the "older
-        # deployments" this test models.
+        # bd-dre-pjhrp.19, live as of 2026-10-15 (server commit 90aeca34ff).
+        # Listed here because a deployment OLDER than that fix omits them and
+        # must still parse — which is what this test models.
         "expression_floor_basis", "corroborated_qualifiers", "match_detail",
     }
     keep_match_type = {"matches", "matched_tissues", "contexts"}
