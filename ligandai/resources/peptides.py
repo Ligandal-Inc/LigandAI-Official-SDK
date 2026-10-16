@@ -6629,8 +6629,10 @@ class Peptides(Resource):
         super_elite: bool | None = None,
         super_elite_affinity: bool | None = None,
         super_elite_thermo: bool | None = None,
+        super_elite_peptide: bool | None = None,
         acceptance_criterion: Literal[
-            "great_plus", "elite", "super_elite", "super_elite_affinity"
+            "great_plus", "elite", "super_elite", "super_elite_affinity",
+            "super_elite_peptide",
         ] | None = None,
         require_linker_leg: bool | None = None,
         require_ensemble: bool | None = None,
@@ -6693,6 +6695,14 @@ class Peptides(Resource):
                 synthesis-priority subset. Reported as a SEPARATE
                 bucket from the structural gate.
             super_elite_thermo: Deprecated alias for ``super_elite_affinity``.
+            super_elite_peptide: ADDITIVE short-peptide super-elite ("Super-elite
+                (short peptide)"): ``peptide_ipsae >= 0.67`` AND ``iptm >= 0.80``
+                AND peptide-chain pLDDT ``>= 60`` AND length ``<= 70``. Uses the
+                peptide chain's own pLDDT, not the whole-complex pLDDT that
+                ``super_elite`` uses. Not a ladder rung and neither stricter nor
+                looser than ``super_elite``; rows also carry a
+                ``superElitePeptide`` flag. ``acceptance_criterion=
+                "super_elite_peptide"`` selects it as a verdict filter.
             acceptance_criterion: Filter by the ONE canonical acceptance ladder
                 (``shared/acceptance-gate.json`` — the same spec ``is_elite`` /
                 ``super_elite`` / ``super_elite_affinity`` above are shorthand
@@ -6804,6 +6814,7 @@ class Peptides(Resource):
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
         if super_elite_affinity is not None: params["super_elite_affinity"] = "true" if super_elite_affinity else "false"
+        if super_elite_peptide is not None: params["super_elite_peptide"] = "true" if super_elite_peptide else "false"
         # Acceptance-gate ladder [bd-LIGANDAI_ALPHA_V2-dl6pj]. The SDK does not
         # validate `acceptance_criterion` against the four canonical names —
         # that whitelist lives in shared/acceptance-gate.json and the server
@@ -9076,8 +9087,10 @@ class AsyncPeptides(AsyncResource):
         super_elite: bool | None = None,
         super_elite_affinity: bool | None = None,
         super_elite_thermo: bool | None = None,
+        super_elite_peptide: bool | None = None,
         acceptance_criterion: Literal[
-            "great_plus", "elite", "super_elite", "super_elite_affinity"
+            "great_plus", "elite", "super_elite", "super_elite_affinity",
+            "super_elite_peptide",
         ] | None = None,
         require_linker_leg: bool | None = None,
         require_ensemble: bool | None = None,
@@ -9140,6 +9153,7 @@ class AsyncPeptides(AsyncResource):
         if is_elite is not None: params["is_elite"] = "true" if is_elite else "false"
         if super_elite is not None: params["super_elite"] = "true" if super_elite else "false"
         if super_elite_affinity is not None: params["super_elite_affinity"] = "true" if super_elite_affinity else "false"
+        if super_elite_peptide is not None: params["super_elite_peptide"] = "true" if super_elite_peptide else "false"
         # Acceptance-gate ladder [bd-LIGANDAI_ALPHA_V2-dl6pj]. See the sync
         # search() docstring for the full unit-trap and ensemble notes.
         if acceptance_criterion is not None: params["acceptance_criterion"] = acceptance_criterion
