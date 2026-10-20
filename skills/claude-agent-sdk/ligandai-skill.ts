@@ -26,6 +26,22 @@ import type { Skill, ToolDefinition } from "@anthropic-ai/agent-sdk";
 const SEGMENT_TYPES = ["binding", "linker", "stability", "premade"] as const;
 type SegmentType = typeof SEGMENT_TYPES[number];
 
+/**
+ * ⛔ The iPSAE ladder. ONE definition, interpolated into every tool description
+ * below so no tool can state its own. Mirrors the canonical table in the SDK's
+ * AGENTS.md, which in turn mirrors the platform's `shared/acceptance-gate.json`.
+ *
+ * Separately, the legacy `is_elite` SERVER FLAG is NOT a rung on this ladder: it
+ * gates at `ELITE_PEPTIDE_IPSAE_THRESHOLD` = 0.66, defined once in the platform's
+ * `shared/peptide-ipsae.ts` and mirrored as
+ * `ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD`. This table put the
+ * elite rung at 0.80 for several releases, a value neither rule has ever used.
+ * [bd-dre-f29kd]
+ */
+const IPSAE_TIERS =
+  "elite ≥ 0.85 | great+ ≥ 0.66 (primary hit rate) | good ≥ 0.50 " +
+  "(the legacy server `is_elite` flag is its own rule: binder iPSAE ≥ 0.66)";
+
 const TIER_LABELS = {
   free: "Free (10-generation cap, 10 folds, 3 targets, 1 folding GPU)",
   basic: "Basic (100-generation cap, 4 folding GPUs with credits)",
@@ -329,7 +345,7 @@ const getJobTool: ToolDefinition = {
 For generation jobs, returns status + peptide count when complete.
 For fold jobs, returns per-peptide metrics: iPSAE, predicted Kd (nM), dG.
 
-**iPSAE tiers:** elite ≥ 0.80 | great+ ≥ 0.66 (primary hit rate) | good ≥ 0.50
+**iPSAE tiers:** ${IPSAE_TIERS}
 **Kd interpretation:** < 1 nM = picomolar | 1-10 nM = strong | 10-100 nM = moderate | 100-1000 nM = weak | > 1000 nM = non-binder
 Always report Kd in appropriate units (pM / nM / µM), not raw dG.`,
 

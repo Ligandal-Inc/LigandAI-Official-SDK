@@ -6717,7 +6717,15 @@ class Peptides(Resource):
                 comparable even when they are not comparable across engines.
             binder_pct_min: Minimum DeltaForge binder probability (0..1).
             length_min / length_max: Peptide length range in residues.
-            is_elite: Server-flagged elite (iPSAE ≥ 0.80 by default).
+            is_elite: The server-stamped ``is_elite`` flag — BINDER (peptide-
+                receptor interface) peptide_ipsae >= 0.66, the value of
+                :data:`ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD`,
+                which mirrors ``ELITE_PEPTIDE_IPSAE_THRESHOLD`` in the
+                platform's ``shared/peptide-ipsae.ts`` — ⛔ THE source of truth.
+                Earlier releases of this docstring said 0.80; the gate has never
+                enforced 0.80. ⛔ A different rule from the acceptance tier also
+                called "elite" — see ``acceptance_criterion`` below, and prefer
+                :attr:`~ligandai.types.Peptide.quality_tier`.
             super_elite: Proteina-Complexa structural-confidence gate
                 (bioRxiv v27): iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND
                 pLDDT ≥ 88 (0–100 scale; null passes). The 3-metric
@@ -6741,8 +6749,9 @@ class Peptides(Resource):
                 ``super_elite`` / ``super_elite_affinity`` above are shorthand
                 for). One of ``"great_plus"`` (``peptide_ipsae >= 0.66`` — the
                 primary hit-rate metric), ``"elite"`` (``peptide_ipsae >= 0.85``
-                single-metric — NOT the same 0.85 as the legacy ``is_elite``
-                flag, which historically used 0.80), ``"super_elite"``
+                single-metric — a DIFFERENT rule from the legacy ``is_elite``
+                flag, which gates at 0.66, the platform's
+                ``ELITE_PEPTIDE_IPSAE_THRESHOLD``), ``"super_elite"``
                 (``peptide_ipsae >= 0.67`` AND ``iptm >= 0.80`` AND
                 ``plddt >= 88`` — the structural/publication gate), or
                 ``"super_elite_affinity"`` (the structural gate PLUS

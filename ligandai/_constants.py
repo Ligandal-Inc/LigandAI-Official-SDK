@@ -232,3 +232,22 @@ SUBMITTED_ORPHAN_SECS: int = 3600  # 1 hour
 LOCAL_STATE_DIR_NAME: str = ".ligandai"
 SUBMITTED_DB_NAME: str = "submitted.db"
 CREDIT_LEDGER_DB_NAME: str = "credit_ledger.db"
+
+# ── The elite bar ───────────────────────────────────────────────────────────
+# ⛔ SOURCE OF TRUTH: ``shared/peptide-ipsae.ts`` on the platform, constant
+# ``ELITE_PEPTIDE_IPSAE_THRESHOLD``. The platform applies it in exactly one
+# place — ``isEliteByBinderIpsae()`` called from ``storage.insertPtfFoldResult``
+# — so every ``ptf_fold_results.is_elite`` flag a customer has ever seen was
+# computed against this number, on the BINDER (peptide-receptor interface)
+# iPSAE, never the inflated whole-complex value.
+#
+# Mirrored here so SDK docstrings and agent skills can cite ONE place instead of
+# retyping a literal. The SDK docs said 0.80 for a long while; the gate never
+# enforced 0.80, and 0.80 was explicitly rejected because it would have demoted
+# genuine binders in [0.66, 0.80). [bd-dre-f29kd]
+#
+# ⛔ DISTINCT from the acceptance-gate TIER also spelled "elite"
+# (``peptide_ipsae >= 0.85``, ``shared/acceptance-gate.json``). Same word, two
+# rules: this constant is the legacy single-metric server FLAG; prefer
+# ``Peptide.quality_tier`` for the acceptance ladder.
+IS_ELITE_PEPTIDE_IPSAE_THRESHOLD: float = 0.66

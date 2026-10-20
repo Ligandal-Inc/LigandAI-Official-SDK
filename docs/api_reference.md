@@ -231,7 +231,16 @@ All criteria AND-combine. v0.5.1+.
 - `length_min`, `length_max` _(int, residues)_
 
 **Combined gates**:
-- `is_elite=true` — server-flagged elite (default iPSAE ≥ 0.80)
+<!-- ⛔ The is_elite bar below is NOT ours to choose. Source of truth: the
+     platform's `shared/peptide-ipsae.ts` constant ELITE_PEPTIDE_IPSAE_THRESHOLD,
+     mirrored in this SDK as `ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD`.
+     This line said 0.80 for several releases; the gate has never enforced 0.80.
+     [bd-dre-f29kd] -->
+- `is_elite=true` — the server-stamped `is_elite` flag: BINDER (peptide-receptor
+  interface) iPSAE ≥ 0.66 (`ELITE_PEPTIDE_IPSAE_THRESHOLD`, applied once at the
+  platform's fold-write funnel). ⛔ Not the acceptance-gate tier also called
+  "elite" (`peptide_ipsae >= 0.85`) — for the ladder use
+  `acceptance_criterion=` / read `peptide.quality_tier`.
 - `super_elite=true` — **STRUCTURAL** Proteina-Complexa gate
   (bioRxiv v27): iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND pLDDT ≥ 88
   (0–100 scale; null passes). The 3-metric structural-confidence gate.

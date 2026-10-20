@@ -2718,7 +2718,11 @@ class Peptide(_LGModel):
     )
     is_elite: bool | None = Field(
         default=None, alias="isElite",
-        description="Legacy single-metric server flag -- historically peptide_ipsae >= 0.80, "
+        description="Legacy single-metric server flag -- binder (peptide) peptide_ipsae >= 0.66 "
+                    "(ELITE_PEPTIDE_IPSAE_THRESHOLD); source of truth is the platform's "
+                    "shared/peptide-ipsae.ts, mirrored as "
+                    "ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD. Earlier releases "
+                    "described this as 0.80, which the gate has never enforced. "
                     "NOT the 0.85 threshold of the canonical 'elite' criterion in "
                     "shared/acceptance-gate.json. Kept for back-compat only. Prefer "
                     ":attr:`quality_tier`, which reports the strongest criterion this design "
