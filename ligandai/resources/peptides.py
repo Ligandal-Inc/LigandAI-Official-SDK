@@ -6720,11 +6720,14 @@ class Peptides(Resource):
             is_elite: The server-stamped ``is_elite`` flag — BINDER (peptide-
                 receptor interface) peptide_ipsae >= 0.66, the value of
                 :data:`ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD`,
-                which mirrors ``ELITE_PEPTIDE_IPSAE_THRESHOLD`` in the
+                which mirrors ``GREAT_PLUS_PEPTIDE_IPSAE_THRESHOLD`` in the
                 platform's ``shared/peptide-ipsae.ts`` — ⛔ THE source of truth.
-                Earlier releases of this docstring said 0.80; the gate has never
-                enforced 0.80. ⛔ A different rule from the acceptance tier also
-                called "elite" — see ``acceptance_criterion`` below, and prefer
+                ⛔ 0.66 is the GREAT+ bar, so this flag is a LEGACY LABEL for
+                great+ and is NOT the elite tier: the elite tier is
+                ``peptide_ipsae >= 0.80`` (Andre, 2026-10-20: "0.67 is great+.
+                0.8 is elite"). Filtering ``is_elite=True`` therefore returns
+                the great+ pool, which is wider than elite. For a tier verdict
+                use ``acceptance_criterion`` below and prefer
                 :attr:`~ligandai.types.Peptide.quality_tier`.
             super_elite: Proteina-Complexa structural-confidence gate
                 (bioRxiv v27): iPSAE ≥ 0.67 AND iPTM ≥ 0.80 AND
@@ -6749,9 +6752,12 @@ class Peptides(Resource):
                 ``super_elite`` / ``super_elite_affinity`` above are shorthand
                 for). One of ``"great_plus"`` (``peptide_ipsae >= 0.66`` — the
                 primary hit-rate metric), ``"elite"`` (``peptide_ipsae >= 0.85``
-                single-metric — a DIFFERENT rule from the legacy ``is_elite``
-                flag, which gates at 0.66, the platform's
-                ``ELITE_PEPTIDE_IPSAE_THRESHOLD``), ``"super_elite"``
+                single-metric — NOT the same 0.85 as the legacy ``is_elite``
+                flag. Three rules share the word: the elite tier is
+                ``peptide_ipsae >= 0.80``; THIS acceptance criterion is a
+                stricter rung at 0.85; and the stored ``is_elite`` flag is a
+                legacy label for the great+ bar, 0.66, the platform's
+                ``GREAT_PLUS_PEPTIDE_IPSAE_THRESHOLD``), ``"super_elite"``
                 (``peptide_ipsae >= 0.67`` AND ``iptm >= 0.80`` AND
                 ``plddt >= 88`` — the structural/publication gate), or
                 ``"super_elite_affinity"`` (the structural gate PLUS

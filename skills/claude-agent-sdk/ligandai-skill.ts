@@ -28,19 +28,33 @@ type SegmentType = typeof SEGMENT_TYPES[number];
 
 /**
  * ⛔ The iPSAE ladder. ONE definition, interpolated into every tool description
- * below so no tool can state its own. Mirrors the canonical table in the SDK's
- * AGENTS.md, which in turn mirrors the platform's `shared/acceptance-gate.json`.
+ * below so no tool can state its own.
  *
- * Separately, the legacy `is_elite` SERVER FLAG is NOT a rung on this ladder: it
- * gates at `ELITE_PEPTIDE_IPSAE_THRESHOLD` = 0.66, defined once in the platform's
- * `shared/peptide-ipsae.ts` and mirrored as
- * `ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD`. This table put the
- * elite rung at 0.80 for several releases, a value neither rule has ever used.
- * [bd-dre-f29kd]
+ * ⛔ THREE rules share the word "elite" — this table must keep them apart,
+ * because an agent reading one number and acting on another is exactly how a
+ * wrong hit count reaches a customer:
+ *   1. elite TIER = binder iPSAE >= 0.80. Andre, 2026-10-20: "0.67 is great+.
+ *      0.8 is elite" — which restates bd-x8vop (2026-07-01). This is what the
+ *      word means in a report, a count, or a UI label.
+ *   2. the `elite` ACCEPTANCE CRITERION = 0.85, rank 2 of
+ *      `shared/acceptance-gate.json`. A stricter rung, used only as a verdict
+ *      filter.
+ *   3. the legacy `is_elite` SERVER FLAG = 0.66, i.e. the GREAT+ bar
+ *      (`GREAT_PLUS_PEPTIDE_IPSAE_THRESHOLD` in the platform's
+ *      `shared/peptide-ipsae.ts`, mirrored as
+ *      `ligandai._constants.IS_ELITE_PEPTIDE_IPSAE_THRESHOLD`). It is a legacy
+ *      LABEL for great+, not a rung of this ladder, and filtering on it returns
+ *      the wider great+ pool.
+ *
+ * This table read "elite >= 0.80" for several releases, which was right for
+ * rule 1; a pass under bd-dre-f29kd changed it to 0.85 after reading the then
+ * misnamed platform constant as policy. Both numbers are real — they belong to
+ * different rules, and the fix is to name all three. [bd-dre-vtao3]
  */
 const IPSAE_TIERS =
-  "elite ≥ 0.85 | great+ ≥ 0.66 (primary hit rate) | good ≥ 0.50 " +
-  "(the legacy server `is_elite` flag is its own rule: binder iPSAE ≥ 0.66)";
+  "elite ≥ 0.80 | great+ ≥ 0.66 (primary hit rate) | good ≥ 0.50 " +
+  "(the `elite` acceptance CRITERION is a stricter rung at 0.85; the legacy " +
+  "server `is_elite` flag is a label for the great+ bar: binder iPSAE ≥ 0.66)";
 
 const TIER_LABELS = {
   free: "Free (10-generation cap, 10 folds, 3 targets, 1 folding GPU)",

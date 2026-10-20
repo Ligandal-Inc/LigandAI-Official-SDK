@@ -233,21 +233,34 @@ LOCAL_STATE_DIR_NAME: str = ".ligandai"
 SUBMITTED_DB_NAME: str = "submitted.db"
 CREDIT_LEDGER_DB_NAME: str = "credit_ledger.db"
 
-# ── The elite bar ───────────────────────────────────────────────────────────
+# ── The bar the `is_elite` FLAG is stamped at (the great+ bar) ──────────────
 # ⛔ SOURCE OF TRUTH: ``shared/peptide-ipsae.ts`` on the platform, constant
-# ``ELITE_PEPTIDE_IPSAE_THRESHOLD``. The platform applies it in exactly one
-# place — ``isEliteByBinderIpsae()`` called from ``storage.insertPtfFoldResult``
-# — so every ``ptf_fold_results.is_elite`` flag a customer has ever seen was
-# computed against this number, on the BINDER (peptide-receptor interface)
-# iPSAE, never the inflated whole-complex value.
+# ``GREAT_PLUS_PEPTIDE_IPSAE_THRESHOLD``. The platform applies it in exactly one
+# place — ``isGreatPlusByBinderIpsae()`` called from
+# ``storage.insertPtfFoldResult`` — so every ``ptf_fold_results.is_elite`` flag a
+# customer has ever seen was computed against this number, on the BINDER
+# (peptide-receptor interface) iPSAE, never the inflated whole-complex value.
 #
-# Mirrored here so SDK docstrings and agent skills can cite ONE place instead of
-# retyping a literal. The SDK docs said 0.80 for a long while; the gate never
-# enforced 0.80, and 0.80 was explicitly rejected because it would have demoted
-# genuine binders in [0.66, 0.80). [bd-dre-f29kd]
+# ⛔ THE NAME OF THIS CONSTANT IS A LEGACY NAME. 0.66 is the GREAT+ bar, not the
+# elite bar. Andre, 2026-10-20: "0.67 is great+. 0.8 is elite" — restating
+# bd-x8vop (2026-07-01). So the server ``is_elite`` flag is a LEGACY LABEL for
+# great+, and filtering on it returns the great+ pool, which is wider than
+# elite. The constant keeps its published name because renaming it would break
+# every consumer that imports it; the platform-side name was corrected to
+# ``GREAT_PLUS_PEPTIDE_IPSAE_THRESHOLD`` under bd-dre-vtao3.
 #
-# ⛔ DISTINCT from the acceptance-gate TIER also spelled "elite"
-# (``peptide_ipsae >= 0.85``, ``shared/acceptance-gate.json``). Same word, two
-# rules: this constant is the legacy single-metric server FLAG; prefer
-# ``Peptide.quality_tier`` for the acceptance ladder.
+# A pass under bd-dre-f29kd read the platform's then-misnamed
+# ``ELITE_PEPTIDE_IPSAE_THRESHOLD`` as policy and "corrected" five correct 0.80
+# statements in these docs down to 0.66. Those are restored as TIER statements.
+#
+# ⛔ THREE rules share the word "elite" — keep them apart:
+#   1. elite TIER            = ``peptide_ipsae >= 0.80``  (the label and counts)
+#   2. ``elite`` CRITERION   = ``peptide_ipsae >= 0.85``  (acceptance ladder,
+#      rank 2, ``shared/acceptance-gate.json``) — prefer ``Peptide.quality_tier``
+#   3. ``is_elite`` FLAG     = this constant, 0.66        (legacy great+ label)
 IS_ELITE_PEPTIDE_IPSAE_THRESHOLD: float = 0.66
+
+# The elite TIER bar (rule 1 above). Mirrors
+# ``ELITE_LABEL_PEPTIDE_IPSAE_THRESHOLD`` in ``shared/peptide-ipsae.ts``.
+# ⛔ NOT the 0.85 acceptance criterion, and NOT the 0.66 flag.
+ELITE_TIER_PEPTIDE_IPSAE_THRESHOLD: float = 0.80
