@@ -169,20 +169,52 @@ def _null_draw(legs_per_design: dict[str, dict[str, float]], rng: random.Random)
 
 
 def main() -> None:
+    # Rebound below when the PLATFORM picks the panel: the resolved provenance is
+    # then the only source for which receptors every downstream leg must use.
+    global PARALOGS
+
     client = LigandAI(
         api_key=os.environ["LIGANDAI_API_KEY"],
         base_url=os.environ.get("LIGANDAI_BASE_URL"),
     )
 
     # ── 1. Generate, steered away from the named panel ───────────────────────
-    print(f"[1] generating {N_PEPTIDES} design(s) against {TARGET}, "
-          f"steered away from {PARALOGS} …")
+    #
+    # ⛔ NAMING A PANEL vs LETTING THE PLATFORM PICK. `avoid_paralogs=` has three
+    # states, and only the first puts anything on the wire:
+    #
+    #   avoid_paralogs=PARALOGS  -> you choose the comparators. Sends
+    #                               cfg_reference_genes. THIS is what the script
+    #                               runs, because the selectivity panel below
+    #                               has to fold against a panel you KNOW.
+    #   avoid_paralogs=[]        -> the platform chooses the comparators.
+    #                               Conditioning still happens; nothing extra is
+    #                               sent; NOT an error.
+    #   avoid_paralogs omitted   -> you did not choose comparators. Byte-identical
+    #                               to [] above.
+    #
+    # On a capable checkpoint the model conditions in ALL THREE. "Off" means "I
+    # did not choose the comparators", never "no conditioning" — there is no
+    # conditioning-disable switch on this surface. Set EXAMPLE_PLATFORM_PICKS=1
+    # to run the platform-picks variant instead; the script then reads the panel
+    # back out of the provenance, because it no longer knows it up front.
+    platform_picks = os.environ.get("EXAMPLE_PLATFORM_PICKS") == "1"
+    panel: list[str] = [] if platform_picks else PARALOGS
+
+    if platform_picks:
+        print(f"[1] generating {N_PEPTIDES} design(s) against {TARGET}, "
+              f"steered away from a panel the PLATFORM picks "
+              f"(avoid_paralogs=[] — conditioning still happens) …")
+    else:
+        print(f"[1] generating {N_PEPTIDES} design(s) against {TARGET}, "
+              f"steered away from {PARALOGS} …")
+
     job = client.peptides.generate(
         gene=TARGET,
         num_peptides=N_PEPTIDES,
         length_range=(12, 24),
         model="v6.9.21",              # CFG-capable — avoid_paralogs requires it
-        avoid_paralogs=PARALOGS,
+        avoid_paralogs=panel,
         auto_fold=False,              # the panel below does the folding
     )
     result = job.wait()
@@ -192,12 +224,30 @@ def main() -> None:
     # Read back the provenance rather than assuming the panel you named is
     # the panel that actually ran — a named gene that fails the paralog
     # criterion is rejected per-gene, never silently substituted.
+    resolved: list[str] = []
     for event in getattr(job, "events", None) or []:
         if getattr(event, "event", None) == "cfg_references_resolved":
             for p in event.data.get("paralogs", []):
+                resolved.append(p["paralog_gene"])
                 print(f"    steered away from {p['paralog_gene']} "
                       f"({p.get('source_pdb_id')}:{p.get('source_chain')}, "
                       f"identity={p.get('identity_to_target_domain')})")
+
+    # ⛔ IN THE PLATFORM-PICKS VARIANT THE PROVENANCE IS THE ONLY SOURCE for what
+    # the panel was, so every downstream leg (folding, the selectivity minimum,
+    # the permutation null) must use the RESOLVED genes. Folding against the
+    # PARALOGS default here would measure selectivity over receptors the run was
+    # never steered away from, and report it as a conditioned result.
+    if platform_picks:
+        if not resolved:
+            raise SystemExit(
+                "the platform picked the panel but this server build reported no "
+                "cfg_references_resolved provenance — without it there is no "
+                "defensible panel to fold against, and guessing one would "
+                "measure selectivity over receptors nothing steered away from"
+            )
+        PARALOGS = resolved
+        print(f"    platform-chosen panel: {PARALOGS}")
 
     if not sequences:
         raise SystemExit("no designs generated — nothing to fold")

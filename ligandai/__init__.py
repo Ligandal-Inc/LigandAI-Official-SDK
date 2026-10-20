@@ -67,6 +67,7 @@ from ligandai.errors import (
     LigandAIIncompleteResult,
     LigandAIInsufficientCredits,
     LigandAIInvalidConfig,
+    LigandAICfgReferencesRefused,
     LigandAIParameterNotForwarded,
     LigandAIAnalysisNotComputed,
     LigandAIEdgeBlocked,
@@ -410,6 +411,7 @@ __all__ = [
     "LigandAIMutationUnconfirmed",
     "LigandAINotFoundError",
     "LigandAIPaidTierRequired",
+    "LigandAICfgReferencesRefused",
     "LigandAIParameterNotForwarded",
     # A LOCAL scorer's platform module is absent — an explicit ImportError-shaped
     # absence, never a degraded score. [bd-dre-c80f4.26.2]

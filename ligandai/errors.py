@@ -1115,6 +1115,53 @@ class LigandAIInvalidConfig(LigandAIError):
         self.allowed = allowed
 
 
+class LigandAICfgReferencesRefused(LigandAIInvalidConfig):
+    """The server refused a NAMED off-target panel rather than ignoring it.
+
+    This is the typed form of the two ``avoid_paralogs=`` refusals the platform
+    raises BEFORE the paralog reference producer runs or Modal is spawned, so
+    neither costs credits. Without this class both arrive as a generic 4xx whose
+    ``detail`` string is the only clue, and the one thing the caller needs — WHICH
+    of the two refusals happened, because the remedies are opposite — is the part
+    that gets flattened away.
+
+    ``code`` is the server's own refusal code, and it selects the remedy:
+
+    ``"cfg_references_not_supported"``
+        The generator cannot honour a named panel at all (the v6.5 line has no
+        CFG reference operator). ⛔ The panel is REFUSED, never silently
+        ignored — a run that quietly dropped it would report as conditioned and
+        execute unconditioned. Remedy: pass a capable checkpoint
+        (``v6.9.21`` / ``v6.9.22``), or drop ``avoid_paralogs=``.
+
+    ``"cfg_reference_genes_with_explicit_features"``
+        Both a named panel and raw ``reference_pocket_features`` were supplied.
+        These are two ways to specify ONE panel and the server refuses rather
+        than preferring either — being steered away from comparators you did
+        not choose is the failure that silent precedence produces. Remedy: send
+        one of them, not both.
+
+    ⛔ ON WHAT THIS CAPABILITY IS WORTH. In our controlled test, naming the panel
+    was not more selective than generate-and-filter. Use it as a different
+    experiment, not as an upgrade. A refusal here costs you nothing, so prefer
+    fixing the request over working around it.
+
+    Attributes
+    ----------
+    code : str | None
+        The server's refusal code (one of :data:`CODES`), inherited from
+        :class:`LigandAIError` — this class adds no second ``code`` of its own,
+        because two attributes spelled the same way is how a caller ends up
+        branching on the one that was never populated.
+    """
+
+    #: The two server refusal codes this class is raised for.
+    CODES: tuple[str, ...] = (
+        "cfg_references_not_supported",
+        "cfg_reference_genes_with_explicit_features",
+    )
+
+
 class LigandAIParameterNotForwarded(LigandAIInvalidConfig):
     """A real, supported capability that the request path does not carry — yet.
 
@@ -1608,6 +1655,26 @@ def error_from_response(
             target_name=payload.get("targetName") or payload.get("target_name"),
             candidates=payload.get("candidates") or [],
             **common,
+        )
+
+    # ⛔ [bd-LIGANDAI_ALPHA_V2-b7fjd.2] A NAMED OFF-TARGET PANEL WAS REFUSED.
+    # Checked before the status dispatch for the same reason as the ambiguous
+    # target above: these arrive as a 400/422, and the generic path keeps only
+    # `message`, discarding the `code` that distinguishes "this generator cannot
+    # condition at all" from "you named the panel twice". Those two have opposite
+    # remedies, so collapsing them into one 4xx makes the error unactionable.
+    # The server raises both BEFORE spending anything, so a caller who can read
+    # the code can correct the request for free.
+    _cfg_refusal_code = payload.get("code") or payload.get("error_code")
+    if _cfg_refusal_code in LigandAICfgReferencesRefused.CODES:
+        # ⛔ `code` is overridden rather than taken from `common`: common["code"]
+        # is payload["code"] only, so a server that spells it `error_code` would
+        # match the dispatch above and then arrive with .code = None — the
+        # attribute the caller branches on, silently empty.
+        return LigandAICfgReferencesRefused(
+            message,
+            field="avoid_paralogs",
+            **{**common, "code": str(_cfg_refusal_code)},
         )
 
     if status_code == 401:

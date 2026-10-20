@@ -52,6 +52,11 @@ you are being steered away from, full stop.**
 > null of 0.423x [0.370, 0.486]. All three arms sit inside the null band, and
 > the contrastive-vs-baseline difference was p=0.77. Choose it because it is a
 > different experiment, not because it is a better mode.
+>
+> In short, and in the wording every LigandAI surface that offers this repeats
+> verbatim (`ligandai.contrastive.PARALOG_CONDITIONING_NOTE`): **in our
+> controlled test it was not more selective than generate-and-filter. Use it as
+> a different experiment, not as an upgrade.**
 
 24-26% of designs exceed 1x selectivity in every arm, including the
 unrelated-pocket control. That is what taking the minimum of k off-target
@@ -118,6 +123,30 @@ client.campaigns.recursive(..., avoid_paralogs=["BRD2", "BRD3", "BRDT"])
 
 `avoid_paralogs=None` on a v6.9-line model does not mean "no conditioning" —
 see the next section.
+
+### The three states, and what each one puts on the wire
+
+The website and the unified orchestrator carry this same setting as
+`paralogConditioning: { enabled, paralogs }`. `avoid_paralogs=` is the same
+field, and it has exactly three states:
+
+| `avoid_paralogs=` | Settings equivalent | On the wire | What the generator does |
+|---|---|---|---|
+| `["BRD2", "BRD3"]` | `enabled: true`, non-empty `paralogs` | `cfg_reference_genes` (+ `cfgReferenceGenes`) | Conditions against **the panel you named**. |
+| `[]` | `enabled: true`, empty `paralogs` | *nothing extra* | Conditions against a panel **the platform picks**. |
+| omitted / `None` | `enabled: false` | *nothing extra* | Conditions against a panel **the platform picks** — byte-identical to the row above. |
+
+⛔ **There is no "conditioning off" state here.** On a capable checkpoint
+(`v6.9.21`, `v6.9.22`) the model conditions in all three rows; what changes is
+only *who chooses the comparators*. "Off" means "I did not choose the
+comparators", never "no conditioning happened". The empty panel and the omitted
+argument produce the same request bytes on purpose — a difference between them
+would be a second, undocumented wire state.
+
+Because of that, an empty panel is **not an error**, and it is a genuinely
+different experiment from naming one: you are conditioning against receptors you
+did not choose. If you need to know which ones were actually used, read the
+`cfg_references_resolved` provenance (below) rather than assuming.
 
 ---
 
@@ -223,6 +252,43 @@ once — `cfg_reference_genes_with_explicit_features`, raised if you pass
 These are two different ways to name one panel, and silently preferring one
 over the other is exactly how a caller ends up steered away from something
 they did not choose. Pick one.
+
+### Catching a refusal in code
+
+Both `cfg_references_not_supported` and
+`cfg_reference_genes_with_explicit_features` arrive as
+`LigandAICfgReferencesRefused`, a subclass of `LigandAIInvalidConfig`, with the
+server's code on `.code`. Without the typed class these are a generic 4xx whose
+`detail` string is the only clue, and the two have **opposite** remedies — so
+branch on `.code`, not on the message text:
+
+```python
+from ligandai import LigandAICfgReferencesRefused
+
+try:
+    job = client.peptides.generate(
+        gene="BRD4", num_peptides=100,
+        model="v6.9.21", avoid_paralogs=["BRD2", "BRD3"],
+    )
+except LigandAICfgReferencesRefused as e:
+    if e.code == "cfg_references_not_supported":
+        # The generator has no CFG reference operator (the v6.5 line). The panel
+        # was REFUSED, never silently ignored — a run that quietly dropped it
+        # would report as conditioned and execute unconditioned.
+        ...  # retry on v6.9.21 / v6.9.22, or drop avoid_paralogs
+    elif e.code == "cfg_reference_genes_with_explicit_features":
+        # A named panel AND raw reference_pocket_features were both supplied.
+        ...  # send one of them, not both
+```
+
+Both refusals are raised **before** the paralog reference producer runs and
+before Modal is spawned, so neither costs credits. Whenever this SDK recognizes
+the model id it raises the client-side equivalent (`LigandAIValidationError`,
+naming the same code in its message) before the request goes out at all.
+
+A named gene that fails the paralog criterion is refused **with its reason** and
+is never silently swapped for a platform-chosen one — read the per-gene reasons
+under `missing_nonzero_cfg_references` above.
 
 ---
 

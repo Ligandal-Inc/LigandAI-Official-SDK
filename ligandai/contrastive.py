@@ -44,6 +44,7 @@ Refs: bd-dre-if562.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -56,6 +57,9 @@ __all__ = [
     "V6_9_22_POCKET_FEATURE_DIM",
     "V6_9_POCKET_FEATURE_DIM",
     "AvoidancePolicy",
+    "AVOID_PARALOGS_GENE_RE",
+    "MAX_AVOID_PARALOGS",
+    "PARALOG_CONDITIONING_NOTE",
     "CfgReference",
     "CfgReferenceProvenance",
     "ContrastiveGuidance",
@@ -147,6 +151,31 @@ def model_takes_cfg_reference(model_id: str | None) -> bool | None:
 #: instead of after the request reaches the server.
 MAX_AVOID_PARALOGS = 8
 
+#: ⛔ MIRRORS ``_CFG_REFERENCE_GENE_RE`` in
+#: ``fastapi_backend/routers/generate.py`` (``^[A-Za-z0-9-]{1,32}$``) so the SDK
+#: refuses exactly what the server's field validator 422s on, on the caller's
+#: machine instead of after the request goes out.
+#:
+#: ⛔ DELIBERATELY A SHAPE, NOT AN ALLOW-LIST of real HGNC symbols. The server
+#: does not hold one either, and a client-side symbol list would reject genes
+#: the paralog reference producer can actually serve — a published SDK cannot
+#: know which symbols a later producer build resolves.
+AVOID_PARALOGS_GENE_RE = re.compile(r"^[A-Za-z0-9-]{1,32}$")
+
+#: The measured result for this capability, carried verbatim so every surface
+#: that offers it says the same thing. Reproduced from ``CONTRASTIVE_COPY`` in
+#: ``client/src/redesign/components/design/ParalogConditioningControl.tsx``.
+#:
+#: ⛔ NOT DECORATION. In a controlled head-to-head, conditioning did NOT beat
+#: generate-and-filter and all arms sat inside the permutation null band. A
+#: docstring that implied this improves selectivity would be selling a result we
+#: did not measure, so the note is stated where the caller decides — not behind
+#: a "see also", not softened, and never led with the tail of the distribution.
+PARALOG_CONDITIONING_NOTE = (
+    "In our controlled test it was not more selective than "
+    "generate-and-filter. Use it as a different experiment, not as an upgrade."
+)
+
 
 def normalize_avoid_paralogs(genes: Sequence[str] | None) -> tuple[str, ...] | None:
     """Normalize ``avoid_paralogs=`` into the wire gene list, or None if unset.
@@ -165,8 +194,33 @@ def normalize_avoid_paralogs(genes: Sequence[str] | None) -> tuple[str, ...] | N
       of them without saying so is exactly the "steered away from something
       you did not choose" failure this module exists to prevent.
 
-    Returns ``None`` for ``None`` or an empty sequence — both mean "the caller
-    named nothing", which is the same as omitting the argument.
+    * Refuses a symbol that cannot be a gene name at all
+      (:data:`AVOID_PARALOGS_GENE_RE`), e.g. ``"BRD 3"``, ``"BRD3,BRD4"`` as a
+      single entry, or a 33-character string. The server's field validator 422s
+      on exactly these, and failing here names the offending entry instead of
+      returning a positional pydantic error after the round trip.
+
+    ⛔ ``None`` AND AN EMPTY SEQUENCE BOTH RETURN ``None``, and that return means
+    "the caller named nothing" — it does NOT mean "no conditioning". On a capable
+    checkpoint the model still conditions, against a panel the PLATFORM derives.
+    The three states this encodes:
+
+    * **a non-empty panel** -> the caller names the comparators
+      (``cfg_reference_genes`` goes on the wire);
+    * **an empty panel** -> the platform picks the comparators; conditioning
+      still happens; nothing extra goes on the wire;
+    * **argument omitted** -> the caller did not choose comparators. Identical
+      wire bytes to the empty case, and on a capable checkpoint the model STILL
+      conditions.
+
+    So "off" here means "I did not choose the comparators", never "conditioning
+    is disabled". Reporting it as a disable switch is the misreading this
+    docstring exists to prevent.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        The normalised panel, or ``None`` when the caller named nothing.
     """
     if genes is None:
         return None
@@ -180,6 +234,16 @@ def normalize_avoid_paralogs(genes: Sequence[str] | None) -> tuple[str, ...] | N
                 "non-empty HGNC symbol (e.g. 'BRD3') — a blank cannot be "
                 "resolved to a paralog reference and is not a way to say "
                 "'no restriction' (omit the argument for that)."
+            )
+        if not AVOID_PARALOGS_GENE_RE.match(gene):
+            raise LigandAIValidationError(
+                f"avoid_paralogs entry {gene!r} is not a usable gene symbol. "
+                f"Each entry must be 1-32 characters of letters, digits or '-' "
+                f"(a plausible HGNC symbol such as 'BRD3'), and must be ONE "
+                f"gene — pass avoid_paralogs=['BRD3', 'BRD4'] rather than a "
+                f"single comma-joined string. The server's field validator "
+                f"rejects exactly this shape, so sending it would cost a round "
+                f"trip to be told the same thing less specifically."
             )
         if gene not in seen:
             seen.add(gene)

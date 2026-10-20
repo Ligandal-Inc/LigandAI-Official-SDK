@@ -1628,7 +1628,10 @@ def _generation_body(
             "pass either avoid_paralogs=[...] or contrastive=ContrastiveGuidance(...), "
             "not both — they are two ways of naming the same off-target panel, and "
             "silently preferring one would steer generation away from receptors "
-            "the caller did not choose to name that way."
+            "the caller did not choose to name that way. This is the client-side "
+            "form of the server's cfg_reference_genes_with_explicit_features "
+            "refusal (contrastive= is what puts reference_pocket_features on the "
+            "wire), refused here so it costs no round trip."
         )
     _normalized_avoid_paralogs = normalize_avoid_paralogs(avoid_paralogs)
     if _normalized_avoid_paralogs is not None:
@@ -4532,9 +4535,32 @@ class Peptides(Resource):
         # naming them otherwise. Mutually exclusive with contrastive=: they are
         # two ways of naming one panel, and preferring one silently is how a
         # caller ends up steered away from something they did not choose.
-        # None (default): with a CFG-capable model, the platform still derives
-        # and applies its own real paralog references — you are just not
-        # choosing which ones.
+        #
+        # ⛔ THREE STATES, AND ONLY ONE OF THEM PUTS BYTES ON THE WIRE:
+        #   ["BRD3", "BRD4"] -> you name the comparators (cfg_reference_genes).
+        #   []               -> the platform picks the comparators. Conditioning
+        #                       STILL HAPPENS on a capable checkpoint; nothing
+        #                       extra is sent.
+        #   None (default)   -> you did not choose comparators. Byte-identical
+        #                       to [], and the model STILL CONDITIONS on a
+        #                       capable checkpoint.
+        # So omitting this does NOT disable conditioning — it declines to pick
+        # the comparators. There is no "conditioning off" switch here, and any
+        # doc sentence implying otherwise is wrong.
+        #
+        # ⛔ WHAT IT IS WORTH. In our controlled test it was not more selective
+        # than generate-and-filter. Use it as a different experiment, not as an
+        # upgrade. (ligandai.contrastive.PARALOG_CONDITIONING_NOTE is this
+        # sentence verbatim; every surface offering this repeats it.)
+        #
+        # Refusals, both raised before any spend and both surfacing as
+        # LigandAICfgReferencesRefused with .code set:
+        #   cfg_references_not_supported                  -> generator cannot
+        #       honour a named panel (v6.5.21). NEVER silently ignored.
+        #   cfg_reference_genes_with_explicit_features     -> a named panel AND
+        #       raw reference_pocket_features were both supplied.
+        # A gene that fails the platform's paralog criterion is refused with its
+        # reason — never silently swapped for a platform-chosen one.
         avoid_paralogs: _StrSequence[str] | None = None,
         bind_ph: float | None = None,
         release_ph: float | None = None,
@@ -5195,6 +5221,13 @@ class Peptides(Resource):
                 generation away from, session-wide — see :meth:`generate` for
                 the full contract (CFG-capable model required, mutually
                 exclusive with ``contrastive=``).
+
+                An empty list and ``None`` both mean "the platform picks the
+                comparators"; on a capable checkpoint the model still
+                conditions either way, so this is not a conditioning off
+                switch. In our controlled test it was not more selective than
+                generate-and-filter — use it as a different experiment, not as
+                an upgrade.
             **kwargs: Every other :meth:`generate` keyword, applied session-wide.
 
         Returns:
@@ -7781,9 +7814,32 @@ class AsyncPeptides(AsyncResource):
         # naming them otherwise. Mutually exclusive with contrastive=: they are
         # two ways of naming one panel, and preferring one silently is how a
         # caller ends up steered away from something they did not choose.
-        # None (default): with a CFG-capable model, the platform still derives
-        # and applies its own real paralog references — you are just not
-        # choosing which ones.
+        #
+        # ⛔ THREE STATES, AND ONLY ONE OF THEM PUTS BYTES ON THE WIRE:
+        #   ["BRD3", "BRD4"] -> you name the comparators (cfg_reference_genes).
+        #   []               -> the platform picks the comparators. Conditioning
+        #                       STILL HAPPENS on a capable checkpoint; nothing
+        #                       extra is sent.
+        #   None (default)   -> you did not choose comparators. Byte-identical
+        #                       to [], and the model STILL CONDITIONS on a
+        #                       capable checkpoint.
+        # So omitting this does NOT disable conditioning — it declines to pick
+        # the comparators. There is no "conditioning off" switch here, and any
+        # doc sentence implying otherwise is wrong.
+        #
+        # ⛔ WHAT IT IS WORTH. In our controlled test it was not more selective
+        # than generate-and-filter. Use it as a different experiment, not as an
+        # upgrade. (ligandai.contrastive.PARALOG_CONDITIONING_NOTE is this
+        # sentence verbatim; every surface offering this repeats it.)
+        #
+        # Refusals, both raised before any spend and both surfacing as
+        # LigandAICfgReferencesRefused with .code set:
+        #   cfg_references_not_supported                  -> generator cannot
+        #       honour a named panel (v6.5.21). NEVER silently ignored.
+        #   cfg_reference_genes_with_explicit_features     -> a named panel AND
+        #       raw reference_pocket_features were both supplied.
+        # A gene that fails the platform's paralog criterion is refused with its
+        # reason — never silently swapped for a platform-chosen one.
         avoid_paralogs: _StrSequence[str] | None = None,
         bind_ph: float | None = None,
         release_ph: float | None = None,
@@ -8010,6 +8066,13 @@ class AsyncPeptides(AsyncResource):
                 generation away from, session-wide — see :meth:`generate` for
                 the full contract (CFG-capable model required, mutually
                 exclusive with ``contrastive=``).
+
+                An empty list and ``None`` both mean "the platform picks the
+                comparators"; on a capable checkpoint the model still
+                conditions either way, so this is not a conditioning off
+                switch. In our controlled test it was not more selective than
+                generate-and-filter — use it as a different experiment, not as
+                an upgrade.
             **kwargs: Every other :meth:`generate` keyword, applied session-wide.
 
         Returns:
