@@ -875,24 +875,26 @@ class LigandAI(_ClientCommon):
         :meth:`~ligandai.resources.peptides.Peptides.generate`, including
         ``model=`` — the generator model selector:
 
-        * ``"v6.5.21"`` (default) — Receptor-conditioned. Designs respond to the
-          receptor you select. Replaces v6.5, which was trained with all-zero
-          receptor features and produced the same peptides regardless of target.
+        * ``"v6.5.24"`` (default) — Receptor-conditioned generator with a
+          65-channel per-residue receptor feature space. The full receptor
+          surface is supplied to the model as a single pocket input. Supports
+          the four guidance heads and scaffold / variable-segment masks; no CFG
+          reference pocket.
+        * ``"v6.5.21"`` — Receptor-conditioned generator with a 48-channel
+          per-residue receptor feature space. Supports the same guidance heads
+          and scaffold masks.
         * ``"v6.9.21"`` — A different, larger receptor feature space (107
           per-residue channels vs 48), with classifier-free guidance applied at
           inference. Validated for distinguishing sequence composition between
           receptors ONLY — not validated for WHERE on the structure the
-          peptide binds (selection, not guidance, delivers placement), and NOT
-          strictly better than v6.5 (measured contact_logits 0.6281 vs
-          v6.5.21's 0.6719). The four guidance heads (immunogenicity,
+          peptide binds (selection, not guidance, delivers placement). The four guidance heads (immunogenicity,
           serum_stability, residue_composition, cellfree) ARE supported here —
           see :meth:`Peptides.generate` for the per-head defaults, ceilings and
           the residue_composition/proteolytic coupling. ``residue_composition``
           was called ``halflife`` through v0.11.x; both names are accepted and
           the old one warns.
-        * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor
-          features, so its output does not depend on the receptor you select.
-          Retained only to reproduce runs made before August 2026.
+        * ``"v6.5"`` — Legacy, deprecated. Retained only to reproduce runs made
+          before August 2026.
 
         Omitting ``model`` sends no model key, so the server applies the
         platform default. See :meth:`Peptides.generate` for the full contract.

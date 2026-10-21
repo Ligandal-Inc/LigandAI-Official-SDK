@@ -87,8 +87,14 @@ V6_9_POCKET_FEATURE_DIM = 107
 #: receptor featurizer (fastapi_backend/core/rec_feat65_serving.py).
 V6_9_22_POCKET_FEATURE_DIM = 65
 
-#: Pocket-feature width declared by the v6.5 generator line.
+#: Pocket-feature width declared by the v6.5 generator line (v6.5, v6.5.21,
+#: v6.5.22).
 V6_5_POCKET_FEATURE_DIM = 48
+
+#: Pocket-feature width declared by v6.5.24 — a 65-channel per-residue receptor
+#: feature space. It is a different vector from the 48-wide v6.5 features and
+#: from the 107-wide v6.9.21 features; nothing converts between them.
+V6_5_24_POCKET_FEATURE_DIM = 65
 
 #: CFG reference operators the platform will execute.
 #:
@@ -113,6 +119,7 @@ _MODEL_POCKET_DIM: dict[str, int] = {
     "v6.5": V6_5_POCKET_FEATURE_DIM,
     "v6.5.21": V6_5_POCKET_FEATURE_DIM,
     "v6.5.22": V6_5_POCKET_FEATURE_DIM,
+    "v6.5.24": V6_5_24_POCKET_FEATURE_DIM,
     "v6.9.21": V6_9_POCKET_FEATURE_DIM,
     "v6.9.22": V6_9_22_POCKET_FEATURE_DIM,
 }

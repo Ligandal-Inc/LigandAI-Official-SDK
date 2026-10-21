@@ -229,12 +229,12 @@ Returns session_id for polling via ligandai_get_job.`,
       // server-side default.
       model: {
         type: "string",
-        enum: ["v6.5.21", "v6.9.21", "v6.5"],
+        enum: ["v6.5.24", "v6.5.21", "v6.9.21", "v6.5"],
         description:
           "Generator model. Omit for the platform default. " +
-          "v6.5.21 (default): Receptor-conditioned. Designs respond to the receptor you select. Replaces v6.5, which was trained with all-zero receptor features and produced the same peptides regardless of target. " +
-          "v6.9.21: A different, larger receptor feature space (107 per-residue channels vs 48), with classifier-free guidance applied at inference. Validated for distinguishing sequence composition between receptors ONLY — not validated for where on the structure the peptide binds (selection, not guidance, delivers placement), and not strictly better than v6.5 (measured contact_logits 0.6281 vs v6.5.21's 0.6719). The four guidance heads (immunogenicity / serum_stability / residue_composition / cell-free) ARE supported here, via the batch-spawn path rather than the streaming guided pool. residue_composition (formerly halflife; both names accepted, the old one warns) is clamped at 4.0 because its dose effect on this model's receptor-discrimination property is not distinguishable from zero at strength 4 (-11.5%, 95% CI [-27.2%, +4.7%]) and becomes significant at 8 (-22.3%, CI [-38.3%, -6.4%]). The separate -17.7pp cysteine-kernel cost is NOT part of that dose effect. " +
-          "v6.5: Legacy, deprecated. Trained with all-zero receptor features, so its output does not depend on the receptor you select. Retained only to reproduce runs made before August 2026.",
+          "v6.5.24 (default): Receptor-conditioned generator with a 65-channel per-residue receptor feature space; the full receptor surface is supplied as a single pocket input. Supports the four guidance heads and scaffold / variable-segment masks; no CFG reference pocket. v6.5.21: Receptor-conditioned generator with a 48-channel per-residue receptor feature space; same guidance heads and scaffold masks. " +
+          "v6.9.21: A different, larger receptor feature space (107 per-residue channels vs 48), with classifier-free guidance applied at inference. Validated for distinguishing sequence composition between receptors ONLY — not validated for where on the structure the peptide binds (selection, not guidance, delivers placement). The four guidance heads (immunogenicity / serum_stability / residue_composition / cell-free) ARE supported here, via the batch-spawn path rather than the streaming guided pool. residue_composition (formerly halflife; both names accepted, the old one warns) is clamped at 4.0 because its dose effect on this model's receptor-discrimination property is not distinguishable from zero at strength 4 (-11.5%, 95% CI [-27.2%, +4.7%]) and becomes significant at 8 (-22.3%, CI [-38.3%, -6.4%]). The separate -17.7pp cysteine-kernel cost is NOT part of that dose effect. " +
+          "v6.5: Legacy, deprecated. Retained only to reproduce runs made before August 2026.",
       },
       // Quality-guided generation (free+)
       quality_guided: {

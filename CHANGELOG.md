@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Generator model `v6.5.24`**, now the platform default. A receptor-conditioned
+  model with a 65-channel per-residue receptor feature space; supports the four
+  guidance heads and scaffold / variable-segment masks and does not take a CFG
+  reference pocket. `model="v6.5.24"` is accepted by `generate()`, and
+  `model_pocket_feature_dim("v6.5.24")` returns 65. `v6.5` and every other
+  existing model id remain selectable. `LocalLigandForge` defaults to `v6.5.24`.
+
 ## [0.16.5] - 2026-10-15
 
 Every H-SWAE capability call made through this SDK raised `pydantic.ValidationError`

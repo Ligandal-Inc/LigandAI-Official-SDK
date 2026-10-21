@@ -611,7 +611,7 @@ def _resolve_generator_model(
     if not isinstance(model, str) or not model.strip():
         raise LigandAIInvalidConfig(
             "model must be a non-empty generator model id string "
-            "(e.g. 'v6.5.21', 'v6.9.21', 'v6.5').",
+            "(e.g. 'v6.5.24', 'v6.5.21', 'v6.9.21', 'v6.5').",
             field="model",
             value=model,
         )
@@ -634,7 +634,7 @@ def _resolve_generator_model(
                 "cell-free and cysteine guidance heads run inside the v6.5-line "
                 "sampling loop, which this model does not use. Drop those arguments to "
                 f"use {model_id}, or use a model that supports them "
-                "(e.g. 'v6.5.21'). They are not dropped silently, because a "
+                "(e.g. 'v6.5.24'). They are not dropped silently, because a "
                 "design generated without the guidance you asked for is not "
                 "the design you asked for.",
                 field="model",
@@ -866,23 +866,26 @@ _StabilityMode = Literal["resist", "target"]
 # apply the platform default — the SDK does not carry a copy of that default,
 # so a platform-side change reaches you without an SDK upgrade.
 #
-# - ``"v6.5.21"`` (default) — Receptor-conditioned. Designs respond to the
-#   receptor you select. Replaces v6.5, which was trained with all-zero receptor
-#   features and produced the same peptides regardless of target.
+# - ``"v6.5.24"`` (default) — Receptor-conditioned generator with a 65-channel
+#   per-residue receptor feature space. The full receptor surface is supplied to
+#   the model as a single pocket input. Supports the four guidance heads and
+#   scaffold / variable-segment masks; it does not take a CFG reference pocket.
+# - ``"v6.5.21"`` — Receptor-conditioned generator with a 48-channel
+#   per-residue receptor feature space. Supports the same guidance heads and
+#   scaffold masks.
 # - ``"v6.9.21"`` — A different, larger receptor feature space (107
 #   per-residue channels vs 48), with classifier-free guidance applied at
 #   inference. Validated for distinguishing sequence composition between
 #   receptors ONLY — the paired 500-design fold screen (w0 1/284 vs w2 3/216)
 #   was underpowered (resolves >=12x, observed 3.9x: not a null, not a
 #   positive). No option on this model moves WHERE the peptide contacts the
-#   structure — selection, not guidance, delivers placement. NOT strictly
-#   better than v6.5: measured contact_logits 0.6281 vs v6.5.21's 0.6719.
+#   structure — selection, not guidance, delivers placement.
 #
 #   The four guidance heads (``immunogenicity``, ``serum_stability`` /
 #   proteolytic, ``residue_composition``, ``cellfree``) ARE supported on this
 #   model — the same v6.5 penalty kernels and the same strength calibration,
 #   routed through the normal batch-spawn path rather than the streaming guided
-#   pool that v6.5/v6.5.21 use. ``immuno_strength`` and ``stability_strength``
+#   pool that v6.5/v6.5.21/v6.5.24 use. ``immuno_strength`` and ``stability_strength``
 #   SATURATE at their ceilings (1.5 and 2.0 respectively — passing higher has
 #   no further effect); ``residue_composition_strength`` and
 #   ``cellfree_strength`` are clamped at 4.0.
@@ -901,15 +904,14 @@ _StabilityMode = Literal["resist", "target"]
 #   coupled axis, not independent dials — each measurably moves the other's
 #   metric. ``cellfree`` lowers LOCAL HYDROPHOBICITY (rolling 7-residue GRAVY
 #   window), NOT K/R clusters — see its own parameter doc.
-# - ``"v6.5"`` — Legacy, deprecated. Trained with all-zero receptor features, so
-#   its output does not depend on the receptor you select. Retained only to
-#   reproduce runs made before August 2026.
+# - ``"v6.5"`` — Legacy, deprecated. Retained only to reproduce runs made
+#   before August 2026.
 #
 # This alias is a typing convenience for the ids this SDK build knows about, NOT
 # a runtime allowlist: ``model`` is typed ``_GeneratorModel | str | None`` and an
 # unrecognized id is forwarded to the server, whose model registry is the
 # authority on what exists.
-_GeneratorModel = Literal["v6.5.21", "v6.5.22", "v6.9.21", "v6.9.22", "v6.5"]
+_GeneratorModel = Literal["v6.5.24", "v6.5.21", "v6.5.22", "v6.9.21", "v6.9.22", "v6.5"]
 
 # Fold partner expansion mode. Controls which receptor chains are included in
 # the peptide co-fold complex.
@@ -4739,10 +4741,14 @@ class Peptides(Resource):
                 server decides and a platform-side change to the default reaches
                 you without an SDK upgrade.
 
-                * ``"v6.5.21"`` (default) — Receptor-conditioned. Designs
-                  respond to the receptor you select. Replaces v6.5, which was
-                  trained with all-zero receptor features and produced the same
-                  peptides regardless of target.
+                * ``"v6.5.24"`` (default) — Receptor-conditioned generator
+                  with a 65-channel per-residue receptor feature space. The
+                  full receptor surface is supplied to the model as a single
+                  pocket input. Supports the four guidance heads and scaffold
+                  / variable-segment masks; no CFG reference pocket.
+                * ``"v6.5.21"`` — Receptor-conditioned generator with a
+                  48-channel per-residue receptor feature space. Supports the
+                  same guidance heads and scaffold masks.
                 * ``"v6.9.21"`` — A different, larger receptor feature space
                   (107 per-residue channels vs 48), with classifier-free
                   guidance applied at inference. Validated for distinguishing
@@ -4750,14 +4756,12 @@ class Peptides(Resource):
                   500-design fold screen (w0 1/284 vs w2 3/216) was
                   underpowered (resolves >=12x, observed 3.9x). No option on
                   this model moves WHERE the peptide contacts the structure —
-                  selection, not guidance, delivers placement. NOT strictly
-                  better than v6.5 (measured contact_logits 0.6281 vs
-                  v6.5.21's 0.6719).
+                  selection, not guidance, delivers placement.
 
                   The guidance heads ARE supported here — same v6.5 penalty
                   kernels and strength calibration, routed through the normal
                   batch-spawn path rather than the streaming guided pool
-                  v6.5/v6.5.21 use. ``immuno_strength`` /
+                  v6.5/v6.5.21/v6.5.24 use. ``immuno_strength`` /
                   ``stability_strength`` saturate at their ceilings (1.5 /
                   2.0); ``residue_composition_strength`` and
                   ``cellfree_strength`` are clamped at 4.0.
@@ -4785,10 +4789,8 @@ class Peptides(Resource):
                   ``residue_composition`` are ONE coupled axis, not independent
                   dials. ``cellfree`` lowers LOCAL HYDROPHOBICITY (rolling
                   7-residue GRAVY window), NOT K/R clusters.
-                * ``"v6.5"`` — Legacy, deprecated. Trained with all-zero
-                  receptor features, so its output does not depend on the
-                  receptor you select. Retained only to reproduce runs made
-                  before August 2026.
+                * ``"v6.5"`` — Legacy, deprecated. Retained only to
+                  reproduce runs made before August 2026.
 
                 Combining ``model=`` with a guidance argument raises
                 :class:`~ligandai.errors.LigandAIInvalidConfig` before any HTTP

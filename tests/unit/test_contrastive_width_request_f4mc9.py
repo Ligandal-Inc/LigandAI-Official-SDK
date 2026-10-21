@@ -370,3 +370,10 @@ def test_an_spa_shell_is_still_reported_as_an_unmounted_route():
     camp = Campaigns(transport=_SpaShell(), client=_FakeClient())  # type: ignore[arg-type]
     with pytest.raises(LigandAIParameterNotForwarded):
         camp.pocket_features("BRD2", dim=V6_9_POCKET_FEATURE_DIM)
+
+
+def test_v6_5_24_pocket_width_is_65_and_not_a_cfg_reference_model():
+    from ligandai.contrastive import model_pocket_feature_dim, model_takes_cfg_reference
+
+    assert model_pocket_feature_dim("v6.5.24") == 65
+    assert model_takes_cfg_reference("v6.5.24") is False

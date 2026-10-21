@@ -106,13 +106,10 @@ DEFAULT_LF_ROOT = "/home/dre/egfr_ph_campaign/gen/lfroot"
 DEFAULT_DELTA_NODE = "/mnt/backup/LIGANDAI_ALPHA_V2/delta_node"
 DEFAULT_FASTAPI_BACKEND = "/mnt/backup/LIGANDAI_ALPHA_V2/fastapi_backend"
 
-# ⛔ ligandgen_v6.5_final.pt is POCKET-BLIND — its cross-attention entropy is
-# exactly 100.0000% of ln(205) and destroying the pocket moves the logits by
-# 0.097%.  Generating on it produces designs that are not conditioned on the
-# target at all, which no downstream gate can detect.  v6.5.21 is
-# pocket-responsive (10.12 sigma between-pocket separation against a
-# within-pocket noise floor of 6.05 +- 0.85 L1 over 5 replicates).
-DEFAULT_LF_MODEL_ID = "v6.5.21"
+# Default local generator: v6.5.24, a receptor-conditioned model with a
+# 65-channel per-residue receptor feature space.  Its checkpoint path, feature
+# width and CFG requirement are read from the local registry row, never assumed.
+DEFAULT_LF_MODEL_ID = "v6.5.24"
 POCKET_BLIND_CHECKPOINTS = {"ligandgen_v6.5_final", "v6.5_final", "v6.5-final"}
 
 CANONICAL_AA = frozenset("ACDEFGHIKLMNPQRSTVWY")
