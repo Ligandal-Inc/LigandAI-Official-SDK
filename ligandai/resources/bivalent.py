@@ -129,10 +129,14 @@ class Bivalent(Resource):
     ) -> dict[str, Any]:
         """``POST /api/ligandforge/bivalent/fold``."""
         normalized = [_norm_candidate(c) for c in candidates]
+        # The route reads `candidates` as SEQUENCE STRINGS; the objects are kept
+        # under their own key so no consumer of this payload shape loses anything.
+        sequences = [s for s in (_candidate_sequence(c) for c in normalized) if s]
         body = {
             "session_id": session_id,
             "fold_mode": fold_mode,
-            "candidates": normalized,
+            "candidates": sequences,
+            "candidate_objects": normalized,
         }
         return self._transport.request("POST", "/api/ligandforge/bivalent/fold", json=body) or {}
 
@@ -433,10 +437,14 @@ class AsyncBivalent(AsyncResource):
         candidates: list[FoldCandidate | dict[str, Any] | str],
     ) -> dict[str, Any]:
         normalized = [_norm_candidate(c) for c in candidates]
+        # The route reads `candidates` as SEQUENCE STRINGS; the objects are kept
+        # under their own key so no consumer of this payload shape loses anything.
+        sequences = [s for s in (_candidate_sequence(c) for c in normalized) if s]
         body = {
             "session_id": session_id,
             "fold_mode": fold_mode,
-            "candidates": normalized,
+            "candidates": sequences,
+            "candidate_objects": normalized,
         }
         return await self._transport.request("POST", "/api/ligandforge/bivalent/fold", json=body) or {}
 
@@ -649,6 +657,36 @@ def _norm_candidate(c: FoldCandidate | dict[str, Any] | str) -> dict[str, Any]:
     if isinstance(c, str):
         return {"sequence": c}
     return dict(c)
+
+
+def _candidate_sequence(c: dict[str, Any]) -> str:
+    """The sequence string `/api/ligandforge/bivalent/fold` actually reads.
+
+    ⛔ THE ROUTE READS STRINGS, AND SENDING OBJECTS SILENTLY SUCCEEDS WITH GARBAGE.
+    `server/bivalent-routes.ts:528` does
+
+        body.candidates.map((s) => String(s || '').toUpperCase())
+                       .filter((s) => s.length >= 5)
+
+    so a dict arrives as the literal `"[OBJECT OBJECT]"` -- seventeen characters,
+    which PASSES the `>= 5` filter and is then treated as a peptide sequence. That
+    is worse than a 400: the call returns 200 and the fold descriptors are built
+    from a sequence that does not exist. `_norm_candidate` turns EVERY candidate
+    into a dict, including a plain `str` (it becomes `{"sequence": c}`), so this
+    affected every caller of `bivalent.fold` by any argument.
+
+    Found by root %780's static audit (HARNESS-ROOT-20261022-02) as a "candidate
+    payload defect" and confirmed here at both ends. Same family as the
+    `from_seed` seed-envelope defect and the campaign `quoteToken` contradiction,
+    but with the worst failure mode of the three because it does not fail.
+
+    ⛔ APPLIED TO `fold` ONLY, NOT TO `analyze_folds`. That method's route is
+    UNRESOLVED (no handler found in the inspected sources), so what shape it reads
+    is unknown and changing its payload would be a guess. It keeps sending
+    `normalized` until its route is identified.
+    """
+    value = c.get("sequence")
+    return value if isinstance(value, str) else ""
 
 
 def _normalize_session(
