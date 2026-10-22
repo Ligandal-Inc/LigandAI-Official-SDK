@@ -1592,7 +1592,23 @@ def error_from_response(
     are optional and defaulted so existing two-argument callers (and the
     tests pinning them) are unaffected.
     """
-    payload = payload or {}
+    # ⛔ A JSON ERROR BODY THAT PARSES TO A NON-OBJECT CRASHED THIS CONSTRUCTOR.
+    # `payload or {}` keeps a non-empty STRING, and the `payload.get("message")`
+    # below then raises `AttributeError: 'str' object has no attribute 'get'`
+    # from inside the error path — so the real server error is replaced by a
+    # crash in the code whose job is to report it. Measured 2026-10-22 against
+    # POST /api/v1/cofold/start: the route answers 422 with a body that parses
+    # to a string, and every cofold failure was unreadable because of it. A
+    # broken error path blinds every caller it touches, which is worse than the
+    # error it hides.
+    #
+    # A non-Mapping payload is not a field map, so it becomes the raw body (the
+    # most informative thing available, per the note below) and the field
+    # lookups fall through to the excerpt.
+    if not isinstance(payload, Mapping):
+        if payload and not raw_body:
+            raw_body = payload if isinstance(payload, str) else repr(payload)
+        payload = {}
     excerpt = body_excerpt(raw_body)
     # ⛔ [bd-dre-2d7za.9] A non-JSON error body used to be DISCARDED, so a
     # legal 403 rewritten by a proxy — or any text/plain refusal that still
