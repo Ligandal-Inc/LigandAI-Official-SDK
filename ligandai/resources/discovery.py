@@ -360,6 +360,7 @@ class Discovery(Resource):
         exclude_tissues: list[str] | None = None,
         top_n: int = 2000,
         receptor_only: bool = True,
+        acceptable_offtargets: list[str] | None = None,
         organism: str | None = None,
         species: str | None = None,
     ) -> MarkerResponse:
@@ -376,16 +377,41 @@ class Discovery(Resource):
         :param top_n: ranked rows to return (default 2000).
         :param receptor_only: cell-surface filter; ``True`` (default) keeps only
             plasma-membrane receptors.
+        :param acceptable_offtargets: tissues whose expression is tolerated, so a
+            gene is not demoted for being expressed there. The route has always
+            accepted this; it was simply never exposed.
+        :param organism: accepted for call-shape parity but **not used by this
+            route** — its handler reads six named fields and ``organism`` is not
+            one of them, so species selection here is a no-op. Use
+            :meth:`tissue_markers` when the atlas choice has to take effect.
         :returns: :class:`~ligandai.types.MarkerResponse`; read ``.top``.
         """
+        # snake_case, NOT camelCase like tissue_markers above. The two routes
+        # disagree and the body is forwarded verbatim, so the casing has to match
+        # the one handler each method talks to:
+        #   POST /api/transcriptomics/top-markers       destructures targetTissues,
+        #                                               excludeTissues, topN, ...
+        #   POST /api/transcriptomics/cell-type-markers destructures scrna_tissue,
+        #                                               target_cell_types, top_n, ...
+        # Sending camelCase here left scrna_tissue undefined, so every call was
+        # refused 400 "Missing required parameters: scrna_tissue, target_cell_types
+        # (array)" — measured 2026-10-22 against the live route with a cell type and
+        # tissue both read back from the server. Verified against the handler in
+        # server/routes.ts and the verbatim-forwarding alias in sdk-alias-routes.ts.
         body: dict[str, object] = {
-            "scrnaTissue": scrna_tissue,
-            "targetCellTypes": target_cell_types,
-            "topN": top_n,
-            "receptorOnly": receptor_only,
+            "scrna_tissue": scrna_tissue,
+            "target_cell_types": target_cell_types,
+            "top_n": top_n,
+            "receptor_only": receptor_only,
         }
         if exclude_tissues is not None:
-            body["excludeTissues"] = exclude_tissues
+            body["exclude_tissues"] = exclude_tissues
+        if acceptable_offtargets is not None:
+            body["acceptable_offtargets"] = acceptable_offtargets
+        # This route destructures six named fields and passes only those to its
+        # script, so the organism stamp is dropped server-side: organism/species
+        # select nothing here, unlike on tissue_markers. Kept for call-shape parity
+        # and so a future handler that reads it needs no SDK change.
         self._stamp_organism(body, organism, species)
         return MarkerResponse.model_validate(
             self._transport.request("POST", "/api/scrna/cell-type-markers", json=body) or {"top": []}
@@ -940,6 +966,7 @@ class AsyncDiscovery(AsyncResource):
         exclude_tissues: list[str] | None = None,
         top_n: int = 2000,
         receptor_only: bool = True,
+        acceptable_offtargets: list[str] | None = None,
         organism: str | None = None,
         species: str | None = None,
     ) -> MarkerResponse:
@@ -950,14 +977,19 @@ class AsyncDiscovery(AsyncResource):
         fail-closed to human when not entitled (``species`` is an alias). Read
         ``.top``. See :meth:`Discovery.cell_type_markers`.
         """
+        # snake_case, for the same measured reason as the sync method: this route
+        # destructures scrna_tissue/target_cell_types/top_n, while top-markers
+        # destructures camelCase. See Discovery.cell_type_markers.
         body: dict[str, object] = {
-            "scrnaTissue": scrna_tissue,
-            "targetCellTypes": target_cell_types,
-            "topN": top_n,
-            "receptorOnly": receptor_only,
+            "scrna_tissue": scrna_tissue,
+            "target_cell_types": target_cell_types,
+            "top_n": top_n,
+            "receptor_only": receptor_only,
         }
         if exclude_tissues is not None:
-            body["excludeTissues"] = exclude_tissues
+            body["exclude_tissues"] = exclude_tissues
+        if acceptable_offtargets is not None:
+            body["acceptable_offtargets"] = acceptable_offtargets
         self._stamp_organism(body, organism, species)
         return MarkerResponse.model_validate(
             await self._transport.request("POST", "/api/scrna/cell-type-markers", json=body)

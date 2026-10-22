@@ -938,6 +938,14 @@ class ReferenceGroup(_LGModel):
     genes: list[str] | None = None
 
 
+# Measured marker-row key names, in order of preference, used by
+# MarkerResponse._gene_and_si. An Ensembl id is the last resort: it is an
+# identifier, not the symbol every other TissueMarker field is keyed by.
+MARKER_GENE_KEYS = ("gene_name", "Primary_gene", "gene_symbol", "geneSymbol", "symbol",
+                    "Ensembl_gene")
+MARKER_SI_KEYS = ("Specificity_index", "SI_within_tissue", "specificity_index")
+
+
 class TissueMarker(_LGModel):
     gene: str
     si: float | None = None
@@ -987,13 +995,45 @@ class MarkerResponse(_LGModel):
         if isinstance(raw, list):
             norm = []
             for m in raw:
-                if isinstance(m, dict) and "gene" not in m and "gene_name" in m:
-                    m = {**m, "gene": m["gene_name"]}
+                if isinstance(m, dict) and "gene" not in m:
+                    m = {**m, **cls._gene_and_si(m)}
                 norm.append(m)
             d["top"] = norm
         if d.get("total") is None and isinstance(d.get("count"), int):
             d["total"] = d["count"]
         return d
+
+    # Measured row keys, in order of preference. The scRNA cell-type-markers rows
+    # carry NO ``gene`` and no ``gene_name``; their symbol is ``Primary_gene``,
+    # alongside ``Ensembl_gene``, ``UniProt_accession``, ``Specificity_index`` and
+    # the rest of a UniProt-style row (measured live 2026-10-22: AlphaFoldDB,
+    # DrugBank, Max, Mean, PDB, Primary_gene, Protein_name, SI_vs_parent,
+    # SI_within_tissue, Specificity_index, Transmembrane, UniProt_accession,
+    # cell_type_breakdown, method, parent_tissue, tissue_expression). Before this,
+    # every such response failed ``top.N.gene Field required`` and the caller got
+    # an exception instead of real ranked markers -- the same defect that made
+    # tissue_markers unusable. An Ensembl id is a last resort, because it is an
+    # identifier and not the symbol every other field in TissueMarker is keyed by.
+    # (the key lists live at module scope as MARKER_GENE_KEYS / MARKER_SI_KEYS:
+    #  pydantic turns a leading-underscore class attribute into a private attr,
+    #  so a tuple declared here is not iterable from a validator.)
+
+    @classmethod
+    def _gene_and_si(cls, row: dict[str, Any]) -> dict[str, Any]:
+        """The ``gene`` (and ``si``, when absent) a UniProt-style marker row implies."""
+        out: dict[str, Any] = {}
+        for key in MARKER_GENE_KEYS:
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                out["gene"] = value
+                break
+        if row.get("si") is None:
+            for key in MARKER_SI_KEYS:
+                value = row.get(key)
+                if isinstance(value, (int, float)):
+                    out["si"] = float(value)
+                    break
+        return out
 
 
 class ExpressionProfile(_LGModel):
