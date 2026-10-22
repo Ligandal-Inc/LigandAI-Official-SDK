@@ -329,6 +329,17 @@ class Bivalent(Resource):
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
             "linker": _linker_dump(linker),
+            # ⛔ THE ROUTE READS `seed`, NOT `binder_t1_sequence`, SO THIS CALL
+            # COULD NOT SUCCEED BY ANY ARGUMENT. Measured 2026-10-22 against the
+            # real account: a valid target1/target2/linker plus this flat key
+            # returned 400 `seed must include sequence, smiles, or pdb_content`.
+            # server/bivalent-routes.ts:827 reads `body.seed.sequence`,
+            # `seed.smiles` and `seed.pdb_content`; nothing on the server ever
+            # reads `binder_t1_sequence`. Same family as the campaign
+            # quoteToken defect: a method unreachable by every possible input.
+            # The flat key is kept alongside so any other consumer of this
+            # payload shape is unaffected.
+            "seed": {"sequence": binder_t1_sequence},
             "binder_t1_sequence": binder_t1_sequence,
             "num_designs": num_designs,
         }
@@ -586,6 +597,9 @@ class AsyncBivalent(AsyncResource):
             "target1": _target_dump(target1),
             "target2": _target_dump(target2),
             "linker": _linker_dump(linker),
+            # Mirrors the sync twin: the route reads `seed`, never
+            # `binder_t1_sequence`. See the comment there.
+            "seed": {"sequence": binder_t1_sequence},
             "binder_t1_sequence": binder_t1_sequence,
             "num_designs": num_designs,
         }
