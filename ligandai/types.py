@@ -1183,12 +1183,55 @@ class GeoImportJob(_LGModel):
 
 
 class Dataset(_LGModel):
+    """A transcriptomics dataset, from either of the two envelopes that produce one.
+
+    ⛔ TWO SHAPES, AND THE UPLOAD ONE USED TO RAISE. Measured 2026-10-22 against the
+    live account: ``POST /api/transcriptomics/upload`` answers ``202`` with
+    ``{datasetId, status, estimatedTime, fileName, datasetType}`` — no ``id``, no
+    ``name``, no ``type``. So ``upload_dataset`` performed the write (the server
+    created dataset 52 and queued it for processing) and THEN raised
+    ``ValidationError`` on 3 missing fields. A caller that retried on that error
+    would upload the same file again, which is the write-then-raise shape this
+    SDK has hit before. ``GET /api/transcriptomics/datasets`` answers the
+    ``{id, name, type}`` shape, which is why only the upload path was affected.
+
+    ``name`` and ``type`` are therefore optional and populated from whichever key
+    the envelope carries. ``status`` / ``estimated_time`` are the 202's own fields:
+    an upload is ACCEPTED, not finished, and the caller needs them to drive
+    :meth:`~ligandai.resources.discovery.Discovery.wait_for_import`.
+    """
+
     id: str | int
-    name: str
-    type: str
+    name: str | None = None
+    type: str | None = None
+    status: str | None = None
+    estimated_time: str | None = Field(default=None, alias="estimatedTime")
     sample_count: int | None = Field(default=None, alias="sampleCount")
     cell_count: int | None = Field(default=None, alias="cellCount")
     uploaded_at: datetime | None = Field(default=None, alias="uploadedAt")
+
+    # Each tuple is (target field, the keys that may carry it) — the upload
+    # envelope's key first where the two disagree, since that is the shape that
+    # was failing. Alias= is not enough: pydantic allows ONE alias per field.
+    _ENVELOPE_KEYS: ClassVar[tuple[tuple[str, tuple[str, ...]], ...]] = (
+        ("id", ("id", "datasetId", "dataset_id")),
+        ("name", ("name", "fileName", "file_name", "sourceFile")),
+        ("type", ("type", "datasetType", "dataset_type")),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_either_envelope(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for field, keys in cls._ENVELOPE_KEYS:
+            if out.get(field) is None:
+                for key in keys:
+                    if out.get(key) is not None:
+                        out[field] = out[key]
+                        break
+        return out
 
 
 # -- Signed H-SWAE capability boundary ---------------------------------------
