@@ -210,6 +210,10 @@ class EnsembleResult:
     rows: list[ConsensusRow]
     failures: list[dict[str, Any]]
     credits_spent: Optional[int] = None
+    # True when credits_spent could only be attributed to SOME of this run's
+    # jobs (settlement rows for the rest had not landed yet). None when
+    # credits_spent is None. Never extrapolated — read it before budgeting.
+    credits_partial: Optional[bool] = None
     wall_seconds: Optional[float] = None
     stopped_reason: Optional[str] = None
     cofactors: list[dict[str, Any]] = field(default_factory=list)
@@ -257,6 +261,7 @@ class EnsembleResult:
             "bar": self.bar, "engines": self.engines, "metric": self.metric,
             "cofactors": self.cofactors,
             "credits_spent": self.credits_spent,
+            "credits_partial": self.credits_partial,
             "wall_seconds": self.wall_seconds,
             "stopped_reason": self.stopped_reason,
             "consensus_histogram": self.consensus_histogram(),
@@ -468,6 +473,7 @@ class _EnsembleCommon:
                       cofs: list[CofactorSpec],
                       credits: Optional[int], wall: Optional[float],
                       stopped: Optional[str],
+                      credits_partial: Optional[bool] = None,
                       no_interface: Optional[dict[str, list[str]]] = None,
                       ) -> EnsembleResult:
         rows = []
@@ -492,7 +498,7 @@ class _EnsembleCommon:
         return EnsembleResult(
             bar=bar, engines=list(engines), metric=metric, rows=rows,
             failures=failures, credits_spent=credits, wall_seconds=wall,
-            stopped_reason=stopped,
+            stopped_reason=stopped, credits_partial=credits_partial,
             cofactors=[c.as_dict() for c in cofs],
         )
 
@@ -668,6 +674,7 @@ class Ensemble(Resource, _EnsembleCommon):
         no_iface: dict[str, list[str]] = {}
         consecutive_dead = 0
         stopped: Optional[str] = None
+        submitted_job_ids: list[str] = []
         cofold = self._client.peptides.cofold  # the shipping single-complex call
 
         for idx, pep in enumerate(peps):
@@ -684,6 +691,9 @@ class Ensemble(Resource, _EnsembleCommon):
                              run_deltaforge=run_deltaforge,
                              cofactors=[c.as_dict() for c in cofs] or None,
                              allow_cofactor_absent=allow_cofactor_absent)
+                jid = getattr(job, "id", None)
+                if jid:
+                    submitted_job_ids.append(str(jid))
                 # An already-submitted job has its credits reserved, so it is
                 # allowed to finish: `timeout` stops the NEXT peptide, it does
                 # not abandon this one mid-flight.
@@ -706,9 +716,16 @@ class Ensemble(Resource, _EnsembleCommon):
             if on_progress:
                 on_progress(idx + 1, len(peps), per_peptide)
 
+        # Authoritative spend from the server ledger (Tom ask D5). Settlement
+        # rows land asynchronously right after the last status poll, so an
+        # unfinished attribution is reported as partial, never guessed.
+        spent, partial = _attributed_credits(
+            getattr(self._client, "account", None), submitted_job_ids
+        )
         return self._build_result(
             bar, engines, metric, per_peptide, honoured, failures, cofs,
-            credits=None, wall=round(time.time() - t0, 1), stopped=stopped,
+            credits=spent, wall=round(time.time() - t0, 1), stopped=stopped,
+            credits_partial=partial,
             no_interface=no_iface,
         )
 
@@ -812,6 +829,72 @@ def _failure_record(sequence: str, job: Any, exc: BaseException) -> dict[str, An
     if job_id:
         rec["job_id"] = str(job_id)
     return rec
+
+
+def _attributed_credits(account: Any, job_ids: list[str]) -> "tuple[Optional[int], bool]":
+    """Sync convenience: fetch history from ``account`` then attribute. See
+    :func:`_attribute_from_history` for the rules."""
+    if account is None or not [j for j in job_ids if j]:
+        return None, True
+    try:
+        history = account.credit_history(limit=200)
+    except Exception:
+        return None, True
+    return _attribute_from_history(history, job_ids)
+
+
+def _attribute_from_history(history: list[Any], job_ids: list[str]) -> "tuple[Optional[int], bool]":
+    """Total credits ACTUALLY spent on these co-fold jobs, from the server's
+    own billing ledger — not the SDK's projection.
+
+    Why this exists (Tom's ask D item 5, thread 1a1ad2089ad625c0): an
+    ``EnsembleResult.credits_spent`` was always None even though the account
+    had been charged, because ``run()`` passed ``credits=None`` unconditionally.
+    The authoritative number lives on the platform: each co-fold job's
+    settlement writes a ``usage_gpu`` credit-transaction row whose metadata
+    carries that ``jobId`` and whose (negative) ``amount`` is exactly what the
+    job consumed after unused reservations were released
+    (server/storage.ts consumeReservedCredits / cofold-routes.ts
+    settleTerminalJob). Summing those rows for THIS run's job ids reports the
+    real charge with zero double-counting — jobs are one per peptide, ids are
+    unique, and any job whose row has not settled yet is left OUT (a partial
+    sum is flagged with ``credits_partial=True``, never extrapolated).
+
+    Returns ``(total, partial)``; ``total`` is None when NOTHING attributed
+    (e.g. history unreachable) so the field keeps its old None meaning rather
+    than claiming zero spend.
+    [bd-LIGANDAI_ALPHA_V2-tom-D5]
+    """
+    wanted = {str(j) for j in job_ids if j}
+    if not wanted:
+        return None, True
+    seen: dict[str, int] = {}
+    for tx in history:
+        extra = getattr(tx, "model_extra", None) or {}
+        meta = extra.get("metadata")
+        if not isinstance(meta, dict):
+            # Some deployments flatten the columns; accept a top-level jobId too.
+            meta = extra
+        job_id = meta.get("jobId")
+        if job_id is None or str(job_id) not in wanted:
+            continue
+        if getattr(tx, "type", None) != "usage_gpu":
+            continue
+        amount = getattr(tx, "amount", None)
+        if amount is None or amount >= 0:
+            continue  # debits are negative; a zero/refund row is not a charge
+        # A job's ledger may carry several rows (reserve/release/consume). The
+        # SETTLEMENT row is the negative one with reservedSettlement metadata or
+        # the largest-magnitude debit; take the most-negative per job, which is
+        # the consumed total (reserve rows are 0 or positive).
+        prev = seen.get(str(job_id))
+        if prev is None or amount < prev:
+            seen[str(job_id)] = amount
+    if not seen:
+        return None, True
+    total = -sum(seen.values())
+    partial = len(seen) < len(wanted)
+    return int(total), partial
 
 
 def _pick_metric(engine_record: Any, metric: str) -> Optional[float]:
@@ -988,6 +1071,7 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         per_peptide: dict[str, dict[str, Optional[float]]] = {}
         failures: list[dict[str, Any]] = []
         no_iface: dict[str, list[str]] = {}
+        submitted_job_ids: list[str] = []
         sem = asyncio.Semaphore(max(1, concurrency))
         cofold = self._client.peptides.cofold
 
@@ -1022,6 +1106,9 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
                                        run_deltaforge=run_deltaforge,
                                        cofactors=[c.as_dict() for c in cofs] or None,
                                        allow_cofactor_absent=allow_cofactor_absent)
+                    jid = getattr(job, "id", None)
+                    if jid:
+                        submitted_job_ids.append(str(jid))
                     res = await job.wait(timeout=DEFAULT_JOB_TIMEOUT_SECS,
                                          poll_interval=poll_interval)
                     _absorb_engine_records(res, vals, no_iface.setdefault(pep, []),
@@ -1031,6 +1118,16 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
                 per_peptide[pep] = vals
 
         await asyncio.gather(*(one(p) for p in peps))
+        # Authoritative spend from the server ledger (Tom ask D5), same rules
+        # as the sync path — partial attribution is flagged, never guessed.
+        spent, partial = None, True
+        account = getattr(self._client, "account", None)
+        if account is not None and submitted_job_ids:
+            try:
+                history = await account.credit_history(limit=200)
+                spent, partial = _attribute_from_history(history, submitted_job_ids)
+            except Exception:
+                spent, partial = None, True
         # `stopped` now carries "timeout" when the deadline cut the run short,
         # so a partial ensemble is distinguishable from a complete one. A
         # short result that claims stopped=None is a measurement; a short
@@ -1038,6 +1135,7 @@ class AsyncEnsemble(AsyncResource, _EnsembleCommon):
         # and must not print the same.
         return self._build_result(
             bar, engines, metric, per_peptide, honoured, failures, cofs,
-            credits=None, wall=round(time.time() - t0, 1), stopped=stopped,
+            credits=spent, wall=round(time.time() - t0, 1), stopped=stopped,
+            credits_partial=partial,
             no_interface=no_iface,
         )

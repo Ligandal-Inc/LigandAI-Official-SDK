@@ -90,6 +90,60 @@ def _parse_hswae_receipt(
     return receipt
 
 
+def _check_compare_group_shapes(
+    target_group: Any,
+    reference_groups: list[Any] | None,
+    mode: str,
+) -> None:
+    """Fail locally, before any request, when the target/reference group
+    shapes cannot be accepted by the live ``POST /api/transcriptomics/compare-groups``.
+
+    Live server rules (routes.ts, verified 2026-11-05 against the deployed
+    server during Tom's discovery report — his GUI testing hit raw 400s the
+    SDK had advertised around):
+
+    - ``mode='focus'``  → ``targetGroup.type`` MUST be ``custom`` (and needs
+      ``datasetId`` + ``cellTypes``);
+    - ``mode='global'`` / ``'compare'`` → ``targetGroup.type`` MUST be
+      ``custom`` or ``geneset``;
+    - GTEx tissues (``type='gtex'``) are accepted ONLY as REFERENCE groups in
+      ``compare`` mode — never as the target. Earlier docstrings advertised a
+      GTEx target ("compare against the named GTEx brain tissues" read like a
+      target-slot promise); that was wrong and produced confusing server 400s.
+      ``compare_bbb_vs_brain`` is correct: its target is a geneset.
+    - ``mode='compare'`` requires at least one reference group.
+
+    Raising here costs nothing and beats an opaque 400 with no field names.
+    A 'tissue'/'cell_type' legacy target maps server-side only as its own
+    legacy path; treat it as not-accepted in the target slot for these modes.
+    [bd-LIGANDAI_ALPHA_V2-tom-D2]
+    """
+    ttype = getattr(target_group, "type", None)
+    if ttype is None and isinstance(target_group, dict):
+        ttype = target_group.get("type")
+    if mode == "focus":
+        if ttype != "custom":
+            raise ValueError(
+                "compare mode 'focus' requires a custom targetGroup "
+                f"(type='custom' with dataset_id + cell_types); got type={ttype!r}. "
+                "Live server rejects any other type for focus mode."
+            )
+    else:  # global / compare
+        if ttype not in ("custom", "geneset"):
+            raise ValueError(
+                f"compare mode '{mode}' requires a custom or geneset targetGroup; "
+                f"got type={ttype!r}. GTEx tissues are only supported as REFERENCE "
+                "groups in 'compare' mode (set the target to a geneset of your "
+                "genes, e.g. TargetGroup(name=..., type='geneset', genes=[...])). "
+                "Live server rejects other target types."
+            )
+    if mode == "compare" and not reference_groups:
+        raise ValueError(
+            "compare mode 'compare' requires at least one referenceGroup "
+            "(gtex tissues are valid references here)."
+        )
+
+
 def _split_shared_differential(markers: list[Any]) -> tuple[list[str], list[str]]:
     """Split comparison markers into SHARED vs DIFFERENTIAL gene lists.
     [bd-LIGANDAI_ALPHA_V2-k5usa]
@@ -529,6 +583,11 @@ class Discovery(Resource):
         receptor_only: bool = False,
         top_n: int = 100,
     ) -> ComparisonResponse:
+        """Async twin of :meth:`Discovery.compare_groups`; same local
+        group-shape gate (:func:`_check_compare_group_shapes`).
+        [bd-LIGANDAI_ALPHA_V2-tom-D2]
+        """
+        _check_compare_group_shapes(target_group, reference_groups, mode)
         body: dict[str, object] = {
             "targetGroup": target_group.model_dump(by_alias=True),
             "mode": mode,
@@ -739,13 +798,18 @@ class Discovery(Resource):
         but ABSENT (or much lower) in a reference — i.e. selectivity, not just
         abundance.
 
-        ``groups[0]`` is the target; ``groups[1:]`` are references. A group can be
-        a custom dataset (``type='custom'`` + ``dataset_id`` / ``cell_types``), a
-        GTEx tissue (``type='gtex'`` + ``tissue``), or a gene/receptor set
+        ``groups[0]`` is the target; ``groups[1:]`` are references. The live
+        server accepts the TARGET as a custom dataset (``type='custom'`` +
+        ``dataset_id`` / ``cell_types``) or a gene/receptor set
         (``type='geneset'`` + ``genes``), e.g. a BBB transcytosis shuttle set
-        or a pathway. This is what lets you compare "BBB-shuttle set vs brain-cortex
-        targets" or "pathway A vs pathway B" in ONE call, and lets a user see
-        which BBB shuttles are brain-selective vs broadly shared.
+        or a pathway — in ``focus`` mode the target must be ``custom``.
+        GTEx tissues (``type='gtex'`` + ``tissue``) are valid only as
+        REFERENCE groups in ``compare`` mode, never as the target; the SDK now
+        raises ``ValueError`` locally with this guidance instead of passing the
+        server's bare 400 through. This is what lets you compare
+        "BBB-shuttle set vs brain-cortex targets" or "pathway A vs pathway B"
+        in ONE call, and lets a user see which BBB shuttles are brain-selective
+        vs broadly shared. [bd-LIGANDAI_ALPHA_V2-tom-D2]
 
         The returned :class:`~ligandai.types.ComparisonResponse` is annotated with
         ``shared_genes`` (expressed in target AND a reference) and
@@ -1076,6 +1140,16 @@ class AsyncDiscovery(AsyncResource):
         receptor_only: bool = False,
         top_n: int = 100,
     ) -> ComparisonResponse:
+        """POST ``/api/transcriptomics/compare-groups`` verbatim.
+
+        Group-shape rules the live server enforces (and this call now checks
+        locally first — see :func:`_check_compare_group_shapes`):
+        ``focus`` needs a ``custom`` target; ``global``/``compare`` need a
+        ``custom`` or ``geneset`` target; ``gtex`` tissues are only valid as
+        reference groups in ``compare`` mode, and ``compare`` needs >=1 of them.
+        [bd-LIGANDAI_ALPHA_V2-tom-D2]
+        """
+        _check_compare_group_shapes(target_group, reference_groups, mode)
         body: dict[str, object] = {
             "targetGroup": target_group.model_dump(by_alias=True),
             "mode": mode,

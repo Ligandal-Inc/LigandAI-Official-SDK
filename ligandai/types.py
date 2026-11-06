@@ -911,6 +911,12 @@ class TargetGroup(_LGModel):
       in a single :meth:`compare_groups` / :meth:`compare_targets` call.
 
     ``tissue`` / ``cell_type`` are retained for backward compatibility.
+
+    ⚠ Target-slot rule (live ``compare-groups``): when used as the TARGET
+    group, only ``custom`` (all modes; required for ``focus``) and ``geneset``
+    (``global``/``compare``) are accepted. ``gtex`` is reference-only in
+    ``compare`` mode. Use :class:`ReferenceGroup` for GTEx comparisons.
+    [bd-LIGANDAI_ALPHA_V2-tom-D2]
     [bd-LIGANDAI_ALPHA_V2-k5usa]
     """
 
@@ -1039,8 +1045,56 @@ class MarkerResponse(_LGModel):
 class ExpressionProfile(_LGModel):
     gene: str
     tissues: dict[str, float] | None = None
-    organ_systems: dict[str, float] | None = Field(default=None, alias="organSystems")
+    organ_systems: dict[str, float] | list[str] | None = Field(
+        default=None, alias="organSystems"
+    )
     samples: list[dict[str, Any]] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_live_shape(cls, data: Any) -> Any:
+        """The live ``GET /api/transcriptomics/gene-expression/<gene>`` returns
+        ``{gene, chartData: [{tissue, mean, ...}], maxExpression, minExpression}``
+        with ``organSystems`` arriving as a plain LIST of system names — not the
+        ``{tissues: {...}, organSystems: {...}}`` shape this model documented.
+        Tom's GUI testing (SDK discovery asks, 2026-11-05) reproduced it.
+
+        Build ``tissues`` from ``chartData`` rows that carry a real numeric
+        mean/value/tpm; rows without one are skipped, never imputed. A
+        documented dict ``tissues`` always wins over ``chartData``. Raw
+        ``chartData`` stays visible via ``extra=allow``.
+        [bd-LIGANDAI_ALPHA_V2-tom-D3]
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("tissues"):
+            return data
+        chart = data.get("chartData") or data.get("chart_data")
+        if not isinstance(chart, list):
+            return data
+        tissues: dict[str, float] = {}
+        for row in chart:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("tissue") or row.get("name") or row.get("tissueName")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            val = row.get("mean")
+            if val is None:
+                val = row.get("value")
+            if val is None:
+                val = row.get("tpm")
+            if val is None:
+                continue
+            try:
+                tissues[name.strip()] = float(val)
+            except (TypeError, ValueError):
+                continue  # not a real number — skip, do not fabricate
+        if not tissues:
+            return data
+        d = dict(data)
+        d["tissues"] = tissues
+        return d
 
 
 class ComparisonResponse(_LGModel):
@@ -2735,6 +2789,32 @@ class Peptide(_LGModel):
     @classmethod
     def _coerce_fold_id(cls, v: object) -> object:
         return str(v) if isinstance(v, int) else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_server_row_keys(cls, data: Any) -> Any:
+        """``GET /api/v1/peptides/search`` (and ``/v1/peptides/list``) key the
+        target as ``gene`` and the DeltaForge energy as ``deltaG`` — this model
+        names them ``targetGene`` / ``deltaforgeDg``, so on search rows
+        ``p.target_gene`` and ``p.deltaforge_dg`` read None while ``ipsae`` /
+        ``iptm`` / ``predictedKd`` on the SAME row populated fine. Tom's GUI
+        testing saw exactly that: Target and deltaG blank across 20 TNF
+        designs. This fills the typed field from the server's real key when
+        (and only when) the canonical alias is absent — no value is invented,
+        and a row that carries ``targetGene``/``deltaforgeDg`` is untouched.
+        [bd-LIGANDAI_ALPHA_V2-tom-D4]
+        """
+        if not isinstance(data, dict):
+            return data
+        out = data
+        if out.get("targetGene") is None and isinstance(out.get("gene"), str):
+            out = {**out, "targetGene": out["gene"]}
+        if out.get("deltaforgeDg") is None:
+            for key in ("deltaG", "delta_g", "dg"):
+                if isinstance(out.get(key), (int, float)):
+                    out = {**out, "deltaforgeDg": out[key]}
+                    break
+        return out
     pdb_url: str | None = Field(default=None, alias="pdbUrl")
     # Academia+ tier guidance scores (populated when the corresponding guidance
     # module was active during generation)

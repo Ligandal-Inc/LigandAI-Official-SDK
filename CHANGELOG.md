@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ExpressionProfile` accepts the live gene-expression shape.** Live
+  `GET /api/transcriptomics/gene-expression/<gene>` returns
+  `{gene, chartData: [{tissue, mean, ...}], maxExpression, minExpression}` with
+  `organSystems` as a plain list of names; the model documented `tissues` and
+  `organSystems` as dicts, so live payloads failed validation. `tissues` is now
+  built from `chartData` rows carrying a real numeric value (zeros preserved;
+  rows without one skipped, never imputed), `organSystems` accepts list or
+  dict, and a documented dict `tissues` always wins. (Tom discovery ask D3.)
+- **`compare_groups` / `compare_targets` match the live server's group rules.**
+  Live truth (verified against the deployed server): `focus` requires a
+  `custom` target; `global`/`compare` require a `custom` or `geneset` target;
+  `gtex` tissues are reference-only in `compare` mode. The SDK now raises
+  `ValueError` locally with that guidance BEFORE sending a doomed request, and
+  the docstrings no longer advertise a GTEx target slot. (Tom ask D2.)
+- **Peptide search rows surface Target and deltaG.** The live
+  `GET /api/v1/peptides/search` select keys the target as `gene` and the
+  DeltaForge energy as `deltaG`, while `Peptide` mapped only `targetGene` /
+  `deltaforgeDg` — so `p.target_gene`/`p.deltaforge_dg` read None on real rows
+  while ipSAE/Kd from the SAME row populated (the blank Target/deltaG Tom saw
+  across his TNF designs). The typed fields now fill from the server's real
+  keys only when the canonical alias is absent; missing stays missing. (D4.)
+- **`EnsembleResult.credits_spent` reports the authoritative server charge.**
+  Both `run()` paths previously passed `credits=None` unconditionally, so the
+  field was always None even when the account had been charged. Spend is now
+  attributed from the platform's own ledger: each co-fold job's settlement row
+  (`usage_gpu`, `metadata.jobId`, negative amount) is summed for THIS run's
+  submitted job ids only. Nothing is extrapolated: `credits_partial=True`
+  flags a run whose settlement rows had not all landed; attribution-nil keeps
+  the old None meaning rather than claiming zero. No double charge is possible
+  — this path only READS `/api/credits/transactions`. (Tom ask D5.)
+- **Diagnostic registry parity restored.** `target_chains_unmatched` changed
+  semantics server-side (the chain-identity fix made an unmatched chain
+  constraint a blocking `error` at `request` stage, `target-chains` anchor) and
+  the two `campaign_criteria_kd_selectivity_*` codes had moved to the
+  `#criteria` anchor; the vendored copy in `ligandai/diagnostics.py` was
+  stale on exactly those fields. Byte-parity with
+  `shared/warnings.json` (58/58 codes, 8 fields each) is restored;
+  `test_diagnostics.py` passes.
+- **Marker-row key normalization is confirmed by regression fixtures** for the
+  live top-markers shape Tom reproduced (`Primary_gene`, `Ensembl_gene`,
+  `UniProt_accession`, `Specificity_index`, `tissue_expression`): already in
+  `types.py` since the 0.16.x marker fix, now pinned by
+  `test_cell_type_markers_casing.py` usage plus the patient-transcriptomics
+  suite. No new code was needed for D1; do not claim a new fix for it.
+
+
 ### Added
 
 - **Generator model `v6.5.24`**, now the platform default. A receptor-conditioned

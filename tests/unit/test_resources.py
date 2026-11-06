@@ -8,7 +8,7 @@ from pytest_httpx import HTTPXMock
 
 from ligandai import LigandAI
 from ligandai.errors import LigandAIAuthError, LigandAICreditError, LigandAITierError
-from ligandai.types import BivalentTarget, LinkerConfig, ResidueRange, TargetGroup
+from ligandai.types import BivalentTarget, LinkerConfig, ReferenceGroup, ResidueRange, TargetGroup
 
 BASE = "http://api.ligandai.test"
 
@@ -97,8 +97,13 @@ def test_discovery_compare_groups(httpx_mock: HTTPXMock, client: LigandAI) -> No
         method="POST",
         json={"targetGroup": "Liver", "referenceGroups": [], "mode": "compare", "results": []},
     )
-    target = TargetGroup(name="Liver", samples=["LIVER_001"])
-    res = client.discovery.compare_groups(target_group=target)
+    # Geneset target + one reference: the shape the LIVE server accepts for
+    # compare mode. A legacy tissue-typed target with no references is now
+    # refused locally before the request (test_compare_group_shape_gate.py).
+    # [bd-LIGANDAI_ALPHA_V2-tom-D2]
+    target = TargetGroup(name="Liver", type="geneset", genes=["ALB", "APOB"])
+    ref = ReferenceGroup(name="brain", type="gtex", tissue="brain_cortex")
+    res = client.discovery.compare_groups(target_group=target, reference_groups=[ref])
     assert res.target_group == "Liver"
 
 
