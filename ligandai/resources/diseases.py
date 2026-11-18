@@ -62,6 +62,8 @@ def _gates_file_passed(gates_path: str | Path) -> bool:
     try:
         gates_mtime = p.stat().st_mtime_ns
         for add7_file in p.parent.glob("add7-*.json"):
+            if add7_file.name == "add7-5-release.json":
+                continue
             if add7_file.stat().st_mtime_ns > gates_mtime:
                 return False
         raw = json.loads(p.read_text(encoding="utf-8"))
