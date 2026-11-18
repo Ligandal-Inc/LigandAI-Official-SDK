@@ -101,4 +101,4 @@ benchmarks = admin_client.diseases.admin.benchmarks()
 
 ## Dataset Version Switch (`v2` Default, `v3` When Validated)
 
-The SDK defaults to dataset version `"v2"` (`DEFAULT_ATLAS_DATA_VERSION = "v2"`). Once the `"v3"` validation gates pass, callers can switch with one environment variable (`ATLAS_DATA_VERSION=v3`) or per-call `data_version="v3"`, and verify local gate status via `resolve_atlas_data_version("v3", gates_path="/path/to/gates.json")` (which falls back safely to `"v2"` if any gate has not passed).
+The SDK defaults to dataset version `"v3"` (`DEFAULT_ATLAS_DATA_VERSION = "v3"`, activated after all 36 post-Addendum-7 `v3/validation/gates.json` checks passed). Callers can override with one environment variable (`ATLAS_DATA_VERSION=v2` or `ATLAS_DATA_VERSION=v3`) or per-call `data_version="v2"`, and verify local gate status via `resolve_atlas_data_version("v3", gates_path="/path/to/gates.json")` (which falls back safely to `"v2"` if any gate has not passed).

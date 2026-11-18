@@ -66,6 +66,10 @@ def _gates_file_passed(gates_path: str | Path) -> bool:
                 continue
             if add7_file.stat().st_mtime_ns > gates_mtime:
                 return False
+        if p.parent.name == "validation":
+            for csv_file in p.parent.parent.glob("*.csv"):
+                if csv_file.stat().st_mtime_ns > gates_mtime:
+                    return False
         raw = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return False
@@ -152,7 +156,7 @@ def resolve_atlas_data_version(
 ) -> AtlasDataVersion:
     """Resolve the active Disease Atlas dataset version (``"v2"`` or ``"v3"``).
 
-    Defaults to :data:`DEFAULT_ATLAS_DATA_VERSION` (``"v2"``), overridable via
+    Defaults to :data:`DEFAULT_ATLAS_DATA_VERSION` (``"v3"``), overridable via
     the ``requested`` argument or ``ATLAS_DATA_VERSION`` /
     ``LIGANDAI_ATLAS_DATA_VERSION``. When ``"v3"`` is requested alongside a
     ``gates_path`` (or ``ATLAS_GATES_PATH``), ``gates.json`` must report passing

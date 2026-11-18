@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `MatrixWeights`), `intelligence`, `baskets`, `populations`, `ladders`,
   `geo`, and `benchmarks`, gated client-side on `SUPERADMIN_API_KEY_PREFIXES`
   (`lgai_sa_*`, `lgai_superadmin_*`) before sending any HTTP call.
-- **One-line `v2` -> `v3` dataset switch.** Added `DEFAULT_ATLAS_DATA_VERSION = "v2"`,
+- **One-line `v2` -> `v3` dataset switch.** Added `DEFAULT_ATLAS_DATA_VERSION = "v3"`,
   `ATLAS_DATA_VERSION` / `X-Atlas-Data-Version` support, and
   `resolve_atlas_data_version(..., gates_path=...)` with automatic fallback to `"v2"`
   until validation gates pass.

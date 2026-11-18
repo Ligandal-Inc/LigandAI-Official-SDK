@@ -5302,6 +5302,8 @@ class AdminBasketTotals(_LGModel):
     discounted_shared_cost_savings_usd_m: float = Field(
         default=0.0, alias="discountedSharedCostSavingsUsdM"
     )
+    rnpv_provisional: bool | None = Field(default=None, alias="rnpvProvisional")
+    rnpv_provisional_label: str | None = Field(default=None, alias="rnpvProvisionalLabel")
 
 
 class AdminBasketSummary(_LGModel):
@@ -5323,17 +5325,23 @@ class AdminBasketSummary(_LGModel):
     rnpv_low_usd_m: float | None = Field(default=None, alias="rnpvLowUsdM")
     rnpv_base_usd_m: float | None = Field(default=None, alias="rnpvBaseUsdM")
     rnpv_high_usd_m: float | None = Field(default=None, alias="rnpvHighUsdM")
+    rnpv_provisional: bool | None = Field(default=None, alias="rnpvProvisional")
+    rnpv_provisional_label: str | None = Field(default=None, alias="rnpvProvisionalLabel")
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
 class AdminBasketsResponse(_LGModel):
     data_version: str = Field(default="v2", alias="dataVersion")
+    rnpv_provisional: bool | None = Field(default=None, alias="rnpvProvisional")
+    rnpv_provisional_label: str | None = Field(default=None, alias="rnpvProvisionalLabel")
     baskets: list[AdminBasketSummary] = Field(default_factory=list)
     totals: AdminBasketTotals | None = None
 
 
 class AdminBasketDetailResponse(_LGModel):
     data_version: str = Field(default="v2", alias="dataVersion")
+    rnpv_provisional: bool | None = Field(default=None, alias="rnpvProvisional")
+    rnpv_provisional_label: str | None = Field(default=None, alias="rnpvProvisionalLabel")
     basket: AdminBasketSummary = Field(default_factory=AdminBasketSummary)
     contributions: list[dict[str, Any]] = Field(default_factory=list)
     cash_flows: list[dict[str, Any]] = Field(default_factory=list, alias="cashFlows")

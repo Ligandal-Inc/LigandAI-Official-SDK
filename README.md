@@ -36,7 +36,7 @@ design, structure prediction, scoring, and discovery.
 > endpoints (`matrix`, `intelligence`, `baskets`, `populations`, `ladders`,
 > `geo`, `benchmarks`) enforce `lgai_sa_*` / `lgai_superadmin_*` API-key role
 > checks client-side before dispatching any HTTP call. Dataset selection defaults
-> to `"v2"` (`DEFAULT_ATLAS_DATA_VERSION = "v2"`) with a single-variable switch
+> to `"v3"` (`DEFAULT_ATLAS_DATA_VERSION = "v3"`) with a single-variable override
 > to `"v3"` (`ATLAS_DATA_VERSION=v3`) guarded by `resolve_atlas_data_version`.
 >
 > 0.16.5 fixed H-SWAE capability response models (`extra="allow"` on the 22

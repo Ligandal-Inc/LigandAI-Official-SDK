@@ -1110,8 +1110,9 @@ def test_data_version_switch_and_v3_gates_fallback(
     monkeypatch.delenv("LIGANDAI_ATLAS_DATA_VERSION", raising=False)
     monkeypatch.delenv("ATLAS_GATES_PATH", raising=False)
 
-    assert DEFAULT_ATLAS_DATA_VERSION == "v2"
-    assert resolve_atlas_data_version() == "v2"
+    assert DEFAULT_ATLAS_DATA_VERSION == "v3"
+    assert resolve_atlas_data_version() == "v3"
+    assert resolve_atlas_data_version("v2") == "v2"
 
     failing_gates = tmp_path / "gates_fail.json"
     failing_gates.write_text(
