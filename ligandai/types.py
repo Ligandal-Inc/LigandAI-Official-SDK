@@ -4792,3 +4792,640 @@ class SpeciesEntitlement(_LGModel):
     org_granted: bool = Field(alias="orgGranted", default=False)
     species: list[str] = Field(default_factory=lambda: ["human"])
     default_species: str = Field(alias="defaultSpecies", default="human")
+
+
+# -- Disease Atlas (Public Biological Surface) --------------------------------
+
+
+class _AtlasPublicModel(_LGModel):
+    """Base for public ``/api/atlas/*`` models.
+
+    Configured with ``extra="ignore"`` so undeclared commercial, valuation,
+    epidemiology, or regulatory fields can never leak onto public biological
+    objects even if present in an upstream or mock dictionary.
+    """
+
+    model_config = ConfigDict(
+        extra="ignore",
+        populate_by_name=True,
+        str_strip_whitespace=True,
+        arbitrary_types_allowed=True,
+    )
+
+
+class AtlasCandidateExternalIds(_AtlasPublicModel):
+    mondo: str | None = None
+    orpha: str | None = None
+    omim: list[str] = Field(default_factory=list)
+
+
+class AtlasCandidateRef(_AtlasPublicModel):
+    identity_id: str = Field(default="", alias="identityId")
+    name: str = ""
+    primary_organ: str = Field(default="", alias="primaryOrgan")
+    genes: list[str] = Field(default_factory=list)
+    external_ids: AtlasCandidateExternalIds = Field(
+        default_factory=AtlasCandidateExternalIds, alias="externalIds"
+    )
+
+
+class AtlasExternalIds(_AtlasPublicModel):
+    mondo: str | None = None
+    orpha: str | None = None
+    omim: list[str] = Field(default_factory=list)
+    hgnc: list[str] = Field(default_factory=list)
+    icd10: list[str] = Field(default_factory=list)
+    icd11: list[str] = Field(default_factory=list)
+    medgen: list[str] = Field(default_factory=list)
+    record_ids: list[str] = Field(default_factory=list, alias="recordIds")
+
+
+class AtlasEvidenceItem(_AtlasPublicModel):
+    type: str = ""
+    summary: str = ""
+    source: str = ""
+    citation_url: str | None = Field(default=None, alias="citationUrl")
+
+
+class AtlasCounts(_AtlasPublicModel):
+    diseases: int = 0
+    records: int = 0
+    genes: int = 0
+    organs: int = 0
+    tissues: int = 0
+    cell_types: int = Field(default=0, alias="cellTypes")
+    targets: int = 0
+
+
+class AtlasOrganSummary(_AtlasPublicModel):
+    slug: str = ""
+    label: str = ""
+    disease_count: int = Field(default=0, alias="diseaseCount")
+    top_tissues: list[str] = Field(default_factory=list, alias="topTissues")
+
+
+class AtlasFeaturedExample(_AtlasPublicModel):
+    query: str = ""
+    identity_id: str = Field(default="", alias="identityId")
+    name: str = ""
+    primary_tissue: str = Field(default="", alias="primaryTissue")
+    top_target: str = Field(default="", alias="topTarget")
+
+
+class AtlasMeta(_AtlasPublicModel):
+    """Bootstrap metadata from ``GET /api/atlas/meta``."""
+
+    data_version: str = Field(default="v2", alias="dataVersion")
+    requested_version: str = Field(default="v2", alias="requestedVersion")
+    schema_version: str = Field(default="", alias="schemaVersion")
+    gates_status: str = Field(default="not_required_for_v2", alias="gatesStatus")
+    build_hash: str = Field(default="", alias="buildHash")
+    built_at: str = Field(default="", alias="builtAt")
+    counts: AtlasCounts = Field(default_factory=AtlasCounts)
+    organs: list[AtlasOrganSummary] = Field(default_factory=list)
+    featured_examples: list[AtlasFeaturedExample] = Field(
+        default_factory=list, alias="featuredExamples"
+    )
+
+
+class AtlasPrimaryTissueRef(_AtlasPublicModel):
+    tissue_key: str = Field(default="", alias="tissueKey")
+    label: str = ""
+    gtex_site: str | None = Field(default=None, alias="gtexSite")
+    uberon_id: str | None = Field(default=None, alias="uberonId")
+
+
+class AtlasTopTargetPreview(_AtlasPublicModel):
+    gene: str = ""
+    localization: str = ""
+    confidence_level: str = Field(default="medium", alias="confidenceLevel")
+
+
+class AtlasDiseaseSummary(_AtlasPublicModel):
+    """Public disease summary returned by ``GET /api/atlas/diseases/search``."""
+
+    id: int | str | None = None
+    identity_id: str = Field(default="", alias="identityId")
+    slug: str = ""
+    name: str = Field(default="", validation_alias=AliasChoices("name", "condition"))
+    matched_alias: str | None = Field(default=None, alias="matchedAlias")
+    match_type: str | None = Field(default=None, alias="matchType")
+    primary_organ: str = Field(default="", alias="primaryOrgan")
+    therapeutic_primary_organ: str = Field(
+        default="", alias="therapeuticPrimaryOrgan"
+    )
+    organs: list[str] = Field(default_factory=list)
+    genes: list[str] = Field(default_factory=list)
+    gene: str | None = None
+    category: str | None = None
+    rarity_class: str = Field(default="rare_genetic", alias="rarityClass")
+    rarity_label: str = Field(default="", alias="rarityLabel")
+    inheritance: str | None = None
+    external_ids: AtlasExternalIds = Field(
+        default_factory=AtlasExternalIds, alias="externalIds"
+    )
+    primary_tissue: AtlasPrimaryTissueRef | None = Field(
+        default=None, alias="primaryTissue"
+    )
+    top_target_preview: AtlasTopTargetPreview | None = Field(
+        default=None, alias="topTargetPreview"
+    )
+
+    @model_validator(mode="after")
+    def _sync_identity_and_genes(self) -> AtlasDiseaseSummary:
+        if not self.identity_id and self.id is not None:
+            self.identity_id = str(self.id)
+        if self.id is None and self.identity_id:
+            self.id = self.identity_id
+        if self.gene is None and self.genes:
+            self.gene = self.genes[0]
+        if self.gene and not self.genes:
+            self.genes = [self.gene]
+        return self
+
+
+class AtlasSearchResponse(_AtlasPublicModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    query: str = ""
+    total_estimate: int = Field(default=0, alias="totalEstimate")
+    next_cursor: str | None = Field(default=None, alias="nextCursor")
+    took_ms: float = Field(default=0.0, alias="tookMs")
+    items: list[AtlasDiseaseSummary] = Field(default_factory=list)
+
+
+class AtlasMutationSummary(_AtlasPublicModel):
+    pathogenic_variant_count: int | None = Field(
+        default=None, alias="pathogenicVariantCount"
+    )
+    example_protein_variants: list[str] = Field(
+        default_factory=list, alias="exampleProteinVariants"
+    )
+
+
+class AtlasTissuesSummary(_AtlasPublicModel):
+    organ_count: int = Field(default=0, alias="organCount")
+    tissue_count: int = Field(default=0, alias="tissueCount")
+    cell_type_count: int = Field(default=0, alias="cellTypeCount")
+    primary_tissues: list[str] = Field(default_factory=list, alias="primaryTissues")
+
+
+class AtlasDiseaseDetail(AtlasDiseaseSummary):
+    """Public disease detail from ``GET /api/atlas/diseases/{id}``."""
+
+    aliases: list[str] = Field(default_factory=list)
+    onset: str | None = None
+    definition: str | None = None
+    allelic_conditions: list[str] = Field(
+        default_factory=list, alias="allelicConditions"
+    )
+    manifestation_categories: list[str] = Field(
+        default_factory=list, alias="manifestationCategories"
+    )
+    mutation_summary: AtlasMutationSummary = Field(
+        default_factory=AtlasMutationSummary, alias="mutationSummary"
+    )
+    tissues_summary: AtlasTissuesSummary = Field(
+        default_factory=AtlasTissuesSummary, alias="tissuesSummary"
+    )
+    target_count: int = Field(default=0, alias="targetCount")
+    public_sources: list[str] = Field(default_factory=list, alias="publicSources")
+
+
+class AtlasCellTargetExpression(_AtlasPublicModel):
+    gene: str = ""
+    ntpm: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("nTPM", "ntpm"),
+        serialization_alias="nTPM",
+    )
+    specificity: float | None = None
+
+
+class AtlasCellType(_AtlasPublicModel):
+    cell_key: str = Field(default="", alias="cellKey")
+    label: str = ""
+    cl_id: str | None = Field(default=None, alias="clId")
+    hpa_cell_type: str | None = Field(default=None, alias="hpaCellType")
+    targetable: bool = True
+    role_in_disease: str = Field(default="", alias="roleInDisease")
+    top_expressing_targets: list[AtlasCellTargetExpression] = Field(
+        default_factory=list, alias="topExpressingTargets"
+    )
+
+
+class AtlasHealthyDatasetRef(_AtlasPublicModel):
+    accession: str = ""
+    title: str = ""
+    sample_count: int | None = Field(default=None, alias="sampleCount")
+    url: str = ""
+
+
+class AtlasDiseaseTissue(_AtlasPublicModel):
+    """Tissue hierarchy entry from ``GET /api/atlas/diseases/{id}/tissues``."""
+
+    tissue_key: str = Field(default="", alias="tissueKey")
+    label: str = ""
+    organ: str = ""
+    role: str = "therapeutic_primary"
+    role_description: str = Field(default="", alias="roleDescription")
+    gtex_site: str | None = Field(default=None, alias="gtexSite")
+    hpa_tissue: str | None = Field(default=None, alias="hpaTissue")
+    uberon_id: str | None = Field(default=None, alias="uberonId")
+    crosswalk_ids: list[str] = Field(default_factory=list, alias="crosswalkIds")
+    cells: list[AtlasCellType] = Field(default_factory=list)
+    healthy_reference_datasets: list[AtlasHealthyDatasetRef] = Field(
+        default_factory=list, alias="healthyReferenceDatasets"
+    )
+    target_count: int = Field(default=0, alias="targetCount")
+    evidence: list[AtlasEvidenceItem] = Field(default_factory=list)
+
+
+class AtlasDiseaseTissuesResponse(_AtlasPublicModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    identity_id: str = Field(default="", alias="identityId")
+    disease_name: str = Field(default="", alias="diseaseName")
+    matched_tissue_hint: str | None = Field(default=None, alias="matchedTissueHint")
+    took_ms: float = Field(default=0.0, alias="tookMs")
+    tissues: list[AtlasDiseaseTissue] = Field(default_factory=list)
+
+
+class StartCampaignPayload(_AtlasPublicModel):
+    gene: str = ""
+    target_label: str = Field(default="", alias="targetLabel")
+    disease_id: str = Field(default="", alias="diseaseId")
+    disease_name: str = Field(default="", alias="diseaseName")
+    tissue: str | None = None
+    cell_type: str | None = Field(default=None, alias="cellType")
+    uniprot_id: str | None = Field(default=None, alias="uniprotId")
+    preferred_pdb_id: str | None = Field(default=None, alias="preferredPdbId")
+    localization: str = ""
+    studio_url: str = Field(default="", alias="studioUrl")
+
+
+class TargetScoreBreakdown(_AtlasPublicModel):
+    genetic_causality: float = Field(default=0.0, alias="geneticCausality")
+    tissue_expression_specificity: float = Field(
+        default=0.0, alias="tissueExpressionSpecificity"
+    )
+    surface_accessibility: float = Field(default=0.0, alias="surfaceAccessibility")
+    druggability: float = 0.0
+    ligandai_structure_coverage: float = Field(
+        default=0.0, alias="ligandaiStructureCoverage"
+    )
+
+
+class TargetExpressionProfile(_AtlasPublicModel):
+    primary_tissue: str | None = Field(default=None, alias="primaryTissue")
+    gtex_mean_tpm: float | None = Field(default=None, alias="gtexMeanTpm")
+    hpa_tissue_ntpm: float | None = Field(default=None, alias="hpaTissueNtpm")
+    top_cell_type: str | None = Field(default=None, alias="topCellType")
+    top_cell_cl_id: str | None = Field(default=None, alias="topCellClId")
+    hpa_cell_ntpm: float | None = Field(default=None, alias="hpaCellNtpm")
+    tissue_specificity_ratio: float | None = Field(
+        default=None, alias="tissueSpecificityRatio"
+    )
+
+
+class DeliveryReceptorRef(_AtlasPublicModel):
+    gene: str = ""
+    label: str = ""
+    mechanism: str = ""
+    cell_types: list[str] = Field(default_factory=list, alias="cellTypes")
+
+
+class TargetStructureCoverage(_AtlasPublicModel):
+    has_experimental_pdb: bool = Field(default=False, alias="hasExperimentalPdb")
+    representative_pdb_ids: list[str] = Field(
+        default_factory=list, alias="representativePdbIds"
+    )
+    has_alphafold: bool = Field(default=False, alias="hasAlphaFold")
+    in_surfaceome_collection: bool = Field(
+        default=False, alias="inSurfaceomeCollection"
+    )
+
+
+class RecommendedApproach(_AtlasPublicModel):
+    summary: str = ""
+    delivery_summary: str = Field(default="", alias="deliverySummary")
+
+
+class TargetConfidence(_AtlasPublicModel):
+    level: str = "medium"
+    score: float = 0.0
+    rationale: str = ""
+
+
+class AtlasRankedTarget(_AtlasPublicModel):
+    """Ranked biological target from ``GET /api/atlas/diseases/{id}/targets``."""
+
+    rank: int = 1
+    gene: str = ""
+    hgnc_id: str | None = Field(default=None, alias="hgncId")
+    ensembl_id: str | None = Field(default=None, alias="ensemblId")
+    uniprot_id: str | None = Field(default=None, alias="uniprotId")
+    protein_name: str = Field(default="", alias="proteinName")
+    target_role: str = Field(default="", alias="targetRole")
+    role_label: str = Field(default="", alias="roleLabel")
+    localization: str = ""
+    is_surface_exposed: bool = Field(default=False, alias="isSurfaceExposed")
+    is_receptor: bool = Field(default=False, alias="isReceptor")
+    is_secreted: bool = Field(default=False, alias="isSecreted")
+    overall_score: float = Field(default=0.0, alias="overallScore")
+    score_breakdown: TargetScoreBreakdown = Field(
+        default_factory=TargetScoreBreakdown, alias="scoreBreakdown"
+    )
+    expression: TargetExpressionProfile = Field(default_factory=TargetExpressionProfile)
+    delivery_receptors: list[DeliveryReceptorRef] = Field(
+        default_factory=list, alias="deliveryReceptors"
+    )
+    structure_coverage: TargetStructureCoverage = Field(
+        default_factory=TargetStructureCoverage, alias="structureCoverage"
+    )
+    recommended_approach: RecommendedApproach = Field(
+        default_factory=RecommendedApproach, alias="recommendedApproach"
+    )
+    confidence: TargetConfidence = Field(default_factory=TargetConfidence)
+    evidence: list[AtlasEvidenceItem] = Field(default_factory=list)
+    start_campaign: StartCampaignPayload | None = Field(
+        default=None, alias="startCampaign"
+    )
+
+
+class TargetQueryFilters(_AtlasPublicModel):
+    tissue: str | None = None
+    cell_type: str | None = Field(default=None, alias="cellType")
+    surface_only: bool = Field(default=False, alias="surfaceOnly")
+    top_k: int = Field(default=25, alias="topK")
+
+
+class AtlasDiseaseTargetsResponse(_AtlasPublicModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    identity_id: str = Field(default="", alias="identityId")
+    disease_name: str = Field(default="", alias="diseaseName")
+    filters: TargetQueryFilters = Field(default_factory=TargetQueryFilters)
+    status: str = "ok"
+    empty_reason: str | None = Field(default=None, alias="emptyReason")
+    took_ms: float = Field(default=0.0, alias="tookMs")
+    targets: list[AtlasRankedTarget] = Field(default_factory=list)
+
+
+class DiseaseMap(_AtlasPublicModel):
+    """One-call biological map from ``POST /api/atlas/map`` or ``GET /api/atlas/diseases/{id}/map``."""
+
+    data_version: str = Field(default="v2", alias="dataVersion")
+    query: str = ""
+    resolved_via: str = Field(default="", alias="resolvedVia")
+    matched_tissue_filter: str | None = Field(
+        default=None, alias="matchedTissueFilter"
+    )
+    disease: AtlasDiseaseDetail = Field(default_factory=AtlasDiseaseDetail)
+    tissues: list[AtlasDiseaseTissue] = Field(default_factory=list)
+    cells: list[AtlasCellType] = Field(default_factory=list)
+    targets: list[AtlasRankedTarget] = Field(default_factory=list)
+    receptors: list[AtlasRankedTarget] = Field(default_factory=list)
+    evidence: list[AtlasEvidenceItem] = Field(default_factory=list)
+    start_campaign: StartCampaignPayload | None = Field(
+        default=None, alias="startCampaign"
+    )
+    took_ms: float = Field(default=0.0, alias="tookMs")
+
+
+AtlasMapResponse = DiseaseMap
+
+
+# -- Disease Atlas (Superadmin-Only Intelligence Surface) ---------------------
+
+
+class MatrixWeights(_LGModel):
+    modality_ease: float = 0.0
+    delivery_precedent: float = 0.0
+    biology: float = 0.0
+    us_market: float = 0.0
+    competition_headroom: float = 0.0
+    time_cost: float = 0.0
+    expansion: float = 0.0
+    regulatory: float = 0.0
+
+
+class MatrixCompetition(_LGModel):
+    approved_ingredient_combinations: int | None = Field(
+        default=None, alias="approvedIngredientCombinations"
+    )
+    active_phase23_trials: int | None = Field(
+        default=None, alias="activePhase23Trials"
+    )
+    competition_level: str = Field(default="", alias="competitionLevel")
+    leading_label_matches: str = Field(default="", alias="leadingLabelMatches")
+    leading_trial_agents: str = Field(default="", alias="leadingTrialAgents")
+    best_in_class_gap: str = Field(default="", alias="bestInClassGap")
+
+
+class MatrixDesignations(_LGModel):
+    orphan: str = ""
+    fast_track: str = ""
+    breakthrough: str = ""
+    rmat: str = ""
+    rare_pediatric_voucher: str = ""
+    priority_review: str = ""
+    eu_prime: str = ""
+
+
+class MatrixCommercial(_LGModel):
+    us_market_benchmark_usd: float | None = Field(
+        default=None, alias="usMarketBenchmarkUsd"
+    )
+    us_market_basis: str = Field(default="", alias="usMarketBasis")
+    comparator_scope: str = Field(default="", alias="comparatorScope")
+    observed_us_comparator: str = Field(default="", alias="observedUsComparator")
+    observed_us_comparator_sales_m: float | None = Field(
+        default=None, alias="observedUsComparatorSalesM"
+    )
+    observed_period: str = Field(default="", alias="observedPeriod")
+    sales_source: str = Field(default="", alias="salesSource")
+    years_to_human_data: float | None = Field(default=None, alias="yearsToHumanData")
+    cost_to_human_data_usd_m: float | None = Field(
+        default=None, alias="costToHumanDataUsdM"
+    )
+    route: str = ""
+
+
+class MatrixExpansionLadder(_LGModel):
+    ladder_id: str | None = Field(default=None, alias="ladderId")
+    downstream: str | None = None
+    downstream_us_sales_m: float | None = Field(
+        default=None, alias="downstreamUsSalesM"
+    )
+    ladder_membership: str | None = Field(default=None, alias="ladderMembership")
+
+
+class AdminMatrixRow(_LGModel):
+    """Superadmin decision-matrix row from ``/api/admin/atlas/matrix*``."""
+
+    identity_id: str = Field(default="", alias="identityId")
+    disease: str = ""
+    record_ids: list[str] = Field(default_factory=list, alias="recordIds")
+    gene: str = ""
+    organ: str = ""
+    rarity: str = ""
+    modality: str = ""
+    score: float = 0.0
+    custom_score: float | None = Field(default=None, alias="customScore")
+    components: MatrixWeights = Field(default_factory=MatrixWeights)
+    competition: MatrixCompetition = Field(default_factory=MatrixCompetition)
+    designations: MatrixDesignations = Field(default_factory=MatrixDesignations)
+    commercial: MatrixCommercial = Field(default_factory=MatrixCommercial)
+    expansion_ladder: MatrixExpansionLadder = Field(
+        default_factory=MatrixExpansionLadder, alias="expansionLadder"
+    )
+    imputed_fields: list[str] = Field(default_factory=list, alias="imputedFields")
+    confidence: str = ""
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminMatrixResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    total_count: int = Field(
+        default=0, validation_alias=AliasChoices("totalCount", "total", "total_count")
+    )
+    next_cursor: str | None = Field(default=None, alias="nextCursor")
+    active_weights: MatrixWeights | None = Field(default=None, alias="activeWeights")
+    took_ms: float = Field(default=0.0, alias="tookMs")
+    items: list[AdminMatrixRow] = Field(
+        default_factory=list, validation_alias=AliasChoices("items", "rows")
+    )
+
+
+class AdminBasketTotals(_LGModel):
+    rnpv_low_usd_m: float = Field(default=0.0, alias="rnpvLowUsdM")
+    rnpv_base_usd_m: float = Field(default=0.0, alias="rnpvBaseUsdM")
+    rnpv_high_usd_m: float = Field(default=0.0, alias="rnpvHighUsdM")
+    discounted_shared_cost_savings_usd_m: float = Field(
+        default=0.0, alias="discountedSharedCostSavingsUsdM"
+    )
+
+
+class AdminBasketSummary(_LGModel):
+    """Superadmin organ basket rNPV summary from ``/api/admin/atlas/baskets``."""
+
+    organ: str = ""
+    lead_disease: str = Field(default="", alias="leadDisease")
+    unique_indications: int = Field(default=0, alias="uniqueIndications")
+    shared_route_additions: int = Field(default=0, alias="sharedRouteAdditions")
+    allocated_market_proxy_usd_m: float | None = Field(
+        default=None, alias="allocatedMarketProxyUsdM"
+    )
+    allocated_peak_sales_usd_m: float | None = Field(
+        default=None, alias="allocatedPeakSalesUsdM"
+    )
+    discounted_shared_cost_savings_usd_m: float | None = Field(
+        default=None, alias="discountedSharedCostSavingsUsdM"
+    )
+    rnpv_low_usd_m: float | None = Field(default=None, alias="rnpvLowUsdM")
+    rnpv_base_usd_m: float | None = Field(default=None, alias="rnpvBaseUsdM")
+    rnpv_high_usd_m: float | None = Field(default=None, alias="rnpvHighUsdM")
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminBasketsResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    baskets: list[AdminBasketSummary] = Field(default_factory=list)
+    totals: AdminBasketTotals | None = None
+
+
+class AdminBasketDetailResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    basket: AdminBasketSummary = Field(default_factory=AdminBasketSummary)
+    contributions: list[dict[str, Any]] = Field(default_factory=list)
+    cash_flows: list[dict[str, Any]] = Field(default_factory=list, alias="cashFlows")
+
+
+class AdminPopulationRecord(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    identity_id: str = Field(default="", alias="identityId")
+    population: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminPopulationsResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    total_count: int = Field(
+        default=0, validation_alias=AliasChoices("totalCount", "count", "total_count")
+    )
+    next_cursor: str | None = Field(default=None, alias="nextCursor")
+    items: list[dict[str, Any]] = Field(
+        default_factory=list, validation_alias=AliasChoices("items", "populations")
+    )
+
+
+class AdminDesignationDossier(_LGModel):
+    flags: dict[str, str] = Field(default_factory=dict)
+    criteria: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AdminLadderDossier(_LGModel):
+    summary: dict[str, Any] = Field(default_factory=dict)
+    members: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AdminDiseaseIntelligence(_LGModel):
+    """Full superadmin dossier from ``GET /api/admin/atlas/diseases/{id}/intelligence``."""
+
+    data_version: str = Field(default="v2", alias="dataVersion")
+    identity_id: str = Field(default="", alias="identityId")
+    disease: AtlasDiseaseDetail = Field(default_factory=AtlasDiseaseDetail)
+    matrix: AdminMatrixRow | None = None
+    matrix_by_record: list[dict[str, Any]] = Field(
+        default_factory=list, alias="matrixByRecord"
+    )
+    valuation_inputs: dict[str, Any] | None = Field(
+        default=None, alias="valuationInputs"
+    )
+    populations: dict[str, Any] | None = None
+    basket_contributions: list[dict[str, Any]] = Field(
+        default_factory=list, alias="basketContributions"
+    )
+    basket_cash_flows: list[dict[str, Any]] = Field(
+        default_factory=list, alias="basketCashFlows"
+    )
+    designations: AdminDesignationDossier = Field(
+        default_factory=AdminDesignationDossier
+    )
+    ladder: AdminLadderDossier | None = None
+    disease_geo_datasets: list[dict[str, Any]] = Field(
+        default_factory=list, alias="diseaseGeoDatasets"
+    )
+    geo_coverage: list[dict[str, Any]] = Field(default_factory=list, alias="geoCoverage")
+
+
+class AdminLadderEntry(_LGModel):
+    ladder_id: str = Field(default="", alias="ladderId")
+    organ: str = ""
+    summary: dict[str, Any] = Field(default_factory=dict)
+    members: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AdminLaddersResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    ladders: list[AdminLadderEntry] = Field(default_factory=list)
+
+
+class AdminGeoResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    identity_id: str = Field(default="", alias="identityId")
+    disease_tissue_datasets: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("diseaseTissueDatasets", "datasets", "disease_tissue_datasets"),
+    )
+    geo_coverage: list[dict[str, Any]] = Field(default_factory=list, alias="geoCoverage")
+    healthy_reference_datasets: list[AtlasHealthyDatasetRef] = Field(
+        default_factory=list, alias="healthyReferenceDatasets"
+    )
+
+
+class AdminBenchmarksResponse(_LGModel):
+    data_version: str = Field(default="v2", alias="dataVersion")
+    sales_benchmarks: list[dict[str, Any]] = Field(
+        default_factory=list, alias="salesBenchmarks"
+    )
+    designation_criteria: list[dict[str, Any]] = Field(
+        default_factory=list, alias="designationCriteria"
+    )

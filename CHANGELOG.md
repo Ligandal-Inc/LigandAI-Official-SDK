@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-18
+
 ### Added
 
+- **Disease Atlas public biological surface (`client.diseases` and `client.map`).**
+  Added typed sync and async methods against `/api/atlas/*`:
+  `diseases.meta()`, `diseases.search(q, ...)` + `diseases.search_page(...)`,
+  `diseases.get(id)`, `diseases.tissues(id, ...)` + `diseases.tissues_response(...)`,
+  `diseases.targets(id, tissue=None, top_k=..., ...)` + `diseases.targets_response(...)`,
+  and one-call `diseases.map(disease, ...)` (plus top-level `client.map(...)` and
+  `client.map_disease(...)`) returning `{tissues, cells, receptors, targets, evidence, start_campaign}`.
+  Public Pydantic models enforce strict non-leakage (`extra="ignore"` with zero
+  commercial, valuation, rNPV, comparator, population, competition, or regulatory
+  designation fields). Added `LigandAIAmbiguousDisease` (HTTP 409) carrying
+  `.query` and `.candidates` for multi-hit disambiguation.
+- **Superadmin-gated Disease Atlas intelligence (`client.diseases.admin`).**
+  Added `matrix` (`GET /api/admin/atlas/matrix` and `POST /api/admin/atlas/matrix/rerank`
+  with `MatrixWeights`), `intelligence`, `baskets`, `populations`, `ladders`,
+  `geo`, and `benchmarks`, gated client-side on `SUPERADMIN_API_KEY_PREFIXES`
+  (`lgai_sa_*`, `lgai_superadmin_*`) before sending any HTTP call.
+- **One-line `v2` -> `v3` dataset switch.** Added `DEFAULT_ATLAS_DATA_VERSION = "v2"`,
+  `ATLAS_DATA_VERSION` / `X-Atlas-Data-Version` support, and
+  `resolve_atlas_data_version(..., gates_path=...)` with automatic fallback to `"v2"`
+  until validation gates pass.
 - **Generator model `v6.5.24`**, now the platform default. A receptor-conditioned
   model with a 65-channel per-residue receptor feature space; supports the four
   guidance heads and scaffold / variable-segment masks and does not take a CFG

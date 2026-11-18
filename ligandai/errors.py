@@ -619,6 +619,31 @@ class LigandAIAmbiguousTarget(LigandAIError):
         return base + "\n" + "\n".join(lines)
 
 
+class LigandAIAmbiguousDisease(LigandAIError):
+    """409 — multiple distinct diseases match the requested query without an unambiguous primary condition.
+
+    Attributes
+    ----------
+    query : str | None
+        The ambiguous disease query as sent.
+    candidates : list[dict[str, Any]]
+        Candidate disease entries returned by ``/api/atlas/*`` (each carrying
+        ``identityId``, ``name``, ``primaryOrgan``, ``genes``, and ``externalIds``).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        query: str | None = None,
+        candidates: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.query = query
+        self.candidates: list[dict[str, Any]] = list(candidates or [])
+
+
 class LigandAINotFoundError(LigandAIError):
     """404 — resource (gene, complex, job, etc.) not found."""
 
@@ -674,7 +699,7 @@ class LigandAIValidationError(LigandAIError):
         self,
         message: str,
         *,
-        errors: list[dict[str, Any]] | None = None,
+        errors: list[dict[str, Any]] | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(message, **kwargs)
@@ -1617,19 +1642,26 @@ def error_from_response(
     # server gave us no parseable fields, the raw body IS the message: it is
     # strictly more informative than a status restatement, and it is the only
     # place a rewritten-but-readable explanation can survive.
+    nested_err: Mapping[str, Any] = (
+        payload.get("error") if isinstance(payload.get("error"), Mapping) else {}
+    )
+    raw_err_str: str | None = (
+        payload.get("error") if isinstance(payload.get("error"), str) else None
+    )
     message = (
         payload.get("message")
-        or payload.get("error")
+        or nested_err.get("message")
+        or raw_err_str
         or excerpt
         or f"HTTP {status_code}"
     )
-    code = payload.get("code")
+    code = payload.get("code") or nested_err.get("code")
 
     common: dict[str, Any] = {
         "code": code,
         "status_code": status_code,
         "request_id": request_id,
-        "response": payload,
+        "response": dict(payload) if isinstance(payload, Mapping) else None,
     }
 
     # ⛔ [bd-dre-3fduj] Was the responder ours at all? A Cloudflare Bot Fight
@@ -1664,12 +1696,20 @@ def error_from_response(
     # status dispatch because a bare 409 would otherwise fall through to the
     # generic conflict handling and the `candidates` array — the only thing that
     # makes this refusal answerable — would be thrown away at the raise.
-    if (payload.get("error") == "ambiguous_target_name"
+    if (raw_err_str == "ambiguous_target_name"
             or payload.get("code") == "ambiguous_target_name"):
         return LigandAIAmbiguousTarget(
             message,
             target_name=payload.get("targetName") or payload.get("target_name"),
             candidates=payload.get("candidates") or [],
+            **common,
+        )
+
+    if code == "ambiguous_disease" or raw_err_str == "ambiguous_disease":
+        return LigandAIAmbiguousDisease(
+            message,
+            query=nested_err.get("query") or payload.get("query"),
+            candidates=list(nested_err.get("candidates") or payload.get("candidates") or []),
             **common,
         )
 
@@ -1708,7 +1748,7 @@ def error_from_response(
         #   - insufficient credits (per-operation credit check) → LigandAICreditError
         # Discriminate by the `error` field so the SDK raises the most informative
         # subclass; both still satisfy `isinstance(e, LigandAIError)`.
-        err_kind = (payload.get("error") or "").lower()
+        err_kind = (raw_err_str or "").lower()
         if err_kind == "upgrade_required" or payload.get("tier_required"):
             return LigandAIUpgradeRequired(
                 message,
@@ -1784,7 +1824,7 @@ def error_from_response(
         # Only synthesize a tier error if the server actually says it's a tier
         # problem. Otherwise (pilot allowlists, ownership checks, legal-acceptance
         # gates) raise an honest LigandAIForbidden carrying the server's message.
-        err_kind_403 = (payload.get("error") or "").lower()
+        err_kind_403 = (raw_err_str or "").lower()
         is_tier_error = bool(
             payload.get("requiredTier")
             or payload.get("required_tier")
@@ -1793,7 +1833,7 @@ def error_from_response(
             or payload.get("current_tier")
             or payload.get("upgrade_required")
             or err_kind_403 in {"tier_required", "upgrade_required"}
-            or (payload.get("code") in {"BASIC_TIER_REQUIRED", "PRO_TIER_REQUIRED", "ENTERPRISE_TIER_REQUIRED"})
+            or (code in {"BASIC_TIER_REQUIRED", "PRO_TIER_REQUIRED", "ENTERPRISE_TIER_REQUIRED"})
         )
         if is_tier_error:
             return LigandAITierError(
@@ -1868,11 +1908,11 @@ def error_from_response(
             message,
             reason=(
                 payload.get("error_code")
-                or payload.get("code")
+                or code
                 # Fall back to the `error` field (e.g. "payment_method_required",
                 # "pilot_restricted") when no explicit code is provided. These are
                 # short snake_case kinds, not user-facing prose.
-                or payload.get("error")
+                or raw_err_str
             ),
             **common,
         )
@@ -1897,7 +1937,7 @@ def error_from_response(
     if status_code == 422 or status_code == 400:
         return LigandAIValidationError(
             message,
-            errors=payload.get("errors") or payload.get("details"),
+            errors=payload.get("errors") or payload.get("details") or nested_err.get("details"),
             **common,
         )
     if status_code == 429:

@@ -24,20 +24,24 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.5** — **every H-SWAE capability call raised `ValidationError` in
-> 0.15.0 through 0.16.4.** The receipt models were `extra="forbid"`, so when the
-> platform added resolution and ranking bookkeeping, a correct production
-> payload was refused by the client for carrying fields it did not declare.
-> Measured against live production on 2026-10-15, the published 0.16.4 wheel
-> raised on 5 of 6 operations — 452 errors, **every one** of them
-> `extra_forbidden`, with zero type errors and zero missing fields. The server
-> output was right; the client threw it away. Response models are now
-> `extra="allow"`: a field the platform adds is kept and reachable, while a
-> wrong type, a missing required field and a non-object where a model belongs
-> all still raise. Caller **input** stays closed, so a typo still fails before
-> the request is sent. If you call `discovery.invoke_capability()` or any
-> `hswae.v1.*` / `hswae.v2.*` operation, upgrade — these capabilities are not
-> enterprise-gated and the break was total.
+> **v0.17.0** — **adds the Disease Atlas biological resolution surface
+> (`client.diseases.search`, `get`, `tissues`, `targets`, `meta`, and one-call
+> `client.map` / `client.diseases.map`) plus superadmin-gated commercial
+> intelligence (`client.diseases.admin`).** Public Disease Atlas models resolve
+> clinical abbreviations (`hATTR`, `CF`, `HoFH`), ontology IDs, causal genes, and
+> compound disease-plus-tissue phrases (`"Fabry kidney disease"`) into tissues,
+> targetable single-cell populations, ranked surface receptors, public GTEx/HPA
+> evidence, and `start_campaign` payloads while stripping any commercial,
+> valuation, rNPV, population, competition, or regulatory fields. Superadmin
+> endpoints (`matrix`, `intelligence`, `baskets`, `populations`, `ladders`,
+> `geo`, `benchmarks`) enforce `lgai_sa_*` / `lgai_superadmin_*` API-key role
+> checks client-side before dispatching any HTTP call. Dataset selection defaults
+> to `"v2"` (`DEFAULT_ATLAS_DATA_VERSION = "v2"`) with a single-variable switch
+> to `"v3"` (`ATLAS_DATA_VERSION=v3`) guarded by `resolve_atlas_data_version`.
+>
+> 0.16.5 fixed H-SWAE capability response models (`extra="allow"` on the 22
+> server-response models while keeping caller input closed) so additive server
+> resolution/ranking fields no longer raise `ValidationError`.
 >
 > 0.16.4 added first-class `bind_ph` / `release_ph` on `peptides.generate` and
 > the `ligandai.ph` helpers.
@@ -98,6 +102,18 @@ design, structure prediction, scoring, and discovery.
 > it is yanked.)
 >
 > See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+## Disease Atlas (`client.diseases` & `client.map`)
+
+Resolve diseases, clinical abbreviations (`hATTR`, `CF`, `HoFH`), ontology IDs, or compound phrases (`"Fabry kidney disease"`) into tissues, single-cell populations, ranked surface receptors, and binder campaign handoffs in one call (see [docs/disease_atlas.md](docs/disease_atlas.md)):
+
+```python
+mapped = client.map("Fabry kidney disease", surface_only=True, top_k=10)
+for receptor in mapped.receptors:
+    print(receptor.rank, receptor.gene, receptor.overall_score, receptor.start_campaign.preferred_pdb_id)
+```
+
+Superadmin-only commercial intelligence (`client.diseases.admin.matrix`, `baskets`, `populations`, `intelligence`, `ladders`, `geo`, `benchmarks`) requires a `lgai_sa_*` or `lgai_superadmin_*` key and fails client-side before HTTP for any other role.
 
 ## pH-switch objectives (`bind_ph` / `release_ph`)
 

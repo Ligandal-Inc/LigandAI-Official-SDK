@@ -42,6 +42,7 @@ from ligandai._constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_SECS,
     FEATURE_MIN_TIER,
+    SUPERADMIN_API_KEY_PREFIXES,
     TIER_FOLD_LIMITS,
     TIER_GENERATION_LIMITS,
     TIER_GPU_SLOTS,
@@ -100,6 +101,7 @@ from ligandai.species import DEFAULT_SPECIES, Species, normalize_species
 from ligandai.types import (
     ClientSessionUsage,
     Credits,
+    DiseaseMap,
     SpeciesEntitlement,
     UnlimitedCredits,
     User,
@@ -293,6 +295,9 @@ def _detect_tier(api_key: str | None) -> Tier | None:
     """
     if not api_key:
         return None
+    for sa_prefix in SUPERADMIN_API_KEY_PREFIXES:
+        if api_key.startswith(sa_prefix):
+            return "superadmin"
     for tier, prefix in API_KEY_PREFIXES.items():
         if api_key.startswith(prefix):
             return tier
@@ -689,7 +694,7 @@ class LigandAI(_ClientCommon):
         # render identically. [bd-dre-rp11j.9.1]
         self.maturation: Maturation = Maturation(self._transport, client=self)
         self.charts: Charts = Charts(self._transport)
-        self.diseases: Diseases = Diseases(self._transport)
+        self.diseases: Diseases = Diseases(self._transport, client=self)
         self.discovery: Discovery = Discovery(self._transport, client=self)
         self.folds: Folds = Folds(self._transport, client=self)
         # Ensemble co-fold: N peptides x M engines, priced before it runs,
@@ -1061,6 +1066,14 @@ class LigandAI(_ClientCommon):
         """Hit ``GET /api/healthz`` — useful for connectivity checks."""
         return self._transport.request("GET", "/api/healthz") or {}
 
+    def map_disease(self, disease: str, **kwargs: Any) -> DiseaseMap:
+        """One-call Disease Atlas mapping (delegates to :meth:`Diseases.map`)."""
+        return self.diseases.map(disease, **kwargs)
+
+    def map(self, disease: str, **kwargs: Any) -> DiseaseMap:
+        """One-call Disease Atlas mapping alias for :meth:`Diseases.map`."""
+        return self.diseases.map(disease, **kwargs)
+
     def check_compatibility(self) -> list[Diagnostic]:
         """Ask the platform whether this SDK build is still current.
         [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
@@ -1159,7 +1172,7 @@ class AsyncLigandAI(_ClientCommon):
         # "campaign". [bd-dre-rp11j.9.1]
         self.maturation: AsyncMaturation = AsyncMaturation(self._transport, client=self)
         self.charts: AsyncCharts = AsyncCharts(self._transport)
-        self.diseases: AsyncDiseases = AsyncDiseases(self._transport)
+        self.diseases: AsyncDiseases = AsyncDiseases(self._transport, client=self)
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
         self.folds: AsyncFolds = AsyncFolds(self._transport, client=self)
         self.ensemble: AsyncEnsemble = AsyncEnsemble(self._transport, client=self)
@@ -1253,6 +1266,14 @@ class AsyncLigandAI(_ClientCommon):
 
     async def health(self) -> dict[str, Any]:
         return await self._transport.request("GET", "/api/healthz") or {}
+
+    async def map_disease(self, disease: str, **kwargs: Any) -> DiseaseMap:
+        """Async one-call Disease Atlas mapping (delegates to :meth:`AsyncDiseases.map`)."""
+        return await self.diseases.map(disease, **kwargs)
+
+    async def map(self, disease: str, **kwargs: Any) -> DiseaseMap:
+        """Async one-call Disease Atlas mapping alias for :meth:`AsyncDiseases.map`."""
+        return await self.diseases.map(disease, **kwargs)
 
     async def check_compatibility(self) -> list[Diagnostic]:
         """Async twin of :meth:`LigandAI.check_compatibility`."""
