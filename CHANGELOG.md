@@ -27,10 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `MatrixWeights`), `intelligence`, `baskets`, `populations`, `ladders`,
   `geo`, and `benchmarks`, gated client-side on `SUPERADMIN_API_KEY_PREFIXES`
   (`lgai_sa_*`, `lgai_superadmin_*`) before sending any HTTP call.
-- **One-line `v2` -> `v3` dataset switch.** Added `DEFAULT_ATLAS_DATA_VERSION = "v3"`,
-  `ATLAS_DATA_VERSION` / `X-Atlas-Data-Version` support, and
-  `resolve_atlas_data_version(..., gates_path=...)` with automatic fallback to `"v2"`
-  until validation gates pass.
+- **One-line `v2` -> `v3` dataset switch + gated `v4` readiness.** Added
+  `DEFAULT_ATLAS_DATA_VERSION = "v3"`, `ATLAS_DATA_VERSION` / `X-Atlas-Data-Version`
+  support, `resolve_atlas_data_version(..., gates_path=...)` supporting `"v2"`,
+  `"v3"`, and `"v4"` (failing closed to `"v3"` until `v4/validation/gates.json`
+  passes all gates and postdates `TASK_ADDENDUM8_LABEL_EXPANSION.md`), and
+  provisional basket rNPV tagging (`rnpv_provisional=True`,
+  `rnpv_provisional_label="provisional (pending v4)"` on `v2`/`v3`, turning off
+  automatically on `v4` while keeping standalone per-indication `rnpv_usd`
+  untouched). Extended `AdminMatrixRow` (`MatrixCommercial` + `MatrixPricing`)
+  and `AdminBenchmarksResponse` (`price_anchors`) for `v3` parity.
+- **Disease -> tissue -> cell -> marker graph & marker-value ranking (Addendum 8 §J, Gates 29 & 30).**
+  Added `diseases.map_disease_to_targets(disease, tissue=None, top_k=...)` (and
+  top-level `client.map_disease_to_targets(...)`) returning
+  `{tissues, cell_types, markers: [{marker, evidence, selectivity, n_diseases, patient_pop, price_per_drug, score}]}`
+  plus `client.markers.ranking(organ=None, platform_only=False)` (and
+  `client.diseases.markers.ranking(...)`) with per-tissue top lists across fine
+  `ligandai.com Studio dropdown` tissues, cross-disease platform markers,
+  read-only local CSV fixture support, and deterministic seeded reproducibility.
 - **Generator model `v6.5.24`**, now the platform default. A receptor-conditioned
   model with a 65-channel per-residue receptor feature space; supports the four
   guidance heads and scaffold / variable-segment masks and does not take a CFG

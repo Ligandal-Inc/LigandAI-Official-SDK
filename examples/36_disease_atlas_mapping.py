@@ -270,6 +270,118 @@ def _build_offline_transport() -> httpx.MockTransport:
                     "tookMs": 1.4,
                 },
             )
+        if path.endswith("/targets-graph"):
+            return httpx.Response(
+                200,
+                json={
+                    "dataVersion": "v4",
+                    "surface": "ligandai.com Studio dropdown",
+                    "query": "Fabry disease",
+                    "disease": {
+                        "identityId": "MONDO:0010526",
+                        "name": "Fabry disease",
+                        "derivedCoarseSystem": "Kidney",
+                    },
+                    "tissues": [
+                        {
+                            "fineBasketId": "tissue:kidney_cortex",
+                            "label": "Kidney cortex",
+                            "level": "tissue",
+                            "derivedCoarseSystem": "Kidney",
+                            "role": "therapeutic_primary",
+                            "evidence": "GTEx v8 Kidney-Cortex + HPA v24 renal tubule enrichment",
+                            "citation": "GTEx v8 / HPA v24",
+                        }
+                    ],
+                    "cell_types": [
+                        {
+                            "cellKey": "proximal_tubular_cells",
+                            "label": "Renal proximal tubular epithelial cells",
+                            "clId": "CL:0002306",
+                            "hpaCellType": "proximal tubular cells",
+                            "tissueFineBasketId": "tissue:kidney_cortex",
+                            "evidence": "Endocytic megalin expression on proximal tubule brush border",
+                            "citation": "Human Protein Atlas v24 (CL:0002306)",
+                        }
+                    ],
+                    "markers": [
+                        {
+                            "marker": "LRP2",
+                            "proteinName": "Low-density lipoprotein receptor-related protein 2 (Megalin)",
+                            "uniprotId": "P98164",
+                            "isReceptor": True,
+                            "isSurfaceExposed": True,
+                            "targetRole": "delivery_receptor",
+                            "is_platform_marker": True,
+                            "selectivity": 0.94,
+                            "n_diseases": 68,
+                            "patient_pop": 215000,
+                            "price_per_drug": 380000.0,
+                            "score": 0.892,
+                            "evidence": "Renal cortex endocytic uptake receptor enriched versus systemic GTEx tissues",
+                            "citations": ["HPA v24 / GTEx v8 Kidney-Cortex & PDB:8F7P"],
+                        }
+                    ],
+                    "edges": [],
+                    "tookMs": 1.1,
+                },
+            )
+        if path == "/api/atlas/markers/ranking":
+            return httpx.Response(
+                200,
+                json={
+                    "dataVersion": "v4",
+                    "surface": "ligandai.com Studio dropdown",
+                    "markers": [
+                        {
+                            "marker": "ASGR1",
+                            "isReceptor": True,
+                            "isSurfaceExposed": True,
+                            "is_platform_marker": True,
+                            "selectivity": 0.97,
+                            "n_diseases": 94,
+                            "patient_pop": 480000,
+                            "price_per_drug": 459986.0,
+                            "score": 0.941,
+                            "evidence": "Hepatocyte-selective lectin uptake receptor",
+                            "citations": ["HPA v24 / GTEx v8 Liver"],
+                        },
+                        {
+                            "marker": "LRP2",
+                            "isReceptor": True,
+                            "isSurfaceExposed": True,
+                            "is_platform_marker": True,
+                            "selectivity": 0.94,
+                            "n_diseases": 68,
+                            "patient_pop": 215000,
+                            "price_per_drug": 380000.0,
+                            "score": 0.892,
+                            "evidence": "Proximal tubular uptake receptor",
+                            "citations": ["HPA v24 / GTEx v8 Kidney-Cortex"],
+                        },
+                    ],
+                    "per_organ_top": [
+                        {
+                            "fine_basket_id": "tissue:liver_parenchyma",
+                            "fine_tissue_label": "Liver parenchyma",
+                            "level": "tissue",
+                            "derived_coarse_system_rollup": "Liver",
+                            "top_markers": [
+                                {
+                                    "marker": "ASGR1",
+                                    "score": 0.941,
+                                    "selectivity": 0.97,
+                                    "n_diseases": 94,
+                                    "patient_pop": 480000,
+                                    "price_per_drug": 459986.0,
+                                }
+                            ],
+                        }
+                    ],
+                    "platform_markers": [],
+                    "tookMs": 1.5,
+                },
+            )
         return httpx.Response(404, json={"dataVersion": "v2", "error": {"code": "unknown_resource", "message": "Not mocked"}})
 
     return httpx.MockTransport(handler)
@@ -292,6 +404,20 @@ def main() -> None:
         f"One-call map('Fabry kidney disease') -> disease={mapped.disease.name}, "
         f"tissue={mapped.matched_tissue_filter}, top_receptor={top_receptor.gene} "
         f"(score={top_receptor.overall_score})"
+    )
+
+    graph = client.diseases.map_disease_to_targets("Fabry disease", tissue="kidney", top_k=5)
+    top_marker = graph.markers[0]
+    print(
+        f"Graph map_disease_to_targets('Fabry disease') -> tissues={len(graph.tissues)}, "
+        f"cell_types={len(graph.cell_types)}, top_marker={top_marker.marker} "
+        f"(score={top_marker.score}, n_diseases={top_marker.n_diseases})"
+    )
+
+    ranking = client.markers.ranking(platform_only=True, top_k=5, seed=42)
+    print(
+        f"Marker ranking (platform_only=True, seed=42) -> top={ranking.markers[0].marker} "
+        f"(score={ranking.markers[0].score}, digest={ranking.reproducibility['deterministic_digest'][:12]})"
     )
 
     # Non-superadmin keys are blocked client-side before any superadmin request leaves the process

@@ -71,7 +71,7 @@ from ligandai.resources.maturation import AsyncMaturation, Maturation
 from ligandai.resources.charts import AsyncCharts, Charts
 from ligandai.resources.deltaforge import AsyncDeltaForge, DeltaForge
 from ligandai.resources.discovery import AsyncDiscovery, Discovery
-from ligandai.resources.diseases import AsyncDiseases, Diseases
+from ligandai.resources.diseases import AsyncDiseases, AsyncMarkers, Diseases, Markers
 from ligandai.resources.ensemble import AsyncEnsemble, Ensemble
 from ligandai.resources.evaluator import AsyncEvaluator, Evaluator  # [bd-LIGANDAI_ALPHA_V2-6bybp]
 from ligandai.resources.folds import AsyncFolds, Folds
@@ -102,6 +102,7 @@ from ligandai.types import (
     ClientSessionUsage,
     Credits,
     DiseaseMap,
+    DiseaseTargetGraph,
     SpeciesEntitlement,
     UnlimitedCredits,
     User,
@@ -695,6 +696,7 @@ class LigandAI(_ClientCommon):
         self.maturation: Maturation = Maturation(self._transport, client=self)
         self.charts: Charts = Charts(self._transport)
         self.diseases: Diseases = Diseases(self._transport, client=self)
+        self.markers: Markers = self.diseases.markers
         self.discovery: Discovery = Discovery(self._transport, client=self)
         self.folds: Folds = Folds(self._transport, client=self)
         # Ensemble co-fold: N peptides x M engines, priced before it runs,
@@ -1074,6 +1076,12 @@ class LigandAI(_ClientCommon):
         """One-call Disease Atlas mapping alias for :meth:`Diseases.map`."""
         return self.diseases.map(disease, **kwargs)
 
+    def map_disease_to_targets(
+        self, disease: str, tissue: str | None = None, **kwargs: Any
+    ) -> DiseaseTargetGraph:
+        """Resolve a disease to fine tissues, cells, and ranked markers (delegates to :meth:`Diseases.map_disease_to_targets`)."""
+        return self.diseases.map_disease_to_targets(disease, tissue=tissue, **kwargs)
+
     def check_compatibility(self) -> list[Diagnostic]:
         """Ask the platform whether this SDK build is still current.
         [bd-LIGANDAI_ALPHA_V2-x4vt8.3.2]
@@ -1173,6 +1181,7 @@ class AsyncLigandAI(_ClientCommon):
         self.maturation: AsyncMaturation = AsyncMaturation(self._transport, client=self)
         self.charts: AsyncCharts = AsyncCharts(self._transport)
         self.diseases: AsyncDiseases = AsyncDiseases(self._transport, client=self)
+        self.markers: AsyncMarkers = self.diseases.markers
         self.discovery: AsyncDiscovery = AsyncDiscovery(self._transport, client=self)
         self.folds: AsyncFolds = AsyncFolds(self._transport, client=self)
         self.ensemble: AsyncEnsemble = AsyncEnsemble(self._transport, client=self)
@@ -1274,6 +1283,14 @@ class AsyncLigandAI(_ClientCommon):
     async def map(self, disease: str, **kwargs: Any) -> DiseaseMap:
         """Async one-call Disease Atlas mapping alias for :meth:`AsyncDiseases.map`."""
         return await self.diseases.map(disease, **kwargs)
+
+    async def map_disease_to_targets(
+        self, disease: str, tissue: str | None = None, **kwargs: Any
+    ) -> DiseaseTargetGraph:
+        """Async disease-to-marker graph resolution (delegates to :meth:`AsyncDiseases.map_disease_to_targets`)."""
+        return await self.diseases.map_disease_to_targets(
+            disease, tissue=tissue, **kwargs
+        )
 
     async def check_compatibility(self) -> list[Diagnostic]:
         """Async twin of :meth:`LigandAI.check_compatibility`."""

@@ -55,6 +55,37 @@ for target in targets:
 
 When a tissue filter has zero matching receptors, `client.diseases.targets_response(...)` reports `status == "no_targets"` with an explicit `empty_reason` rather than fabricating stand-in targets. Passing `strict_targets=True` raises `LigandAIValidationError` (`code="no_targets"`, HTTP 422). When a query matches multiple distinct diseases equally, the SDK raises `LigandAIAmbiguousDisease` (HTTP 409) carrying `.candidates` for disambiguation.
 
+### Disease -> Tissue -> Cell -> Marker Graph & Ranking (`map_disease_to_targets` and `markers.ranking`)
+
+We expose our indexed biological graph and final-stage marker-value ranking across fine `ligandai.com Studio dropdown` tissues (with the 12 coarse organ systems retained as a derived roll-up) and our peptide binder platform (over 6.5 million peptides screened in our wet lab and computational workflows):
+
+```python
+# Gate 29: resolve a disease to {tissues, cell_types, markers} with cited edge evidence
+graph = client.diseases.map_disease_to_targets(
+    "Fabry disease",
+    tissue="kidney",
+    top_k=10,
+    seed=42,
+)
+for m in graph.markers:
+    print(
+        m.marker,
+        m.score,
+        m.selectivity,
+        m.n_diseases,
+        m.patient_pop,
+        m.price_per_drug,
+        m.evidence,
+    )
+
+# Gate 30: scored, explainable cross-disease marker ranking + per-organ top lists
+ranking = client.markers.ranking(organ="kidney", platform_only=True, top_k=15, seed=42)
+print("Top platform markers:", [(m.marker, m.score, m.n_diseases) for m in ranking.markers])
+print("Per-tissue leaders:", [entry.fine_basket_id for entry in ranking.per_organ_top])
+```
+
+*Internal planning assumption (with sensitivity):* cross-disease platform reusability models roughly 50 to 100 indications per validated targeting capability with +/-40% composite-weight sensitivity across selectivity, indication count, patient population, and `v4` price-ladder anchors while keeping sourced GTEx, HPA, GEO, and `v4` ledger inputs unadjusted.
+
 ## Superadmin Intelligence Surface (`client.diseases.admin`)
 
 Commercial decision matrices, organ basket rNPV models, US/EU5/World patient populations, rare-to-common expansion ladders, disease-tissue GEO cohorts, and US sales benchmarks live under `/api/admin/atlas/*` and require a superadmin API key (`lgai_sa_*` or `lgai_superadmin_*`).
@@ -99,6 +130,6 @@ geo = admin_client.diseases.admin.geo("ORPHA:271861")
 benchmarks = admin_client.diseases.admin.benchmarks()
 ```
 
-## Dataset Version Switch (`v2` Default, `v3` When Validated)
+## Dataset Version Switch (`v3` Default, Provisional Basket rNPV Until `v4` Gates Pass)
 
-The SDK defaults to dataset version `"v3"` (`DEFAULT_ATLAS_DATA_VERSION = "v3"`, activated after all 36 post-Addendum-7 `v3/validation/gates.json` checks passed). Callers can override with one environment variable (`ATLAS_DATA_VERSION=v2` or `ATLAS_DATA_VERSION=v3`) or per-call `data_version="v2"`, and verify local gate status via `resolve_atlas_data_version("v3", gates_path="/path/to/gates.json")` (which falls back safely to `"v2"` if any gate has not passed).
+We default to dataset version `"v3"` (`DEFAULT_ATLAS_DATA_VERSION = "v3"`, activated after all 36 post-Addendum-7 `v3/validation/gates.json` checks passed). While the active dataset version is `"v2"` or `"v3"`, basket, lead-portfolio, and organ-stress rNPV responses from `admin_client.diseases.admin.baskets(...)` carry `rnpv_provisional=True` and `rnpv_provisional_label="provisional (pending v4)"` (standalone per-indication `commercial.rnpv_usd` and `pricing.rnpv_usd` are unaffected). Once `v4/validation/gates.json` passes all gates after `TASK_ADDENDUM8_LABEL_EXPANSION.md`, `resolve_atlas_data_version("v4", gates_path=...)` resolves to `"v4"` (failing closed to `"v3"` until all gates pass) and `rnpv_provisional` turns `False` automatically.

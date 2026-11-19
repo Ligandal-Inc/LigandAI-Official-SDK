@@ -1237,3 +1237,466 @@ def test_disease_map_client_latency_budget() -> None:
     p95 = timings_ms[int(0.95 * len(timings_ms))]
     assert p50 < 5.0, f"DiseaseMap p50 validation+dump too slow: {p50:.3f} ms"
     assert p95 < 15.0, f"DiseaseMap p95 validation+dump too slow: {p95:.3f} ms"
+
+
+
+# ---------------------------------------------------------------------------
+# 7. v3 Default + Provisional Basket rNPV + v4 Gate Resolver + Addendum 8 §J
+# ---------------------------------------------------------------------------
+
+
+def test_v4_gates_fail_closed_to_v3_until_all_gates_pass(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ATLAS_DATA_VERSION", raising=False)
+    monkeypatch.delenv("LIGANDAI_ATLAS_DATA_VERSION", raising=False)
+    monkeypatch.delenv("ATLAS_GATES_PATH", raising=False)
+
+    assert DEFAULT_ATLAS_DATA_VERSION == "v3"
+    assert resolve_atlas_data_version() == "v3"
+
+    real_v4_gates = pathlib.Path(
+        "/mnt/ligandal_shared/disease_market_map_20261118/v4/validation/gates.json"
+    )
+    if real_v4_gates.is_file():
+        # Live v4 gates currently contain incomplete/unmet items -> must fail closed to v3
+        assert resolve_atlas_data_version("v4", gates_path=real_v4_gates) == "v3"
+
+    # Synthetic v4 layout where v3 passes and v4 has incomplete gates -> falls back to v3
+    root = tmp_path / "atlas_root"
+    (root / "v3" / "validation").mkdir(parents=True)
+    (root / "v4" / "validation").mkdir(parents=True)
+    add8_spec = root / "TASK_ADDENDUM8_LABEL_EXPANSION.md"
+    add8_spec.write_text("# Addendum 8\n", encoding="utf-8")
+    v3_gates = root / "v3" / "validation" / "gates.json"
+    v3_gates.write_text(
+        json.dumps(
+            {
+                "overall": "pass",
+                "gates": {
+                    "US point prevalence concentration": {
+                        "status": "pass",
+                        "observed": {"numeric_identities": 5471, "total_identities": 5473},
+                    },
+                    "Basket replay and drivers": {
+                        "status": "pass",
+                        "observed": {"unpriced": []},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    v4_gates = root / "v4" / "validation" / "gates.json"
+    v4_gates.write_text(
+        json.dumps(
+            {
+                "overall": "incomplete",
+                "gates": [
+                    {"gate": 1, "status": "pass"},
+                    {"gate": 29, "status": "unmet"},
+                    {"gate": 30, "status": "unmet"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v3"
+
+    # Passing v4 gates older than TASK_ADDENDUM8_LABEL_EXPANSION.md must still stay on v3
+    v4_gates.write_text(
+        json.dumps(
+            {
+                "overall": "pass",
+                "gates": [
+                    {"gate": 1, "status": "pass"},
+                    {"gate": 29, "status": "pass"},
+                    {"gate": 30, "status": "pass"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(v4_gates, (1_700_000_000, 1_700_000_000))
+    os.utime(add8_spec, (1_700_000_100, 1_700_000_100))
+    assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v3"
+
+    # Once v4 gates are regenerated after Addendum 8 and all pass, v4 resolves cleanly
+    os.utime(v4_gates, (1_700_000_200, 1_700_000_200))
+    assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v4"
+
+
+def test_provisional_basket_rnpv_vs_standalone_indication_rnpv_and_v3_pricing(
+    httpx_mock: HTTPXMock,
+) -> None:
+    sa = LigandAI(api_key="lgai_superadmin_v3parity", base_url=BASE, max_retries=1)
+
+    # 1. v3 baskets response without server-side provisional fields gets stamped provisional
+    httpx_mock.add_response(
+        url=f"{BASE}/api/admin/atlas/baskets",
+        json={
+            "dataVersion": "v3",
+            "baskets": [
+                {
+                    "organ": "kidney",
+                    "leadDisease": "Fabry disease",
+                    "uniqueIndications": 18,
+                    "sharedRouteAdditions": 11,
+                    "allocatedMarketProxyUsdM": 6400.0,
+                    "allocatedPeakSalesUsdM": 2150.0,
+                    "discountedSharedCostSavingsUsdM": 140.0,
+                    "rnpvLowUsdM": 134.0,
+                    "rnpvBaseUsdM": 512.0,
+                    "rnpvHighUsdM": 980.0,
+                    "raw": {"rnpv_low_usd_m": "134", "organ": "Kidney"},
+                }
+            ],
+            "totals": {
+                "rnpvLowUsdM": 134.0,
+                "rnpvBaseUsdM": 512.0,
+                "rnpvHighUsdM": 980.0,
+                "discountedSharedCostSavingsUsdM": 140.0,
+            },
+        },
+    )
+    baskets_v3 = sa.diseases.baskets()
+    assert ligandai.is_basket_rnpv_provisional("v3") is True
+    assert ligandai.is_basket_rnpv_provisional("v4") is False
+    assert baskets_v3.rnpv_provisional is True
+    assert baskets_v3.rnpv_provisional_label == ligandai.BASKET_RNPV_PROVISIONAL_LABEL
+    assert baskets_v3.baskets[0].rnpv_provisional is True
+    assert baskets_v3.baskets[0].rnpv_provisional_label == "provisional (pending v4)"
+    assert baskets_v3.totals is not None
+    assert baskets_v3.totals.rnpv_provisional is True
+    assert baskets_v3.totals.rnpv_provisional_label == "provisional (pending v4)"
+
+    # 2. v3 single-basket detail also carries provisional stamp
+    httpx_mock.add_response(
+        url=f"{BASE}/api/admin/atlas/baskets/kidney",
+        json={
+            "dataVersion": "v3",
+            "basket": {
+                "organ": "kidney",
+                "leadDisease": "Fabry disease",
+                "rnpvBaseUsdM": 512.0,
+                "raw": {},
+            },
+            "contributions": [],
+            "cashFlows": [],
+        },
+    )
+    detail_v3 = sa.diseases.baskets("kidney")
+    assert detail_v3.rnpv_provisional is True
+    assert detail_v3.rnpv_provisional_label == "provisional (pending v4)"
+    assert detail_v3.basket.rnpv_provisional is True
+
+    # 3. Once server emits dataVersion == "v4", provisional turns False automatically
+    httpx_mock.add_response(
+        url=f"{BASE}/api/admin/atlas/baskets",
+        json={
+            "dataVersion": "v4",
+            "baskets": [{"organ": "kidney", "leadDisease": "Fabry disease", "rnpvBaseUsdM": 610.0}],
+            "totals": {"rnpvBaseUsdM": 610.0},
+        },
+    )
+    baskets_v4 = sa.diseases.baskets()
+    assert baskets_v4.rnpv_provisional is False
+    assert baskets_v4.rnpv_provisional_label is None
+    assert baskets_v4.baskets[0].rnpv_provisional is False
+    assert baskets_v4.totals is not None and baskets_v4.totals.rnpv_provisional is False
+
+    # 4. Standalone per-indication rNPV + pricing + priceAnchors on v3 matrix & benchmarks
+    row_v3 = _sample_admin_matrix_row()
+    row_v3["commercial"].update(
+        {
+            "oneDrugPeakSalesUsd": 840_000_000.0,
+            "rnpvUsd": 312_000_000.0,
+            "annualDrugPriceUsd": 460_000.0,
+            "annualServiceFeeUsd": 18_000.0,
+            "priceBasis": "annual_chronic_net",
+            "priceTier": "ultra_rare_chronic",
+            "priceSource": "WAC net-adjusted Amvuttra 2025",
+            "priceConfidence": "observed_us_comparator",
+            "usPrevalentPeople": 6800.0,
+            "usAddressable": 4900.0,
+        }
+    )
+    row_v3["pricing"] = {
+        "oneDrugPeakSalesUsd": 840_000_000.0,
+        "rnpvUsd": 312_000_000.0,
+        "annualDrugPriceUsd": 460_000.0,
+        "priceTier": "ultra_rare_chronic",
+    }
+    httpx_mock.add_response(
+        url=f"{BASE}/api/admin/atlas/matrix?sort_by=score&sort_dir=desc&limit=50",
+        json={
+            "dataVersion": "v3",
+            "totalCount": 1,
+            "nextCursor": None,
+            "tookMs": 0.9,
+            "items": [row_v3],
+        },
+    )
+    mat_v3 = sa.diseases.matrix()
+    item = mat_v3.items[0]
+    assert item.commercial.rnpv_usd == 312_000_000.0
+    assert item.commercial.annual_drug_price_usd == 460_000.0
+    assert item.commercial.us_prevalent_people == 6800.0
+    assert item.pricing is not None
+    assert item.pricing.rnpv_usd == 312_000_000.0
+    assert not hasattr(item.commercial, "rnpv_provisional")
+    assert not hasattr(item.pricing, "rnpv_provisional")
+
+    httpx_mock.add_response(
+        url=f"{BASE}/api/admin/atlas/benchmarks",
+        json={
+            "dataVersion": "v3",
+            "salesBenchmarks": [{"drug": "Amvuttra", "usSalesM": 1420.0}],
+            "designationCriteria": [{"designation": "orphan"}],
+            "priceAnchors": [{"tier": "ultra_rare_chronic", "annualNetUsd": 460000}],
+        },
+    )
+    bench_v3 = sa.diseases.benchmarks()
+    assert len(bench_v3.price_anchors) == 1
+    assert bench_v3.price_anchors[0]["tier"] == "ultra_rare_chronic"
+
+    # 5. Public payload sanitizer strips all new pricing and provisional keys recursively
+    dirty = {
+        "dataVersion": "v3",
+        "disease": {"identityId": "ORPHA:324", "name": "Fabry disease", "rnpvUsd": 999},
+        "pricing": {"annualDrugPriceUsd": 350000},
+        "priceAnchors": [{"tier": "rare"}],
+        "rnpvProvisional": True,
+        "rnpvProvisionalLabel": "provisional (pending v4)",
+        "tissues": [{"label": "Kidney", "oneDrugPeakSalesUsd": 1e9}],
+    }
+    cleaned = ligandai.sanitize_public_atlas_payload(dirty)
+    serialized = json.dumps(cleaned)
+    for key in (
+        "rnpvUsd",
+        "pricing",
+        "annualDrugPriceUsd",
+        "priceAnchors",
+        "rnpvProvisional",
+        "rnpvProvisionalLabel",
+        "oneDrugPeakSalesUsd",
+    ):
+        assert key not in serialized
+
+
+@pytest.mark.asyncio
+async def test_map_disease_to_targets_and_markers_ranking_http_fallbacks_and_csv_determinism(
+    tmp_path: pathlib.Path, httpx_mock: HTTPXMock
+) -> None:
+    client = LigandAI(api_key="lgai_pro_add8", base_url=BASE, max_retries=1)
+
+    # 1. Direct GET /api/atlas/diseases/{id}/targets-graph hit
+    sample_graph_json = {
+        "dataVersion": "v4",
+        "surface": "ligandai.com Studio dropdown",
+        "query": "Fabry disease",
+        "disease": {
+            "identityId": "MONDO:0010526",
+            "name": "Fabry disease",
+            "derivedCoarseSystem": "Kidney",
+        },
+        "tissues": [
+            {
+                "fine_basket_id": "kidney_cortex",
+                "label": "Renal cortex",
+                "level": "tissue",
+                "derived_coarse_system": "Kidney",
+                "role": "primary",
+                "evidence": "Fabry Gb3 accumulation in renal cortex",
+                "citation": "Orphanet / OMIM 301500",
+            }
+        ],
+        "cell_types": [
+            {
+                "cell_key": "proximal_tubular_cells",
+                "label": "Renal proximal tubular epithelial cells",
+                "cl_id": "CL:0002306",
+                "tissue_fine_basket_id": "kidney_cortex",
+                "evidence": "HPA single-cell expression",
+                "citation": "HPA v24 (CL:0002306)",
+            }
+        ],
+        "markers": [
+            {
+                "marker": "LRP2",
+                "protein_name": "Megalin",
+                "uniprot_id": "P98164",
+                "is_receptor": True,
+                "is_surface_exposed": True,
+                "target_role": "delivery_receptor",
+                "is_platform_marker": True,
+                "selectivity": 0.94,
+                "n_diseases": 19,
+                "patient_pop": 148000.0,
+                "price_per_drug": 385000.0,
+                "score": 0.9125,
+                "fine_tissues": ["kidney_cortex"],
+                "derived_coarse_systems_rollup": ["Kidney"],
+                "evidence": "Proximal tubular uptake receptor",
+                "citations": ["HPA v24 / GTEx v8"],
+                "rnpvUsd": 999999999.0,  # injected commercial field must be stripped
+            },
+            {
+                "marker": "CUBN",
+                "protein_name": "Cubilin",
+                "uniprot_id": "O60494",
+                "is_receptor": True,
+                "is_surface_exposed": True,
+                "target_role": "delivery_receptor",
+                "is_platform_marker": True,
+                "selectivity": 0.91,
+                "n_diseases": 14,
+                "patient_pop": 112000.0,
+                "price_per_drug": 360000.0,
+                "score": 0.874,
+                "fine_tissues": ["kidney_cortex"],
+                "derived_coarse_systems_rollup": ["Kidney"],
+                "evidence": "Co-receptor with megalin in renal cortex",
+                "citations": ["HPA v24"],
+            },
+        ],
+    }
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/diseases/Fabry%20disease/targets-graph?tissue=kidney&top_k=5&seed=42",
+        json=sample_graph_json,
+    )
+    graph = client.diseases.map_disease_to_targets("Fabry disease", tissue="kidney", top_k=5, seed=42)
+    assert isinstance(graph, ligandai.DiseaseTargetGraph)
+    assert graph.markers[0].marker == "LRP2"
+    assert graph.markers[0].n_diseases == 19
+    assert graph.markers[0].price_per_drug == 385000.0
+    assert "rnpvUsd" not in json.dumps(graph.model_dump(by_alias=True))
+
+    # 2. Route-missing HTML 404 on /targets-graph and /map-targets falls back to v3 POST /api/atlas/map
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/diseases/Fabry%20kidney%20disease/targets-graph?top_k=10&seed=42",
+        status_code=404,
+        text="<!DOCTYPE html><pre>Cannot GET /api/atlas/diseases/Fabry%20kidney%20disease/targets-graph</pre>",
+        headers={"Content-Type": "text/html"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/map-targets",
+        method="POST",
+        status_code=404,
+        text="<!DOCTYPE html><pre>Cannot POST /api/atlas/map-targets</pre>",
+        headers={"Content-Type": "text/html"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/map",
+        method="POST",
+        json=_sample_map_response("Fabry kidney disease"),
+    )
+    fallback_graph = client.map_disease_to_targets("Fabry kidney disease", top_k=10, seed=42)
+    assert fallback_graph.data_version == "v2"
+    assert fallback_graph.markers[0].marker == "LRP2"
+    assert fallback_graph.tissues[0].label == "Kidney"
+
+    # 3. client.markers.ranking + client.diseases.markers.ranking (sync + async)
+    sample_ranking_json = {
+        "dataVersion": "v4",
+        "surface": "ligandai.com Studio dropdown",
+        "markers": sample_graph_json["markers"],
+        "per_organ_top": [
+            {
+                "fine_basket_id": "kidney_cortex",
+                "fine_tissue_label": "Renal cortex",
+                "level": "tissue",
+                "derived_coarse_system_rollup": "Kidney",
+                "top_markers": [{"marker": "LRP2", "score": 0.9125}],
+            }
+        ],
+    }
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/markers/ranking?organ=kidney&platform_only=true&top_k=10&seed=7",
+        json=sample_ranking_json,
+    )
+    ranked_sync = client.markers.ranking(organ="kidney", platform_only=True, top_k=10, seed=7)
+    assert isinstance(ranked_sync, ligandai.MarkerValueRanking)
+    assert ranked_sync.markers[0].marker == "LRP2"
+    assert len(ranked_sync.platform_markers) == 2
+
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/markers/ranking?organ=kidney&top_k=10&seed=7",
+        json=sample_ranking_json,
+    )
+    async with AsyncLigandAI(api_key="lgai_pro_add8", base_url=BASE, max_retries=1) as aclient:
+        ranked_async = await aclient.markers.ranking(organ="kidney", top_k=10, seed=7)
+        assert (
+            ranked_async.reproducibility["deterministic_digest"]
+            == ranked_sync.reproducibility["deterministic_digest"]
+        )
+
+    # 4. Local read-only marker_graph_dir CSV loading + deterministic seed reproducibility
+    gdir = tmp_path / "marker_graph"
+    gdir.mkdir()
+    (gdir / "disease_marker_graph.csv").write_text(
+        "identity_id,disease,fine_basket_id,tissue_label,derived_coarse_system,cell_key,cell_label,cl_id,marker,protein_name,selectivity,n_diseases,patient_pop,price_per_drug,score,evidence,citation\n"
+        "MONDO:0010526,Fabry disease,kidney_cortex,Renal cortex,Kidney,proximal_tubular_cells,Proximal tubular cells,CL:0002306,LRP2,Megalin,0.94,19,148000,385000,0.9125,Proximal tubular receptor,HPA v24\n"
+        "MONDO:0010526,Fabry disease,kidney_cortex,Renal cortex,Kidney,proximal_tubular_cells,Proximal tubular cells,CL:0002306,CUBN,Cubilin,0.91,14,112000,360000,0.8740,Renal co-receptor,GTEx v8\n",
+        encoding="utf-8",
+    )
+    (gdir / "marker_value_ranking.csv").write_text(
+        "marker,protein_name,selectivity,n_diseases,patient_pop,price_per_drug,score,fine_tissues,derived_coarse_systems_rollup,evidence,citation\n"
+        "CUBN,Cubilin,0.91,14,112000,360000,0.8740,kidney_cortex,Kidney,Renal co-receptor,GTEx v8\n"
+        "LRP2,Megalin,0.94,19,148000,385000,0.9125,kidney_cortex,Kidney,Proximal tubular receptor,HPA v24\n"
+        "NPHS2,Podocin,0.96,1,9500,410000,0.6820,glomerulus,Kidney,Podocyte slit diaphragm,HPA v24\n",
+        encoding="utf-8",
+    )
+    local_graph_1 = client.diseases.map_disease_to_targets(
+        "Fabry disease", tissue="kidney", seed=99, marker_graph_dir=gdir
+    )
+    local_graph_2 = client.diseases.map_disease_to_targets(
+        "Fabry disease", tissue="kidney", seed=99, marker_graph_dir=gdir
+    )
+    assert [m.marker for m in local_graph_1.markers] == ["LRP2", "CUBN"]
+    assert (
+        local_graph_1.ranking_stage["deterministic_digest"]
+        == local_graph_2.ranking_stage["deterministic_digest"]
+    )
+
+    local_rank_a = client.diseases.markers.ranking(
+        organ="kidney", platform_only=True, seed=99, marker_graph_dir=gdir
+    )
+    local_rank_b = client.markers.ranking(
+        organ="kidney", platform_only=True, seed=99, marker_graph_dir=gdir
+    )
+    assert [m.marker for m in local_rank_a.markers] == ["LRP2", "CUBN"]
+    assert (
+        local_rank_a.reproducibility["deterministic_digest"]
+        == local_rank_b.reproducibility["deterministic_digest"]
+    )
+
+
+def test_disease_atlas_copy_and_naming_guardrails() -> None:
+    import re
+
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    disallowed = re.compile(
+        "|".join(
+            [
+                r"\b" + "Foun" + "dry" + r"\b",
+                r"\b" + "New" + "Co" + r"\b",
+                r"\b" + "Ligand" + "Mind" + r"\b",
+                r"\b" + "Addr" + "essa" + r"\b",
+                r"\b" + "mod" + "ule" + r"\b",
+                r"\b" + "visio" + "nary" + r"\b",
+                "studio\\." + "ligandai\\.com",
+            ]
+        ),
+        re.IGNORECASE,
+    )
+    checked_paths = [
+        repo_root / "ligandai" / "resources" / "diseases.py",
+        repo_root / "docs" / "disease_atlas.md",
+        repo_root / "examples" / "36_disease_atlas_mapping.py",
+        repo_root / "tests" / "unit" / "test_disease_atlas_sdk.py",
+    ]
+    for path in checked_paths:
+        text = path.read_text(encoding="utf-8")
+        hit = disallowed.search(text)
+        assert hit is None, f"Disallowed term {hit.group(0)!r} found in {path}"

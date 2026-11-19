@@ -26,9 +26,10 @@ API_KEY_PREFIXES: dict[Tier, str] = {
 # Recognized superadmin API key prefixes (both map to the superadmin role).
 SUPERADMIN_API_KEY_PREFIXES: tuple[str, ...] = ("lgai_sa_", "lgai_superadmin_")
 
-# Disease Atlas dataset versions (`v3` active post-Addendum-7 default; `v2` fallback).
-AtlasDataVersion = Literal["v2", "v3"]
+# Disease Atlas dataset versions (`v3` active post-Addendum-7 default; `v2` fallback; `v4` Addendum 8 gated).
+AtlasDataVersion = Literal["v2", "v3", "v4"]
 DEFAULT_ATLAS_DATA_VERSION: AtlasDataVersion = "v3"
+BASKET_RNPV_PROVISIONAL_LABEL: str = "provisional (pending v4)"
 
 # Tier ordering, lowest to highest privilege.
 TIER_ORDER: tuple[Tier, ...] = ("free", "basic", "academia", "pro", "enterprise", "superadmin")

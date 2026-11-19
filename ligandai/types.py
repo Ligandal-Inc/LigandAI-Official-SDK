@@ -5193,6 +5193,259 @@ class DiseaseMap(_AtlasPublicModel):
 AtlasMapResponse = DiseaseMap
 
 
+# -- Addendum 8 §J: Disease -> Tissue -> Cell -> Marker Graph & Ranking --------
+
+
+class GraphEdgeEvidence(_AtlasPublicModel):
+    edge_type: str = Field(
+        default="", validation_alias=AliasChoices("edgeType", "edge_type")
+    )
+    from_node: str = Field(
+        default="",
+        validation_alias=AliasChoices("from", "from_node", "fromNode"),
+        serialization_alias="from",
+    )
+    to_node: str = Field(
+        default="",
+        validation_alias=AliasChoices("to", "to_node", "toNode"),
+        serialization_alias="to",
+    )
+    evidence: str = ""
+    citation: str = ""
+
+
+class GraphTissueNode(_AtlasPublicModel):
+    fine_basket_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "fineBasketId", "fine_basket_id", "tissueKey", "tissue_key"
+        ),
+    )
+    label: str = ""
+    level: str = "tissue"
+    derived_coarse_system: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "derivedCoarseSystem", "derived_coarse_system", "organ"
+        ),
+    )
+    role: str = ""
+    evidence: str = ""
+    citation: str = ""
+    geo_healthy_additions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("geoHealthyAdditions", "geo_healthy_additions"),
+    )
+    geo_disease_datasets: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("geoDiseaseDatasets", "geo_disease_datasets"),
+    )
+
+
+class GraphCellTypeNode(_AtlasPublicModel):
+    cell_key: str = Field(
+        default="", validation_alias=AliasChoices("cellKey", "cell_key")
+    )
+    label: str = ""
+    cl_id: str | None = Field(
+        default=None, validation_alias=AliasChoices("clId", "cl_id")
+    )
+    hpa_cell_type: str | None = Field(
+        default=None, validation_alias=AliasChoices("hpaCellType", "hpa_cell_type")
+    )
+    tissue_fine_basket_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("tissueFineBasketId", "tissue_fine_basket_id"),
+    )
+    evidence: str = ""
+    citation: str = ""
+
+
+class MarkerScoreComponents(_AtlasPublicModel):
+    selectivity_score: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("selectivity_score", "selectivityScore"),
+    )
+    disease_breadth_score: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("disease_breadth_score", "diseaseBreadthScore"),
+    )
+    patient_pop_score: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("patient_pop_score", "patientPopScore"),
+    )
+    price_ladder_score: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("price_ladder_score", "priceLadderScore"),
+    )
+    addressable_patient_pop: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "addressable_patient_pop", "addressablePatientPop"
+        ),
+    )
+    weights: dict[str, float] = Field(default_factory=dict)
+
+
+class RankedMarkerCandidate(_AtlasPublicModel):
+    """Scored surface or causal marker entry from ``map_disease_to_targets`` and ``markers.ranking``."""
+
+    marker: str = Field(
+        default="", validation_alias=AliasChoices("marker", "gene")
+    )
+    evidence: str = ""
+    selectivity: float = 0.0
+    n_diseases: int = Field(
+        default=0, validation_alias=AliasChoices("n_diseases", "nDiseases")
+    )
+    patient_pop: float = Field(
+        default=0.0, validation_alias=AliasChoices("patient_pop", "patientPop")
+    )
+    price_per_drug: float = Field(
+        default=0.0, validation_alias=AliasChoices("price_per_drug", "pricePerDrug")
+    )
+    score: float = 0.0
+    protein_name: str = Field(
+        default="", validation_alias=AliasChoices("proteinName", "protein_name")
+    )
+    uniprot_id: str | None = Field(
+        default=None, validation_alias=AliasChoices("uniprotId", "uniprot_id")
+    )
+    is_receptor: bool = Field(
+        default=False, validation_alias=AliasChoices("isReceptor", "is_receptor")
+    )
+    is_surface_exposed: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("isSurfaceExposed", "is_surface_exposed"),
+    )
+    target_role: str = Field(
+        default="", validation_alias=AliasChoices("targetRole", "target_role")
+    )
+    is_platform_marker: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("is_platform_marker", "isPlatformMarker"),
+    )
+    score_components: MarkerScoreComponents | None = Field(
+        default=None,
+        validation_alias=AliasChoices("score_components", "scoreComponents"),
+    )
+    fine_tissues: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("fine_tissues", "fineTissues"),
+    )
+    derived_coarse_systems_rollup: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "derived_coarse_systems_rollup", "derivedCoarseSystemsRollup"
+        ),
+    )
+    addressed_indication_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "addressed_indication_ids", "addressedIndicationIds"
+        ),
+    )
+    evidence_items: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("evidence_items", "evidenceItems"),
+    )
+    citations: list[str] = Field(default_factory=list)
+
+
+DiseaseMarkerCandidate = RankedMarkerCandidate
+
+
+class DiseaseTargetGraph(_AtlasPublicModel):
+    """Disease -> tissue -> cell -> marker graph returned by ``map_disease_to_targets``."""
+
+    data_version: str = Field(
+        default="v4", validation_alias=AliasChoices("dataVersion", "data_version")
+    )
+    surface: str = "ligandai.com Studio dropdown"
+    query: str = ""
+    disease: dict[str, Any] = Field(default_factory=dict)
+    tissues: list[GraphTissueNode] = Field(default_factory=list)
+    cell_types: list[GraphCellTypeNode] = Field(
+        default_factory=list, validation_alias=AliasChoices("cell_types", "cellTypes")
+    )
+    markers: list[RankedMarkerCandidate] = Field(default_factory=list)
+    edges: list[GraphEdgeEvidence] = Field(default_factory=list)
+    ranking_stage: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("ranking_stage", "rankingStage"),
+    )
+    planning_assumption_note: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "planning_assumption_note", "planningAssumptionNote"
+        ),
+    )
+    took_ms: float = Field(
+        default=0.0, validation_alias=AliasChoices("tookMs", "took_ms")
+    )
+
+
+MapDiseaseToTargetsResponse = DiseaseTargetGraph
+
+
+class PerOrganTopMarkersEntry(_AtlasPublicModel):
+    fine_basket_id: str = Field(
+        default="", validation_alias=AliasChoices("fine_basket_id", "fineBasketId")
+    )
+    fine_tissue_label: str = Field(
+        default="",
+        validation_alias=AliasChoices("fine_tissue_label", "fineTissueLabel"),
+    )
+    level: str = "tissue"
+    derived_coarse_system_rollup: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "derived_coarse_system_rollup", "derivedCoarseSystemRollup"
+        ),
+    )
+    top_markers: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("top_markers", "topMarkers"),
+    )
+
+
+class MarkerValueRanking(_AtlasPublicModel):
+    """Scored, explainable marker ranking returned by ``markers.ranking``."""
+
+    data_version: str = Field(
+        default="v4", validation_alias=AliasChoices("dataVersion", "data_version")
+    )
+    surface: str = "ligandai.com Studio dropdown"
+    filter: dict[str, Any] = Field(default_factory=dict)
+    weights: dict[str, float] = Field(default_factory=dict)
+    markers: list[RankedMarkerCandidate] = Field(default_factory=list)
+    per_organ_top: list[PerOrganTopMarkersEntry] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("per_organ_top", "perOrganTop"),
+    )
+    platform_markers: list[RankedMarkerCandidate] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("platform_markers", "platformMarkers"),
+    )
+    dashboard_clusters: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("dashboard_clusters", "dashboardClusters"),
+    )
+    reproducibility: dict[str, Any] = Field(default_factory=dict)
+    planning_assumption_note: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "planning_assumption_note", "planningAssumptionNote"
+        ),
+    )
+    took_ms: float = Field(
+        default=0.0, validation_alias=AliasChoices("tookMs", "took_ms")
+    )
+
+
+MarkerValueRankingResponse = MarkerValueRanking
+
+
 # -- Disease Atlas (Superadmin-Only Intelligence Surface) ---------------------
 
 
@@ -5247,6 +5500,38 @@ class MatrixCommercial(_LGModel):
         default=None, alias="costToHumanDataUsdM"
     )
     route: str = ""
+    one_drug_peak_sales_usd: float | None = Field(
+        default=None, alias="oneDrugPeakSalesUsd"
+    )
+    rnpv_usd: float | None = Field(default=None, alias="rnpvUsd")
+    annual_drug_price_usd: float | None = Field(
+        default=None, alias="annualDrugPriceUsd"
+    )
+    annual_service_fee_usd: float | None = Field(
+        default=None, alias="annualServiceFeeUsd"
+    )
+    price_basis: str = Field(default="", alias="priceBasis")
+    price_tier: str = Field(default="", alias="priceTier")
+    price_source: str = Field(default="", alias="priceSource")
+    price_confidence: str = Field(default="", alias="priceConfidence")
+    us_prevalent_people: float | None = Field(
+        default=None, alias="usPrevalentPeople"
+    )
+    us_addressable: float | None = Field(default=None, alias="usAddressable")
+
+
+class MatrixPricing(_LGModel):
+    """Standalone per-indication pricing summary (not subject to basket rNPV provisional flag)."""
+
+    rnpv_usd: float | None = Field(default=None, alias="rnpvUsd")
+    annual_drug_price_usd: float | None = Field(
+        default=None, alias="annualDrugPriceUsd"
+    )
+    price_basis: str = Field(default="", alias="priceBasis")
+    price_tier: str = Field(default="", alias="priceTier")
+    price_source: str = Field(default="", alias="priceSource")
+    price_confidence: str = Field(default="", alias="priceConfidence")
+    us_addressable: float | None = Field(default=None, alias="usAddressable")
 
 
 class MatrixExpansionLadder(_LGModel):
@@ -5274,6 +5559,7 @@ class AdminMatrixRow(_LGModel):
     competition: MatrixCompetition = Field(default_factory=MatrixCompetition)
     designations: MatrixDesignations = Field(default_factory=MatrixDesignations)
     commercial: MatrixCommercial = Field(default_factory=MatrixCommercial)
+    pricing: MatrixPricing | None = None
     expansion_ladder: MatrixExpansionLadder = Field(
         default_factory=MatrixExpansionLadder, alias="expansionLadder"
     )
@@ -5436,4 +5722,7 @@ class AdminBenchmarksResponse(_LGModel):
     )
     designation_criteria: list[dict[str, Any]] = Field(
         default_factory=list, alias="designationCriteria"
+    )
+    price_anchors: list[dict[str, Any]] = Field(
+        default_factory=list, alias="priceAnchors"
     )
