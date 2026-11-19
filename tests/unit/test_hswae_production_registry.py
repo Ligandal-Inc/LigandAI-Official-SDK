@@ -10,9 +10,11 @@ from ligandai.types import (
     HSWAE_CAPABILITY_DEFINITION_HASHES,
     HswaeCapabilityDiscovery,
     HswaeResolveCellTypeReceipt,
+    HswaeResolveCellTypeResult,
 )
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
+PREVIEW = FIXTURES / "hswae_preview_resolver_definitions_20261119.json"
 
 
 def test_blue_registry_and_digest_integrity():
@@ -34,7 +36,31 @@ def test_resolver_aliases_read_the_selected_candidate():
         row for row in raw["result"]["candidates"] if row["cell_type"] == result.canonical
     )
     assert result.confidence == selected["confidence"]
+    assert result.source == selected["source"]
     assert result.model_dump()["canonical_cell_type"] == raw["result"]["canonical"]
+
+
+def test_compiled_preview_resolver_definitions_match_reviewed_pins():
+    definitions = json.loads(PREVIEW.read_text())["definitions"]
+    parsed = HswaeCapabilityDiscovery.model_validate(
+        {"contractVersion": "1.0.0", "capabilities": definitions}
+    )
+    assert {entry.operation for entry in parsed.capabilities} == {
+        "hswae.v2.resolve_cell_type",
+        "hswae.v2.compare_cell_types",
+    }
+    for entry in parsed.capabilities:
+        assert entry.definition_digest == HSWAE_CAPABILITY_DEFINITION_HASHES[entry.operation]
+
+
+def test_server_selection_survives_parsing_and_serialization():
+    results = json.loads(PREVIEW.read_text())["resolver_results"]
+    assert {r["resolution_status"] for r in results} == {"resolved", "unresolved"}
+    for raw in results:
+        result = HswaeResolveCellTypeResult.model_validate(raw)
+        for field in ("canonical_cell_type", "confidence", "source"):
+            assert field in result.model_fields_set
+            assert getattr(result, field) == result.model_dump()[field] == raw[field]
 
 
 def test_stated_digest_must_match_the_body_and_reviewed_pin():

@@ -1,0 +1,1466 @@
+{
+  "provenance": {
+    "source": "Compiled preview public registry module",
+    "bundle_sha256": "e9d0a5bae91c195cd52fd842c12e9c4817d44ad41e719c3fd27c4ce723532438",
+    "source_module": "shared/hswae-agent-capability.ts",
+    "compiled_module_sha256": "4dad94ea4b52f8a07a76414b88d14ab62d4f8e2afa64e0fee59a044e63142b54",
+    "extraction": "Exact definitions exported by the isolated registry module. HTTP operation names from the preview verification receipt.",
+    "resolver_results": "Read-only HPA v25 reference, staged resolve_cell_type_payload with top_k=1, followed by the staged signed-capability result serializer.",
+    "server/hswae_specialized_routes.py": "0ec864a9e0edd44073c9d8e634a892c7dbb45101ee9a55b7b53295c465c8043d",
+    "server/hswae-agent-capability-service.ts": "1fbb2d46f44af4fa813a7acd763c1679f427c7b19f099de927b0f2364928d07c"
+  },
+  "definitions": [
+    {
+      "operation": "hswae.v2.resolve_cell_type",
+      "title": "H-SWAEV2 cell-type resolution",
+      "description": "Resolve a cell-type phrase against the FIXED HPA v25 single-cell vocabulary (~202 labels from hpa_v25_single_cell_cluster plus the specialized reference contexts) — not an open Cell Ontology, so an ontology-style phrasing may need the returned nearest_candidates to pick a label. Returns resolution_status, the resolution_stage that matched, always-populated nearest_candidates, unresolved_reason, and the vocabulary scope actually searched. resolution_status: \"unresolved\" means the phrase missed the vocabulary; it is never evidence that the cell type is absent from the atlas.",
+      "domain": "transcriptomics",
+      "effect": "read_local",
+      "executionMode": "immediate",
+      "requiredEntitlements": [
+        "transcriptomics.hswae2"
+      ],
+      "requiredApprovalScopes": [],
+      "backendFamily": "hswae_v2",
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "receiptVersion": {
+            "type": "string",
+            "enum": [
+              "1"
+            ]
+          },
+          "contractVersion": {
+            "type": "string",
+            "enum": [
+              "1.0.0"
+            ]
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "hswae.v2.resolve_cell_type"
+            ]
+          },
+          "owner": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "userId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "executed"
+            ]
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "read_local"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "canonical": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2000
+              },
+              "canonical_cell_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2000
+              },
+              "confidence": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2000
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "top_tissue": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "top_organ_system": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "proxy_for": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "proxy_note": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "alias_query": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "alias_marker_genes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                      },
+                      "maxItems": 500
+                    },
+                    "requires_geo_ingest": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      "maxItems": 50
+                    },
+                    "supportingGenes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "gene": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          },
+                          "csi": {
+                            "type": "number"
+                          },
+                          "rankForGene": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        },
+                        "required": [
+                          "gene",
+                          "csi",
+                          "rankForGene"
+                        ]
+                      },
+                      "maxItems": 10
+                    },
+                    "vote_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "marker_score": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "match_type": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "resolution_is_proxy": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "dropped_query_tokens": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    },
+                    "uncorroborated_qualifiers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    },
+                    "corroborated_qualifiers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    },
+                    "match_detail": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "matched_term": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 2000
+                        },
+                        "jaccard": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "containment_canonical": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "containment_query": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "ratio": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "shared_tokens": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "maxItems": 50
+                        }
+                      }
+                    },
+                    "added_canonical_tokens": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    },
+                    "unrequested_specializations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    }
+                  },
+                  "required": [
+                    "cell_type",
+                    "confidence",
+                    "top_tissue",
+                    "top_organ_system",
+                    "source",
+                    "proxy_for",
+                    "proxy_note",
+                    "alias_query",
+                    "alias_marker_genes",
+                    "requires_geo_ingest",
+                    "supportingGenes",
+                    "vote_count",
+                    "marker_score",
+                    "match_type",
+                    "resolution_is_proxy",
+                    "dropped_query_tokens",
+                    "uncorroborated_qualifiers",
+                    "corroborated_qualifiers",
+                    "match_detail",
+                    "added_canonical_tokens",
+                    "unrequested_specializations"
+                  ]
+                },
+                "maxItems": 20
+              },
+              "delivery_context_hint": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "default_scope": {
+                    "type": "string",
+                    "enum": [
+                      "topical",
+                      "tissue_resident",
+                      "systemic",
+                      "cluster_only"
+                    ]
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10000
+                  },
+                  "alternatives": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "topical",
+                        "tissue_resident",
+                        "systemic",
+                        "cluster_only"
+                      ]
+                    },
+                    "maxItems": 4,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "default_scope",
+                  "rationale",
+                  "alternatives"
+                ]
+              },
+              "resolution_status": {
+                "type": "string",
+                "enum": [
+                  "resolved",
+                  "unresolved"
+                ]
+              },
+              "resolution_stage": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "exact",
+                  "substring",
+                  "ontology_synonym",
+                  "token_set",
+                  "fuzzy",
+                  "specialized_alias",
+                  "marker_overlap",
+                  null
+                ]
+              },
+              "resolution_is_proxy": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "resolution_is_ambiguous": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "ambiguous_alternatives": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "score": {
+                      "type": "number"
+                    },
+                    "match_type": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "cell_type",
+                    "score",
+                    "match_type"
+                  ]
+                },
+                "maxItems": 20
+              },
+              "stages_tried": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "maxItems": 50
+              },
+              "nearest_candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "cell_type": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "score": {
+                      "type": "number"
+                    },
+                    "match_type": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "accepted": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "shared_tokens": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    },
+                    "dropped_query_tokens": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "maxItems": 50
+                    }
+                  },
+                  "required": [
+                    "cell_type",
+                    "score",
+                    "match_type",
+                    "accepted",
+                    "shared_tokens",
+                    "dropped_query_tokens"
+                  ]
+                },
+                "maxItems": 20
+              },
+              "unresolved_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 10000
+              },
+              "vocabulary": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "source_datasets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "maxItems": 50
+                  },
+                  "tissue_count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "scope": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 10000
+                  },
+                  "specificity_row_count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "synonym_tables": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "specialized_alias_keys": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "specialized_alias_entries": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "ontology_synonym_keys": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "ontology_synonym_entries": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "specialized_alias_keys",
+                      "specialized_alias_entries",
+                      "ontology_synonym_keys",
+                      "ontology_synonym_entries"
+                    ]
+                  }
+                },
+                "required": [
+                  "size",
+                  "source_datasets",
+                  "tissue_count",
+                  "scope",
+                  "specificity_row_count",
+                  "synonym_tables"
+                ]
+              }
+            },
+            "required": [
+              "query",
+              "canonical",
+              "canonical_cell_type",
+              "confidence",
+              "source",
+              "candidates",
+              "delivery_context_hint",
+              "resolution_status",
+              "resolution_stage",
+              "resolution_is_proxy",
+              "resolution_is_ambiguous",
+              "ambiguous_alternatives",
+              "stages_tried",
+              "nearest_candidates",
+              "unresolved_reason",
+              "vocabulary"
+            ]
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ]
+      },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "marker_genes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 500
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 5
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "definitionDigest": "90f29d0611c4c4058b39ac049d9f4ae7fe47155dbe39e2b8d711eb4cb5a2f692"
+    },
+    {
+      "operation": "hswae.v2.compare_cell_types",
+      "title": "H-SWAEV2 differential cell-context specificity",
+      "description": "Compare a target cell type against an explicit delivery-aware comparator scope, over the fixed HPA v25 single-cell vocabulary (~202 labels). Read `differential` as a measured contrast ONLY when differential_status is \"computed\"; the other values (\"target_unresolved\", \"no_references_resolved\", \"no_rows_above_threshold\") name what was missing, and reference_resolution reports which requested references resolved. This is the cell-type-grain counterpart to hswae.v1.surface_markers.",
+      "domain": "transcriptomics",
+      "effect": "read_local",
+      "executionMode": "immediate",
+      "requiredEntitlements": [
+        "transcriptomics.hswae2"
+      ],
+      "requiredApprovalScopes": [],
+      "backendFamily": "hswae_v2",
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "receiptVersion": {
+            "type": "string",
+            "enum": [
+              "1"
+            ]
+          },
+          "contractVersion": {
+            "type": "string",
+            "enum": [
+              "1.0.0"
+            ]
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "hswae.v2.compare_cell_types"
+            ]
+          },
+          "owner": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "userId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "orgId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "userId",
+              "orgId"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "executed"
+            ]
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "read_local"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "target_cell_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2000
+              },
+              "target_query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "target_proxy_note": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2000
+              },
+              "reference_cell_types": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "maxItems": 200
+              },
+              "differential": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "gene_name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    },
+                    "target_cell_type": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "target_csi": {
+                      "type": "number"
+                    },
+                    "target_rank_global": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 1
+                    },
+                    "target_mean_expression": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "max_reference_csi": {
+                      "type": "number"
+                    },
+                    "delta_csi": {
+                      "type": "number"
+                    },
+                    "is_surface_annotated": {
+                      "type": "boolean"
+                    },
+                    "top_tissue": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "top_organ_system": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "reference_cell_types_matched": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      "maxItems": 200
+                    }
+                  },
+                  "required": [
+                    "gene_name",
+                    "target_cell_type",
+                    "target_csi",
+                    "target_rank_global",
+                    "target_mean_expression",
+                    "max_reference_csi",
+                    "delta_csi",
+                    "is_surface_annotated",
+                    "top_tissue",
+                    "top_organ_system",
+                    "reference_cell_types_matched"
+                  ]
+                },
+                "maxItems": 200
+              },
+              "comparator_scope": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "topical",
+                  "tissue_resident",
+                  "systemic",
+                  "cluster_only",
+                  null
+                ]
+              },
+              "comparator_scope_source": {
+                "type": "string",
+                "enum": [
+                  "request",
+                  "delivery_context",
+                  "none"
+                ]
+              },
+              "delivery_context": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 2000
+              },
+              "differential_status": {
+                "type": "string",
+                "enum": [
+                  "computed",
+                  "target_unresolved",
+                  "no_references_resolved",
+                  "no_rows_above_threshold"
+                ]
+              },
+              "differential_status_detail": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 10000
+              },
+              "target_resolution": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "canonical": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2000
+                  },
+                  "canonical_cell_type": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2000
+                  },
+                  "confidence": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "source": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2000
+                  },
+                  "resolution_status": {
+                    "type": "string",
+                    "enum": [
+                      "resolved",
+                      "unresolved"
+                    ]
+                  },
+                  "resolution_stage": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "exact",
+                      "substring",
+                      "ontology_synonym",
+                      "token_set",
+                      "fuzzy",
+                      "specialized_alias",
+                      "marker_overlap",
+                      null
+                    ]
+                  },
+                  "resolution_is_proxy": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "resolution_is_ambiguous": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "ambiguous_alternatives": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "cell_type": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2000
+                        },
+                        "score": {
+                          "type": "number"
+                        },
+                        "match_type": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      },
+                      "required": [
+                        "cell_type",
+                        "score",
+                        "match_type"
+                      ]
+                    },
+                    "maxItems": 20
+                  },
+                  "stages_tried": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "maxItems": 50
+                  },
+                  "unresolved_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 10000
+                  }
+                },
+                "required": [
+                  "query",
+                  "canonical",
+                  "canonical_cell_type",
+                  "confidence",
+                  "source",
+                  "resolution_status",
+                  "resolution_stage",
+                  "resolution_is_proxy",
+                  "resolution_is_ambiguous",
+                  "ambiguous_alternatives",
+                  "stages_tried",
+                  "unresolved_reason"
+                ]
+              },
+              "reference_resolution": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requested": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "canonical": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 2000
+                    },
+                    "resolution_status": {
+                      "type": "string",
+                      "enum": [
+                        "resolved",
+                        "unresolved"
+                      ]
+                    },
+                    "resolution_stage": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "exact",
+                        "substring",
+                        "ontology_synonym",
+                        "token_set",
+                        "fuzzy",
+                        "specialized_alias",
+                        "marker_overlap",
+                        null
+                      ]
+                    },
+                    "resolution_is_proxy": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "specificity_row_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "contributes_to_differential": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "unresolved_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 10000
+                    }
+                  },
+                  "required": [
+                    "requested",
+                    "canonical",
+                    "resolution_status",
+                    "resolution_stage",
+                    "resolution_is_proxy",
+                    "specificity_row_count",
+                    "contributes_to_differential",
+                    "unresolved_reason"
+                  ]
+                },
+                "maxItems": 200
+              },
+              "reference_cell_types_requested": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "maxItems": 200
+              },
+              "comparator_scope_note": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 10000
+              },
+              "differential_truncated_at_top_n": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "target_cell_type",
+              "target_query",
+              "target_proxy_note",
+              "reference_cell_types",
+              "differential",
+              "comparator_scope",
+              "comparator_scope_source",
+              "delivery_context",
+              "differential_status",
+              "differential_status_detail",
+              "target_resolution",
+              "reference_resolution",
+              "reference_cell_types_requested",
+              "comparator_scope_note",
+              "differential_truncated_at_top_n"
+            ]
+          }
+        },
+        "required": [
+          "receiptVersion",
+          "contractVersion",
+          "requestId",
+          "operation",
+          "owner",
+          "status",
+          "effect",
+          "createdAt",
+          "result"
+        ]
+      },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target_cell_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reference_cell_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200
+          },
+          "comparator_scope": {
+            "type": "string",
+            "enum": [
+              "topical",
+              "tissue_resident",
+              "systemic",
+              "cluster_only"
+            ]
+          },
+          "delivery_context": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "top_n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 25
+          }
+        },
+        "required": [
+          "target_cell_type"
+        ]
+      },
+      "definitionDigest": "c47bb550e0905d05eee2b17a4a6fa474b1bbbb43384789a7586b589468140a22"
+    }
+  ],
+  "resolver_results": [
+    {
+      "query": "astrocytes",
+      "canonical": "astrocytes",
+      "canonical_cell_type": "astrocytes",
+      "confidence": 1,
+      "source": "canonical_exact",
+      "candidates": [
+        {
+          "cell_type": "astrocytes",
+          "confidence": 1,
+          "top_tissue": "brain non-neurons",
+          "top_organ_system": "Nervous",
+          "source": "canonical_exact",
+          "proxy_for": null,
+          "proxy_note": null,
+          "alias_query": null,
+          "alias_marker_genes": [],
+          "requires_geo_ingest": [],
+          "supportingGenes": [],
+          "vote_count": null,
+          "marker_score": null,
+          "match_type": "exact",
+          "resolution_is_proxy": false,
+          "dropped_query_tokens": [],
+          "uncorroborated_qualifiers": [],
+          "corroborated_qualifiers": [],
+          "match_detail": {},
+          "added_canonical_tokens": [],
+          "unrequested_specializations": []
+        }
+      ],
+      "delivery_context_hint": null,
+      "resolution_status": "resolved",
+      "resolution_stage": "exact",
+      "resolution_is_proxy": false,
+      "resolution_is_ambiguous": false,
+      "ambiguous_alternatives": [],
+      "stages_tried": [
+        "exact",
+        "substring",
+        "ontology_synonym",
+        "token_set",
+        "fuzzy",
+        "specialized_alias"
+      ],
+      "nearest_candidates": [
+        {
+          "cell_type": "astrocytes",
+          "score": 1,
+          "match_type": "exact",
+          "accepted": true,
+          "shared_tokens": [],
+          "dropped_query_tokens": []
+        },
+        {
+          "cell_type": "epithelial cells",
+          "score": 0.2077,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "astrocyte"
+          ]
+        },
+        {
+          "cell_type": "enterocytes",
+          "score": 0.1903,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "astrocyte"
+          ]
+        },
+        {
+          "cell_type": "hepatocytes",
+          "score": 0.1903,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "astrocyte"
+          ]
+        },
+        {
+          "cell_type": "erythrocytes",
+          "score": 0.1866,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "astrocyte"
+          ]
+        }
+      ],
+      "unresolved_reason": null,
+      "vocabulary": {
+        "size": 202,
+        "source_datasets": [
+          "hpa_v25_single_cell_cluster",
+          "specialized_reference_cell_context"
+        ],
+        "tissue_count": 38,
+        "scope": "This layer resolves against a FIXED set of HPA v25 single-cell cluster labels plus specialized reference cell contexts, NOT an open Cell Ontology — an unresolved term means the term is outside this vocabulary, not that the cell type does not exist.",
+        "specificity_row_count": 477692,
+        "synonym_tables": {
+          "specialized_alias_keys": 66,
+          "specialized_alias_entries": 16,
+          "ontology_synonym_keys": 254,
+          "ontology_synonym_entries": 88
+        }
+      }
+    },
+    {
+      "query": "aqueous humor",
+      "canonical": null,
+      "canonical_cell_type": null,
+      "confidence": null,
+      "source": null,
+      "candidates": [],
+      "delivery_context_hint": null,
+      "resolution_status": "unresolved",
+      "resolution_stage": null,
+      "resolution_is_proxy": false,
+      "resolution_is_ambiguous": false,
+      "ambiguous_alternatives": [],
+      "stages_tried": [
+        "exact",
+        "substring",
+        "ontology_synonym",
+        "token_set",
+        "fuzzy",
+        "specialized_alias"
+      ],
+      "nearest_candidates": [
+        {
+          "cell_type": "epithelial cells",
+          "score": 0.1304,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "aqueou",
+            "humor"
+          ]
+        },
+        {
+          "cell_type": "hofbauer cells",
+          "score": 0.084,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "aqueou",
+            "humor"
+          ]
+        },
+        {
+          "cell_type": "granulosa cells",
+          "score": 0.0833,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "aqueou",
+            "humor"
+          ]
+        },
+        {
+          "cell_type": "langerhans cells",
+          "score": 0.0827,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "aqueou",
+            "humor"
+          ]
+        },
+        {
+          "cell_type": "platelets",
+          "score": 0.0825,
+          "match_type": "fuzzy",
+          "accepted": false,
+          "shared_tokens": [],
+          "dropped_query_tokens": [
+            "aqueou",
+            "humor"
+          ]
+        }
+      ],
+      "unresolved_reason": "'aqueous humor' did not clear any resolution stage. Stages tried: exact, substring, ontology_synonym, token_set, fuzzy, specialized_alias (marker_overlap was NOT tried — it requires caller-supplied marker_genes). Closest non-accepting candidate: 'epithelial cells' (fuzzy, score 0.1304). The vocabulary holds 202 cell types from hpa_v25_single_cell_cluster, specialized_reference_cell_context. This layer resolves against a FIXED set of HPA v25 single-cell cluster labels plus specialized reference cell contexts, NOT an open Cell Ontology — an unresolved term means the term is outside this vocabulary, not that the cell type does not exist.",
+      "vocabulary": {
+        "size": 202,
+        "source_datasets": [
+          "hpa_v25_single_cell_cluster",
+          "specialized_reference_cell_context"
+        ],
+        "tissue_count": 38,
+        "scope": "This layer resolves against a FIXED set of HPA v25 single-cell cluster labels plus specialized reference cell contexts, NOT an open Cell Ontology — an unresolved term means the term is outside this vocabulary, not that the cell type does not exist.",
+        "specificity_row_count": 477692,
+        "synonym_tables": {
+          "specialized_alias_keys": 66,
+          "specialized_alias_entries": 16,
+          "ontology_synonym_keys": 254,
+          "ontology_synonym_entries": 88
+        }
+      }
+    }
+  ]
+}

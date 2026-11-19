@@ -67,7 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.16.9] - 2026-11-18
 
 - Validate the server's capability definition digest and independently pin the reviewed definition.
-  Known pre-digest registries remain readable.
+  The resolver and comparison pins cover the integrated server's selection fields.
+  Earlier reviewed definitions remain readable. Resolver receipts preserve the server's
+  selected label, confidence and source, including explicit null values.
 - Add signed tissue and cell-type projection mutations, plus a projected cell-type listing, to synchronous and asynchronous discovery.
 
 ## [0.16.8] - 2026-11-08

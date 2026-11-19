@@ -13,7 +13,9 @@ V2 resolves cell types and compares them against explicit reference cell types.
 Read the canonical label, its matching candidate, confidence, resolution stage,
 ambiguity and proxy flags. A high score for a broad label does not establish a
 more specific subtype. In SDK 0.16.9, the typed result exposes
-`canonical_cell_type` and the matched candidate’s `confidence`. Earlier
+`canonical_cell_type`, `confidence` and `source` from the server's selection.
+For an older receipt that omits those fields, the SDK reads the canonical label
+and the corresponding candidate. Explicit nulls are preserved. Earlier
 SDKs expose `canonical` and `candidates`. A search miss says which vocabulary
 was queried. It gives no evidence of biological absence.
 
@@ -46,6 +48,10 @@ the signed receipt and its requested membership. Use `tissues()` or
 a membership readback before issuing another change. On this server version,
 `surface_markers` can resolve an exact tissue while reporting
 `tissue_ranking_unavailable` if its reference lacks tissue-level marker ranks.
+In the integrated preview, `eye` resolves exactly and its `ranking_note`
+identifies a single-cell fallback. The highest specificity and highest
+expression can come from different clusters. Whole-eye expression remains
+unmeasured in this reference.
 
 
 

@@ -538,10 +538,10 @@ def test_definition_hashes_pin_the_exact_reviewed_registry() -> None:
             "3992253a1d90a4df946a94ef80fb8eee8f97d59dce48a93acaf7ffa6d6be8bf6"
         ),
         "hswae.v2.resolve_cell_type": (
-            "7d735726ec489659c86169ae14e70ce52c34a63bdb30b6b34e3782b82726934c"
+            "90f29d0611c4c4058b39ac049d9f4ae7fe47155dbe39e2b8d711eb4cb5a2f692"
         ),
         "hswae.v2.compare_cell_types": (
-            "72158a851958c675d3dd67c1ccce82d93bfb4348b0c650ab46d5b04ed6d83972"
+            "c47bb550e0905d05eee2b17a4a6fa474b1bbbb43384789a7586b589468140a22"
         ),
         "hswae.v2.isoform_expression": (
             "ba8ba91ef66e5dade52856f433fe1c10e2f5776f3f77c40ad1268f0d4a2e0f3f"

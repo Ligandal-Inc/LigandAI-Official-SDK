@@ -25,7 +25,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    computed_field,
     field_validator,
     model_serializer,
     model_validator,
@@ -1326,10 +1325,10 @@ HSWAE_CAPABILITY_DEFINITION_HASHES: Mapping[HswaeCapabilityOperation, str] = Map
             "3992253a1d90a4df946a94ef80fb8eee8f97d59dce48a93acaf7ffa6d6be8bf6"
         ),
         "hswae.v2.resolve_cell_type": (
-            "7d735726ec489659c86169ae14e70ce52c34a63bdb30b6b34e3782b82726934c"
+            "90f29d0611c4c4058b39ac049d9f4ae7fe47155dbe39e2b8d711eb4cb5a2f692"
         ),
         "hswae.v2.compare_cell_types": (
-            "72158a851958c675d3dd67c1ccce82d93bfb4348b0c650ab46d5b04ed6d83972"
+            "c47bb550e0905d05eee2b17a4a6fa474b1bbbb43384789a7586b589468140a22"
         ),
         "hswae.v2.isoform_expression": (
             "ba8ba91ef66e5dade52856f433fe1c10e2f5776f3f77c40ad1268f0d4a2e0f3f"
@@ -1342,6 +1341,13 @@ HSWAE_CAPABILITY_DEFINITION_HASHES: Mapping[HswaeCapabilityOperation, str] = Map
         ),
     }
 )
+
+# The preceding signed registry used the same two read operations before the
+# server exposed the selected label, confidence and source in their output schemas.
+_HSWAE_PRIOR_SIGNED_DEFINITION_HASHES = {
+    "hswae.v2.resolve_cell_type": "7d735726ec489659c86169ae14e70ce52c34a63bdb30b6b34e3782b82726934c",
+    "hswae.v2.compare_cell_types": "72158a851958c675d3dd67c1ccce82d93bfb4348b0c650ab46d5b04ed6d83972",
+}
 
 # Reviewed pre-digest definitions, including the November deployment and the older SDK contract.
 _HSWAE_LEGACY_DEFINITION_HASHES = {
@@ -1598,7 +1604,8 @@ class HswaeCapabilityDefinition(_HswaeClosedModel):
             raise ValueError("capability definition is not canonical JSON") from exc
         computed = hashlib.sha256(canonical).hexdigest()
         if "definitionDigest" in value:
-            if value["definitionDigest"] != computed or computed != expected:
+            reviewed = computed == expected or computed == _HSWAE_PRIOR_SIGNED_DEFINITION_HASHES.get(operation)
+            if value["definitionDigest"] != computed or not reviewed:
                 raise ValueError("capability definition digest mismatch")
         elif computed != expected and computed not in _HSWAE_LEGACY_DEFINITION_HASHES.get(operation, ()):
             raise ValueError("capability definition digest mismatch: absent server digest and unreviewed definition")
@@ -2083,6 +2090,9 @@ class HswaeCellTypeResolution(_HswaeOpenModel):
 
     query: _HswaePublicString
     canonical: _HswaeNullablePublicString = None
+    canonical_cell_type: _HswaeNullablePublicString = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    source: _HswaeNullablePublicString = None
     resolution_status: _HswaeNullablePublicString = None
     resolution_stage: _HswaeNullablePublicString = None
     resolution_is_proxy: bool | None = None
@@ -2140,6 +2150,9 @@ class HswaeResolveCellTypeResult(_HswaeOpenModel):
 
     query: _HswaePublicString
     canonical: _HswaeNullablePublicString
+    canonical_cell_type: _HswaeNullablePublicString = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    source: _HswaeNullablePublicString = None
     candidates: list[HswaeResolveCellTypeCandidate] = Field(max_length=20)
     delivery_context_hint: HswaeDeliveryContextHint | None
     #: ``resolved`` / ``unresolved``, and the stage that got there.
@@ -2159,18 +2172,26 @@ class HswaeResolveCellTypeResult(_HswaeOpenModel):
     unresolved_reason: _HswaeNullableNote = None
     vocabulary: HswaeResolutionVocabulary | None = None
 
-
-    @computed_field
-    @property
-    def canonical_cell_type(self) -> str | None:
-        """The canonical label selected by the resolver."""
-        return self.canonical
-
-    @computed_field
-    @property
-    def confidence(self) -> float | None:
-        """Recorded confidence for the selected label, if that candidate was returned."""
-        return next((item.confidence for item in self.candidates if item.cell_type == self.canonical), None)
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_selection(cls, value: Any) -> Any:
+        """Older receipts record selection metadata only on the matching candidate."""
+        if not isinstance(value, dict):
+            return value
+        if {"canonical_cell_type", "confidence", "source"} <= value.keys():
+            return value
+        selection = dict(value)
+        canonical = selection.setdefault("canonical_cell_type", value.get("canonical"))
+        candidates = value.get("candidates")
+        if canonical is not None and isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, HswaeResolveCellTypeCandidate):
+                    candidate = candidate.model_dump()
+                if isinstance(candidate, dict) and candidate.get("cell_type") == canonical:
+                    selection.setdefault("confidence", candidate.get("confidence"))
+                    selection.setdefault("source", candidate.get("source"))
+                    break
+        return selection
 
 
 class HswaeDifferentialCellTypeRow(_HswaeOpenModel):
