@@ -170,15 +170,15 @@ can rule a design out; it cannot certify one. When a design is not yet certified
 the runner tells you how many more runs would do it, or that its rate is too high
 for any number of runs to help.
 
-Budgeting follows from that. The default rates are 10 credits per fold ($0.10 at
-the default 4 trajectories — `ligandai.pricing`), plus the ledger medians for
-generation (100 credits per peptide) and scoring (25 per design). One certified
-design at a 0.15 bar is 100 + 22 x 10 + 25 = 345 credits, which puts 25 certified
-designs at roughly 8,625 credits if nothing fails. `ligandai campaign validate`
+Budgeting follows from that. The default rates are 20 credits per fold ($0.20 at
+the default 4 trajectories — `ligandai.pricing`), plus nominal rates for
+unguided generation (10 credits per peptide) and scoring (5 per design). One certified
+design at a 0.15 bar is 10 + 22 x 20 + 5 = 455 credits, which puts 25 certified
+designs at roughly 11,375 credits if nothing fails. `ligandai campaign validate`
 does this arithmetic for your spec and refuses a budget that cannot buy one
 certified design. A spec that raises `diffusion_samples` or `sampling_steps`
 without stating `credits_per_fold` is priced at that setting (8 trajectories is
-20 credits a fold). If your account prices differently, override
+40 credits a fold). If your account prices differently, override
 `credits_per_fold`, `credits_per_generated_peptide` and
 `credits_per_scored_design` under `fold:`.
 
@@ -194,3 +194,10 @@ print(result.stop_reason, result.stop_detail)
 for r in result.certified:
     print(r.sequence, r.reliability.interval.upper, r.margin_against("CA9"))
 ```
+
+These are optimistic budget floors, not all-in quotes. Generation guidance adds
+5 credits each for immuno and stability (20 per-peptide cap); the planner and
+local spend ledger account for the selected guidance. A standalone LigandIQ
+job costs `max(20, 5 * peptide_count)`, while other scoring routes have their
+own inclusion rules. Scoring fan-out and per-job minima can increase actual
+cost. Use server quotes and receipts before spending; PTF has no setup fee.

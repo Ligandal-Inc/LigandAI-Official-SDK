@@ -27,37 +27,37 @@ from ligandai.errors import LigandAIInsufficientCredits
 class TestCostEstimation:
     """Local cost-estimation helpers mirror the server formula."""
 
-    # Fold price: 10 credits ($0.10) per default 4-trajectory fold
+    # Fold price: 20 credits ($0.20) per default 4-trajectory fold
     # (ligandai.pricing). It was 100 credits ($1.00).
 
     def test_fold_batch_simple(self) -> None:
-        # 10 peptides × 10 cr (4 trajectories, 50 steps) = 100
+        # 10 peptides × 20 cr (4 trajectories, 50 steps) = 200
         assert estimate_fold_batch_credits(
             peptide_count=10, trajectories=4, sampling_steps=50,
-        ) == 100
+        ) == 200
 
     def test_fold_batch_with_higher_sampling(self) -> None:
-        # 100 steps = ceil(100/50) = 2x: 10 × 10 × 2 = 200
+        # 100 steps = ceil(100/50) = 2x: 10 × 20 × 2 = 400
         assert estimate_fold_batch_credits(
             peptide_count=10, trajectories=4, sampling_steps=100,
-        ) == 200
+        ) == 400
 
     def test_fold_batch_below_50_steps_does_not_discount(self) -> None:
         # (no discount for fewer steps; the multiplier floor is 1)
         assert estimate_fold_batch_credits(
             peptide_count=10, trajectories=4, sampling_steps=25,
-        ) == 100
+        ) == 200
 
     def test_single_fold(self) -> None:
         assert estimate_single_fold_credits(
             trajectories=4, sampling_steps=50,
-        ) == 10
+        ) == 20
 
     def test_single_fold_default_steps(self) -> None:
         # None → 50 steps
         assert estimate_single_fold_credits(
             trajectories=4, sampling_steps=None,
-        ) == 10
+        ) == 20
 
 
 class TestPreflightRejectsInsufficientBalance:
@@ -79,7 +79,7 @@ class TestPreflightRejectsInsufficientBalance:
             )
             # Warm the cache so the pre-flight has a real balance to check
             _ = client.credits
-            # 10 × 10 = 100 cr needed; only 50 available
+            # 10 × 20 = 200 cr needed; only 50 available
             with pytest.raises(LigandAIInsufficientCredits) as ei:
                 client.fold_batch(
                     peptides=["ACDE"] * 10,
@@ -87,9 +87,9 @@ class TestPreflightRejectsInsufficientBalance:
                     diffusion_samples=4,
                     sampling_steps=50,
                 )
-            assert ei.value.required == 100
+            assert ei.value.required == 200
             assert ei.value.available == 50
-            assert ei.value.shortfall == 50
+            assert ei.value.shortfall == 150
             assert not posted.called, (
                 "credit pre-flight must block POST before submission"
             )
@@ -105,7 +105,7 @@ class TestPreflightRejectsInsufficientBalance:
                 return_value=httpx.Response(200, json={
                     "batch_id": "batch-ok",
                     "jobs": [{"job_id": "sub-0", "peptide_index": 0, "sequence": "ACDE"}],
-                    "total_cost_credits": 100,
+                    "total_cost_credits": 200,
                     "peptide_count": 10,
                     "trajectories_per_peptide": 4,
                     "receptor": {"gene": "EGFR"},
@@ -165,7 +165,7 @@ class TestPreflightRejectsInsufficientBalance:
                 return_value=httpx.Response(200, json={
                     "batch_id": "batch-skip-preflight",
                     "jobs": [{"job_id": "sub-0", "peptide_index": 0, "sequence": "ACDE"}],
-                    "total_cost_credits": 100,
+                    "total_cost_credits": 200,
                     "peptide_count": 10,
                     "trajectories_per_peptide": 4,
                     "receptor": {"gene": "EGFR"},
@@ -199,7 +199,7 @@ class TestSuperadminBypass:
                 return_value=httpx.Response(200, json={
                     "batch_id": "batch-sa",
                     "jobs": [{"job_id": "sub-0", "peptide_index": 0, "sequence": "ACDE"}],
-                    "total_cost_credits": 100,
+                    "total_cost_credits": 200,
                     "peptide_count": 10,
                     "trajectories_per_peptide": 4,
                     "receptor": {"gene": "EGFR"},

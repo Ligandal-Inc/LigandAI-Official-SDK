@@ -1,34 +1,24 @@
 # Copyright © 2026 Ligandal, Inc. All rights reserved.
-"""Fold pricing — the ONE place the SDK states what a fold costs.
+"""Local pricing mirrors for offline budgets; server quotes are authoritative.
 
-Since 2026-10-02 a fold costs **10 credits ($0.10)** at the default 4
-trajectories. It cost 100 credits ($1.00) before. ``1 credit = 1 cent``
-(:data:`CREDITS_PER_USD` = 100), and that conversion did not change.
+A default fold (4 trajectories, 50 steps) costs 20 credits ($0.20): 5 per
+trajectory, with a 20-credit minimum PER FOLD. Steps above 50 scale the rate
+by ``ceil(steps / 50)``. One credit remains one cent.
 
-Structure (carried over unchanged, with the base reduced):
+PTF generation is 10 credits per peptide, plus 5 each for immunogenicity and
+serum-stability guidance, capped at 20 per peptide. Quality guidance and
+LigandIQ fold ranking add zero. There is no volume discount or PTF setup fee.
+The standalone LigandForge setup fee does not belong in these PTF estimates.
 
-* the price is PER FOLD and scales with the trajectory count, proportionally —
-  :data:`CREDITS_PER_TRAJECTORY` is derived as
-  ``CREDITS_PER_FOLD_DEFAULT / TRAJECTORIES_DEFAULT`` (2.5 credits);
-* a fold never costs less than :data:`FOLD_MIN_CREDITS` (the default price), so a
-  single-trajectory fold costs the same 10 credits as a 4-trajectory one;
-* ``sampling_steps`` above :data:`FOLD_STEP_BASE` multiply the cost by
-  ``ceil(steps / 50)`` — 100 steps is 2x, 200 steps is 4x;
-* peptide GENERATION (:data:`CREDITS_PER_GENERATED_PEPTIDE`) and DeltaForge
-  scoring (:data:`CREDITS_PER_SCORED_DESIGN`) are priced separately and were
-  not touched.
+Standalone LigandIQ scoring costs 5 per peptide with a 20-credit minimum PER
+JOB. This floor is not a generation surcharge and does not apply to every
+other route that uses the nominal scoring rate. Campaign rates are optimistic
+budget inputs, not billing receipts; scoring fan-out and route minima can add
+cost. Ensemble co-fold prices come from the server, not from this module.
 
-⛔ THE PLATFORM IS AUTHORITATIVE. Everything here is a LOCAL FALLBACK for
-offline arithmetic — the pre-flight balance check, ``CampaignSpec`` budget
-validation, docstring and example figures. Anything that can ask the server
-should: ``client.peptides.estimate_cost()`` (``GET /api/billing/estimate``),
-``client.ensemble.estimate()`` (``POST /api/v1/cofold/estimate``) and the
-``total_cost_credits`` a submitted batch returns are the numbers that get
-charged. The ensemble co-fold is priced per engine by the server and is NOT
-derived from this module at all.
-
-Every figure in the README, the examples and the skills is derived from the
-constants below; ``tests/unit/test_fold_pricing.py`` fails when they disagree.
+Use ``client.peptides.estimate_cost()`` or ``client.synthesis.estimate_cost()``
+for generation/folding quotes and ``client.ensemble.estimate()`` for ensembles.
+Submitted jobs and the server ledger determine actual account charges.
 """
 
 from __future__ import annotations
@@ -46,6 +36,12 @@ __all__ = [
     "fold_credits",
     "fold_batch_credits",
     "credits_to_usd",
+    "GENERATION_GUIDANCE_SURCHARGE",
+    "GENERATION_PER_PEPTIDE_CAP",
+    "SCORE_MIN_CHARGE_PEPTIDES",
+    "SCORE_MIN_CHARGE",
+    "generation_credits",
+    "ligandiq_score_credits",
 ]
 
 #: Platform rate: 100 credits = $1.00, i.e. 1 credit = 1 cent. Unchanged.
@@ -54,24 +50,60 @@ CREDITS_PER_USD: int = 100
 #: Boltz-2 diffusion trajectories per fold when the caller does not say.
 TRAJECTORIES_DEFAULT: int = 4
 
-#: Credits for ONE default fold (4 trajectories, 50 sampling steps): $0.10.
-CREDITS_PER_FOLD_DEFAULT: int = 10
+#: Credits for ONE default fold (4 trajectories, 50 sampling steps): $0.20.
+#: Mirrors server FOLD_DEFAULT_CREDITS = FOLD_PER_TRAJECTORY (5) x 4 (shared/forge-pricing.ts).
+CREDITS_PER_FOLD_DEFAULT: int = 20
 
 #: Minimum credits for any one fold. Equals the default price, so folding with
 #: fewer trajectories than the default is not cheaper.
 FOLD_MIN_CREDITS: int = CREDITS_PER_FOLD_DEFAULT
 
-#: Credits per trajectory (list rate): 2.5. Derived, never typed.
+#: Credits per trajectory (list rate): 5. Derived, never typed.
 CREDITS_PER_TRAJECTORY: float = CREDITS_PER_FOLD_DEFAULT / TRAJECTORIES_DEFAULT
 
 #: Sampling steps the base price is quoted at.
 FOLD_STEP_BASE: int = 50
 
 #: Peptide generation, credits per displayed peptide. Not part of the fold price.
-CREDITS_PER_GENERATED_PEPTIDE: int = 100
+CREDITS_PER_GENERATED_PEPTIDE: int = 10  # server GENERATION_BASE_PER_PEPTIDE ($0.10), flat, no volume ladder
 
 #: DeltaForge / LigandIQ scoring, credits per design. Not part of the fold price.
-CREDITS_PER_SCORED_DESIGN: int = 25
+#: Mirrors server LIGANDIQ_PER_PEPTIDE_SCORE (DeltaForge imports the same value).
+CREDITS_PER_SCORED_DESIGN: int = 5
+
+
+GENERATION_GUIDANCE_SURCHARGE: int = 5
+GENERATION_PER_PEPTIDE_CAP: int = 20
+SCORE_MIN_CHARGE_PEPTIDES: int = 4
+SCORE_MIN_CHARGE: int = SCORE_MIN_CHARGE_PEPTIDES * CREDITS_PER_SCORED_DESIGN
+
+
+def generation_credits(
+    count: int,
+    *,
+    immunogenicity: bool = False,
+    serum_stability: bool = False,
+    quality_guided: bool = False,
+    ligandiq_fold_ranking: bool = False,
+) -> int:
+    """PTF generation only; no setup fee, folding or standalone scoring.
+
+    ``quality_guided`` and ``ligandiq_fold_ranking`` are included at no extra
+    charge. The cap is applied per peptide before multiplying by the count.
+    """
+    rate = CREDITS_PER_GENERATED_PEPTIDE + GENERATION_GUIDANCE_SURCHARGE * (
+        int(bool(immunogenicity)) + int(bool(serum_stability))
+    )
+    return max(0, int(count)) * min(GENERATION_PER_PEPTIDE_CAP, rate)
+
+
+def ligandiq_score_credits(count: int) -> int:
+    """One standalone LigandIQ scoring job, with its per-job minimum.
+
+    Zero inputs mean no job. Independent jobs each pay their own minimum.
+    """
+    n = max(0, int(count))
+    return max(SCORE_MIN_CHARGE, n * CREDITS_PER_SCORED_DESIGN) if n else 0
 
 
 def fold_step_multiplier(sampling_steps: int | None = None) -> int:
@@ -90,8 +122,8 @@ def fold_credits(
 ) -> int:
     """Local estimate of one fold, in whole credits.
 
-    ``max(FOLD_MIN_CREDITS, ceil(trajectories * 2.5 * step_multiplier))`` —
-    computed in integers so 2.5 never meets a float rounding edge. Rounds UP: a
+    ``max(FOLD_MIN_CREDITS, ceil(trajectories * 5 * step_multiplier))`` —
+    computed in integers so the rate never meets a float rounding edge. Rounds UP: a
     pre-flight check should over-state by a credit, never under-state.
     """
     n = int(trajectories) if trajectories else TRAJECTORIES_DEFAULT

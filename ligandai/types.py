@@ -1251,8 +1251,8 @@ class Dataset(_LGModel):
 
     ``name`` and ``type`` are therefore optional and populated from whichever key
     the envelope carries. ``status`` / ``estimated_time`` are the 202's own fields:
-    an upload is ACCEPTED, not finished, and the caller needs them to drive
-    :meth:`~ligandai.resources.discovery.Discovery.wait_for_import`.
+    an upload is ACCEPTED, not finished. Inspect its account dataset status;
+    ``wait_for_import`` is for GEO import jobs, not custom upload receipts.
     """
 
     id: str | int

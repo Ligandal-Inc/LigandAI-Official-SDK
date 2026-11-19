@@ -15,8 +15,8 @@ inspect contacts before synthesis ordering.
 
 Billing
 -------
-10 credits ($0.10) per fold at the default 4 trajectories — 2.5 credits per
-trajectory, floored at a 10-credit minimum per fold. Sampling steps above 50
+20 credits ($0.20) per fold at the default 4 trajectories — 5 credits per
+trajectory, floored at a 20-credit minimum per fold. Sampling steps above 50
 multiply the cost by `ceil(sampling_steps / 50)`. The figures come from
 `ligandai.pricing` (a local fallback — the platform is authoritative, and
 `job.total_cost_credits` below is what is actually charged). The full cost is

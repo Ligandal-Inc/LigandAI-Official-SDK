@@ -102,12 +102,11 @@ means the interval's upper bound sits at or below `reliability.certification_bar
 With ZERO failures: 8 runs bound the rate no tighter than 0.32, 16 at 0.19, 22 at
 0.149. So a bar of 0.15 needs **22 clean runs per design**.
 
-Cost defaults: a fold is 10 credits ($0.10 at the default 4 trajectories —
+Cost defaults: a fold is 20 credits ($0.20 at the default 4 trajectories —
 `ligandai.pricing`; a spec that raises `diffusion_samples` or `sampling_steps`
-without stating `credits_per_fold` is priced at that setting). Generation (100
-per peptide) and scoring (25 per design) are medians measured from the credit
-ledger. So one certified design at a 0.15 bar is 100 + 22 x 10 + 25 = 345
-credits, and 25 certified designs at zero failures is roughly 8,625 credits. The
+without stating `credits_per_fold` is priced at that setting). Unguided generation (10
+per peptide) and scoring (5 per design) use current nominal rates. So one certified design at a 0.15 bar is 10 + 22 x 20 + 5 = 455
+credits, and 25 certified designs at zero failures is roughly 11,375 credits. The
 spec validator computes this for your spec and refuses a budget that cannot buy
 one certified design. Override the rates in `fold:` if your account prices
 differently.
@@ -148,3 +147,10 @@ cell is never a zero.
 `deltaforge_predicted_kd_nm` is a PREDICTION. No design in a computational
 campaign has a measured Kd until it is synthesised and run on BLI. The ranking
 orders candidates; it does not measure affinity.
+
+These are optimistic budget floors, not all-in quotes. Generation guidance adds
+5 credits each for immuno and stability (20 per-peptide cap); the planner and
+local spend ledger account for the selected guidance. A standalone LigandIQ
+job costs `max(20, 5 * peptide_count)`, while other scoring routes have their
+own inclusion rules. Scoring fan-out and per-job minima can increase actual
+cost. Use server quotes and receipts before spending; PTF has no setup fee.

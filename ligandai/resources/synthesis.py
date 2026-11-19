@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from ligandai.errors import LigandAIError, LigandAINotFoundError, LigandAIUnreadableResponse
 from ligandai.resources._base import AsyncResource, Resource
+from ligandai.resources._cost_estimate import parse_cost_estimate
 from ligandai.types import (
     AdaptyvExperiment,
     AdaptyvSequence,
@@ -717,6 +718,11 @@ class Synthesis(Resource):
         include_deltaforge: bool = True,
         sampling_steps: int = 50,
         fold_trajectories: int = 1,
+        *,
+        immunogenicity: bool = False,
+        serum_stability: bool = False,
+        quality_guided: bool = False,
+        ligandiq_fold_ranking: bool = False,
     ) -> CostEstimate:
         """Estimate credit cost for a generation + folding run before submitting.
 
@@ -735,6 +741,14 @@ class Synthesis(Resource):
                 enterprise/discovery_partner (free/basic stay at 1) — pass
                 ``fold_trajectories=4`` explicitly to match the platform
                 default on a paid tier.
+            immunogenicity: Include immuno guidance (5 credits per peptide).
+            serum_stability: Include stability guidance (5 credits per peptide).
+            quality_guided: Included guidance, no additional charge.
+            ligandiq_fold_ranking: Included ranking, no additional charge.
+
+        Raises:
+            LigandAIUnreadableResponse: The server did not return a complete,
+                finite quote. An explicitly quoted zero remains valid.
         """
         params: dict[str, object] = {
             "gene": gene,
@@ -745,9 +759,14 @@ class Synthesis(Resource):
             "sampling_steps": sampling_steps,
             "fold_trajectories": fold_trajectories,
         }
-        return CostEstimate.model_validate(
+        params.update({key: True for key, enabled in {
+            "immuno": immunogenicity,
+            "stability": serum_stability,
+            "quality_guided": quality_guided,
+            "ligandiq_fold_ranking": ligandiq_fold_ranking,
+        }.items() if enabled})
+        return parse_cost_estimate(
             self._transport.request("GET", "/api/billing/estimate", params=params)
-            or {"credits": 0, "costUsd": 0.0}
         )
 
     def amide_quote(self, peptides: list[SynthesisPeptide | dict]) -> dict:
@@ -1041,6 +1060,11 @@ class AsyncSynthesis(AsyncResource):
         include_deltaforge: bool = True,
         sampling_steps: int = 50,
         fold_trajectories: int = 1,
+        *,
+        immunogenicity: bool = False,
+        serum_stability: bool = False,
+        quality_guided: bool = False,
+        ligandiq_fold_ranking: bool = False,
     ) -> CostEstimate:
         """Estimate credit cost for a generation + folding run before submitting.
 
@@ -1059,6 +1083,14 @@ class AsyncSynthesis(AsyncResource):
                 enterprise/discovery_partner (free/basic stay at 1) — pass
                 ``fold_trajectories=4`` explicitly to match the platform
                 default on a paid tier.
+            immunogenicity: Include immuno guidance (5 credits per peptide).
+            serum_stability: Include stability guidance (5 credits per peptide).
+            quality_guided: Included guidance, no additional charge.
+            ligandiq_fold_ranking: Included ranking, no additional charge.
+
+        Raises:
+            LigandAIUnreadableResponse: The server did not return a complete,
+                finite quote. An explicitly quoted zero remains valid.
         """
         params: dict[str, object] = {
             "gene": gene,
@@ -1069,9 +1101,14 @@ class AsyncSynthesis(AsyncResource):
             "sampling_steps": sampling_steps,
             "fold_trajectories": fold_trajectories,
         }
-        return CostEstimate.model_validate(
+        params.update({key: True for key, enabled in {
+            "immuno": immunogenicity,
+            "stability": serum_stability,
+            "quality_guided": quality_guided,
+            "ligandiq_fold_ranking": ligandiq_fold_ranking,
+        }.items() if enabled})
+        return parse_cost_estimate(
             await self._transport.request("GET", "/api/billing/estimate", params=params)
-            or {"credits": 0, "costUsd": 0.0}
         )
 
     async def amide_quote(self, peptides: list[SynthesisPeptide | dict]) -> dict:

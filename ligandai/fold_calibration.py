@@ -54,7 +54,13 @@ __all__ = [
     "standing",
 ]
 
-ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera", "opendde")
+#: `af3_openfold` is the AlphaFold3 ARCHITECTURE running the Apache-2.0 OpenFold3
+#: "OpenBind-0" WEIGHTS. It is deliberately a separate key from `openfold3`: same weight
+#: lineage, different architecture and a different reported scale, so folding the two
+#: together would pool distributions that are not comparable. `engines.py` carries the
+#: same warning for the same reason ("Not af3of3.").
+ENGINES: tuple[str, ...] = ("esmfold2", "boltz2", "protenix", "openfold3", "promera", "opendde",
+                            "af3_openfold")
 METRICS: tuple[str, ...] = ("iptm", "ipsae", "ptm", "plddt", "deltaforge")
 
 # Goodness-percentile labels (annotation only — derived from the engine's own
@@ -93,8 +99,28 @@ _ENGINE_ALIASES: dict[str, str] = {
     "promera2606": "promera",
     "promerav1": "promera",
     "opendde": "opendde",
-    "open_dde": "opendde",
+    # `open_dde` used to sit here. It was dead: normalize_engine strips separators before
+    # lookup, so that spelling arrives as `opendde` and matches the line above. The key
+    # could never fire, and `tests/unit/test_fold_calibration.py` now refuses to let a key
+    # like it come back.
     "openddev1": "opendde",
+    # AlphaFold3 architecture on OpenFold3 OpenBind-0 (Apache-2.0) weights.
+    # ⚠ None of these may alias to "openfold3" even though the weights share a lineage:
+    # openfold3 is the OpenFold3 architecture, af3_openfold is the AF3 architecture. The
+    # canonical name is the one that appears in ENGINES, so every alias below has to land
+    # on a key that is actually first-class, or normalization would return _GENERIC and
+    # the engine would silently lose its own distribution.
+    # ⚔ Keys here are matched against `"".join(ch for ch in text.lower() if ch.isalnum())`,
+    # i.e. SEPARATOR-FREE. A key containing `_` or `-` can never be reached -- see
+    # `open_dde` above, which is dead weight. Every spelling below is written the way the
+    # lookup will actually present it.
+    "af3openfold": "af3_openfold",
+    "af3of3": "af3_openfold",
+    "af3": "af3_openfold",
+    "alphafold3openfold": "af3_openfold",
+    "alphafold3srv": "af3_openfold",
+    "openbind0": "af3_openfold",
+    "af3openbind0": "af3_openfold",
 }
 
 _METRIC_ALIASES: dict[str, str] = {

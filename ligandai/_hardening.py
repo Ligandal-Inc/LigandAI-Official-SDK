@@ -145,7 +145,7 @@ def estimate_fold_batch_credits(
 
     The platform is authoritative for the final credit cost (``total_cost_credits``
     on the submitted batch). The price lives in :mod:`ligandai.pricing` — ONE
-    constant, 10 credits for a default 4-trajectory fold — and the minimum
+    constant, 20 credits for a default 4-trajectory fold — and the minimum
     applies per fold, so this is ``peptide_count * fold_credits(...)``.
     """
     return fold_batch_credits(peptide_count, trajectories, sampling_steps)

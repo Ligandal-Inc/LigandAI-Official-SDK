@@ -24,80 +24,32 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.5** — **every H-SWAE capability call raised `ValidationError` in
-> 0.15.0 through 0.16.4.** The receipt models were `extra="forbid"`, so when the
-> platform added resolution and ranking bookkeeping, a correct production
-> payload was refused by the client for carrying fields it did not declare.
-> Measured against live production on 2026-10-15, the published 0.16.4 wheel
-> raised on 5 of 6 operations — 452 errors, **every one** of them
-> `extra_forbidden`, with zero type errors and zero missing fields. The server
-> output was right; the client threw it away. Response models are now
-> `extra="allow"`: a field the platform adds is kept and reachable, while a
-> wrong type, a missing required field and a non-object where a model belongs
-> all still raise. Caller **input** stays closed, so a typo still fails before
-> the request is sent. If you call `discovery.invoke_capability()` or any
-> `hswae.v1.*` / `hswae.v2.*` operation, upgrade — these capabilities are not
-> enterprise-gated and the break was total.
->
-> 0.16.4 added first-class `bind_ph` / `release_ph` on `peptides.generate` and
-> the `ligandai.ph` helpers.
->
-> 0.16.3 fixed ten defects found by running the *published* 0.16.0/0.16.1
-> wheels against production, each one answering with a clean, plausible value
-> that no caller could tell from a real measurement. `jobs.stream()` called a
-> route the server does not have, so every call 404'd and read as "that job does
-> not exist" (sync and async now pick the route that exists);
-> `bivalent.list_sessions()` raised on the server's raw Postgres timestamps and
-> on a session whose second target is not chosen yet, and it invented a gene
-> named `"unknown"` and a linker the server never sent — absent is now `None`.
-> A valid key with an unrecognised prefix is no longer refused client-side
-> before the request is sent; `ligandai legal status` no longer sends a fully
-> accepted account into re-acceptance; a `POST`/`PATCH` refused at connect time
-> is retried, which is what killed a `peptides.fold` during a redeploy;
-> `programs.get()` no longer answers an all-`None` record for a program that has
-> one; `synthesis.list_orders()` no longer reports "no orders" out of a
-> `coming_soon` stub; and `proteins.info` works for every gene (the route sends
-> `geneName`). Note the `peptides` **read** endpoints are covered by replayed-body
-> tests only — see the CHANGELOG's "Known gap".
->
-> 0.16.2 fixed eight list-returning methods that answered `[]` against a server
-> that held the rows, because each read its rows under a key the route does not
-> send. `receptors.search("EGFR")` returns the 38 complexes the server has (it
-> read `results`; the route sends `complexes`), and the same fix lands on
-> `diseases.search`, `memory.search` / `memory.list`, `discovery.organ_systems`,
-> `peptides.search_by_pocket` and `peptides.get_elite` (which raised
-> `No active session` for every gene). A body carrying no recognised list
-> raises `LigandAIUnreadableResponse` — "I could not read the answer" is never
-> spelled the same way as "there were no rows". `receptors.oligomeric_states()`
-> returns state names, as its type says, and `diseases.gene_mutations()` no longer
-> raises on real ClinVar rows.
->
-> 0.16.1 fixed `client.ensemble` against the hosted co-fold route:
-> `ensemble.run()` collects its co-folds (0.16.0 called a `Job.result()` that
-> does not exist, so every peptide landed in `failures` after its job was submitted);
-> `Job.wait()` rides out the route's intermittent 404 "job not found"
-> (`not_found_grace`, default 600 s) and reads the co-fold state `done` as finished;
-> and an engine that finds no peptide-receptor contact is `None` /
-> `ConsensusRow.no_interface`, not a measured 0.0.
->
-> Since 0.16.0 a fold costs **10 credits ($0.10)** at the default 4 trajectories,
-> down from 100 ($1.00); 1 credit = 1 cent. The figures live in one module,
-> `ligandai.pricing`, as a local fallback for the pre-flight balance check and
-> offline campaign budgets — the platform's own quote is authoritative
-> (`client.peptides.estimate_cost()`, `client.ensemble.estimate()`).
-> `client.ensemble` also now reads the scores the hosted co-fold route actually
-> returns, quotes the `per_engine` settings you will run with, and sends cofactors.
->
-> Upgrading from 0.15.x keeps everything it introduced: `client.maturation` (the
-> platform's server-side binder maturation loop — ⛔ `client.campaigns` is a
-> DIFFERENT capability that merely shares the word), the declarative campaign
-> runner with its stop metrics and hard credit cap, `client.ensemble` co-folding N
-> peptides x M engines priced first, contrastive / avoidance design as a
-> first-class argument, and round-to-round lineage on the recursive campaign.
-> (0.15.0 shipped without `ligandai/contrastive.py` and could not be imported;
-> it is yanked.)
->
-> See [CHANGELOG.md](CHANGELOG.md) for the full history.
+> **v0.16.8** adds `af3_openfold` as a first-class fold engine: the AlphaFold3 architecture running the Apache-2.0 OpenFold3 `OpenBind-0` weights, distinct from `openfold3`, with `af3of3` / `af3` / `alphafold3_openfold` / `alphafold3_srv` / `openbind0` accepted as spellings of the same engine. It is calibratable like every other engine — within-engine percentile standing from your own folds, never a bundled prior. Engine aliases are now mechanically checked to be reachable and to resolve to a first-class engine. See [CHANGELOG.md](CHANGELOG.md).
+
+## Private patient transcriptomics
+
+Prepared results remain in the encrypted patient store and require an existing patient
+access grant and the subject's current health-data authorization.
+
+```python
+from ligandai import LigandAI
+
+client = LigandAI()  # LIGANDAI_API_KEY
+listing = client.discovery.list_patient_datasets(org_slug, patient_slug)
+for item in listing["datasets"]:
+    result = client.discovery.patient_dataset(
+        org_slug, patient_slug, item["id"], include_expression=True,
+    )
+    print(result["dataset"]["geneCount"], result["recordedProjection"]["execution"])
+# Inspect listing["unavailable"] as well; unavailable results are not silently dropped.
+```
+
+`register_patient_dataset(org_slug, patient_slug, profile)` is restricted to an
+authenticated superadmin with access to that patient. It accepts the validated
+`patient-prepared-transcriptomics/1` profile, not raw FASTQ. This is a single bulk
+sample with linear TPM; recorded H-SWAE projections do not establish individual
+cell types or cancer clones. The generic single-cell file-upload route is not a
+substitute for this prepared patient workflow. Async clients expose the same methods.
 
 ## pH-switch objectives (`bind_ph` / `release_ph`)
 
@@ -920,9 +872,9 @@ complex (chain A = receptor, chain B = peptide). Pass exactly one of
 `target_gene`, `receptor_pdb`, or `receptor_sequence`. Peptide input accepts
 bare AA strings **or** FASTA blocks (multi-record supported).
 
-Billing is **10 credits ($0.10) per fold at the default 4 trajectories** — 2.5
-credits per trajectory, floored at a **10-credit minimum per fold** (so a
-single-trajectory fold still costs 10, not 2.5). Sampling steps above 50
+Billing is **20 credits ($0.20) per fold at the default 4 trajectories** — 5
+credits per trajectory, floored at a **20-credit minimum per fold** (so a
+single-trajectory fold still costs 20, not 5). Sampling steps above 50
 multiply the cost by `ceil(sampling_steps / 50)` (100 steps = 2x). 1 credit = 1
 cent. The full batch cost is charged upfront. HTTP 402 if balance is short.
 (A fold cost 100 credits / $1.00 before 0.16.0.)
@@ -1378,3 +1330,23 @@ Proprietary. By installing or using this SDK you agree to the
 [LigandAI Terms of Service](https://ligandai.com/terms), the
 [LigandAI End User License Agreement](https://ligandai.com/eula), and the
 license terms in [LICENSE](LICENSE).
+
+### Offline generation and scoring estimates
+
+PTF generation costs 10 credits per peptide, plus 5 each for immunogenicity
+and serum-stability guidance, capped at 20 per peptide. Quality guidance and
+LigandIQ fold ranking are included. There is no volume discount or PTF setup
+fee. `estimate_multi_cost(10, 100)` quotes 10,000 generation credits; with
+`immunogenicity=True, serum_stability=True` it quotes 20,000. Combined and
+separate target requests have the same generation cost.
+
+`ligandai.pricing.ligandiq_score_credits(n)` estimates one standalone LigandIQ
+scoring job: 5 per peptide, minimum 20 per job (zero inputs means no job).
+Generation-included scores and other scoring routes have different inclusion
+rules; do not add this floor to every generation quote.
+
+Both `peptides.estimate_cost()` and `synthesis.estimate_cost()` accept
+`immunogenicity`, `serum_stability`, `quality_guided`, and
+`ligandiq_fold_ranking` flags for server quotes. Missing, incomplete or
+non-finite billing responses raise `LigandAIUnreadableResponse`; an explicit
+zero quote remains valid. Server quotes and charges are authoritative.

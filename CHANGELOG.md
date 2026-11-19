@@ -64,6 +64,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `model_pocket_feature_dim("v6.5.24")` returns 65. `v6.5` and every other
   existing model id remain selectable. `LocalLigandForge` defaults to `v6.5.24`.
 
+## [0.16.8] - 2026-11-08
+
+### Added
+
+- **`af3_openfold` is a first-class fold engine.** The AlphaFold3 architecture
+  running the Apache-2.0 OpenFold3 `OpenBind-0` weights. It is deliberately a
+  separate key from `openfold3`: same weight lineage, different architecture, and
+  a different reported scale, so pooling the two would pool distributions that are
+  not comparable. `af3of3`, `af3`, `alphafold3_openfold`, `alphafold3_srv` and
+  `openbind0` all normalize to it. Like every other engine it is calibrated from
+  the customer's own folds — no bundled prior and no synthetic fill.
+
+  Scope note, stated so nobody over-reads the entry: this is client-side engine
+  identity. Server-side selection is not enabled in this release, because
+  `cofold_engine_adapters.ENGINES` has no `af3_openfold` adapter yet, and the
+  SDK's `COFOLD_ENGINES` mirrors the server on purpose. Advertising an engine the
+  API answers `422 unknown engine(s)` for would be worse than not advertising it.
+
+### Fixed
+
+- **Local cost estimates match current server pricing.** `ligandai.pricing` and the peptide/fold/synthesis estimate helpers had stale per-operation mirrors. They now use the live server rates: generation 10 credits per peptide (immunogenicity and stability guidance +5 each, capped at 20), folding 5 credits per trajectory with a 20-credit minimum per fold, and LigandIQ scoring 5 credits per design with a 20-credit job minimum. There is no volume discount or setup fee. Server quotes that are missing, incomplete, negative or non-finite are refused instead of being reported as zero. Billing itself is unchanged: the server always charges its own quote.
+- **Removed a dead engine alias.** `_ENGINE_ALIASES` keyed `"open_dde"`, but
+  `normalize_engine` looks up `"".join(ch for ch in text.lower() if ch.isalnum())`
+  — separators stripped — so that key could never match. The spelling still
+  resolves correctly via the separator-free `opendde` entry, so removal changes no
+  observable behaviour; the entry was pure dead weight that made the alias table
+  look broader than it was.
+
+### Tests
+
+- `test_every_engine_alias_key_is_reachable` refuses any alias key containing a
+  separator, and `test_every_engine_alias_resolves_to_a_first_class_engine`
+  refuses an alias whose target is not in `ENGINES`. Neither existed before, which
+  is how the dead key survived to a published release.
+
+## [0.16.7] - 2026-11-05
+
+Adds private patient transcriptomics access: `discovery.list_patient_datasets()`,
+`discovery.patient_dataset()` and `discovery.register_patient_dataset()`, each with an async
+twin. These read and register encrypted, prepared, single-bulk-sample research results
+addressed by organisation and patient slug. They are not a public-atlas surface, they do not
+quantify raw FASTQ, and a projection read returns a recorded result rather than performing
+model inference.
+
+Every response is validated rather than trusted. A listing that cannot be read raises instead
+of reporting zero datasets; `unavailable` entries are returned to the caller and never
+discarded; a dataset read must agree on dataset id, `observationUnit` `bulk_sample`,
+`sampleCount` 1, `projectionScope` `sample_profiles` and a recorded projection execution, and
+must report a positive integer `geneCount`. When expression features are requested the payload
+must carry exactly `geneCount` features with unique gene ids and finite non-negative numeric
+`tpm`. Duplicate gene symbols and zero values are preserved, because both are legitimate in a
+real matrix and collapsing them would silently change a patient's result.
+
+Registration requires `schema` `patient-prepared-transcriptomics/1`, assay `bulk_rnaseq`,
+observation unit `bulk_sample` and expression unit `tpm`, and never rewrites units or infers
+an assay. The server additionally restricts registration to an authenticated superadmin. A body
+that fails to parse surfaces as an error and is never silently re-POSTed, because registration
+is a write.
+
+Raw patient upload remains session-only and is not reachable from this SDK. Read access needs
+the patient owner grant plus the subject's current health-data consent. Without server support
+these methods raise rather than degrade.
+
+The 0.16.6 dataset contracts and the canonical marker-row key handling are both retained.
+## 0.16.6
+
+Custom transcriptomics uploads can return an accepted upload receipt with `datasetId`, `fileName`, `datasetType`, and `status`. The Dataset model now reads these aliases, preserving queued status instead of raising after a successful write.
+
+Synchronous and asynchronous dataset listing now raise `LigandAIUnreadableResponse` for missing bodies, unknown envelopes, import-job envelopes, or explicit `success:false` responses. An explicit empty dataset list remains valid. This changes previously misleading empty results into visible errors.
+
+`discovery.project_dataset` now supports explicit `cell_types` or `sample_profiles` projection in both sync and async clients. It validates dataset/group identities and projection scope, defaults to non-persistent analysis, and rejects a bulk response that silently falls back to cell-type semantics. Sample profiles require the corresponding backend contract; this client method does not implement custom matrix ingestion or validate a biological cell identity.
+
+Bulk receipt validation accepts an explicit `cellTypeCount` of `0` as well as an absent key, and treats the `expressionUnit` label case-insensitively. An absent key and `0` both assert that a bulk result carries no cell-type grouping, and `TPM` denotes the same unit as `tpm`; rejecting one spelling of each failed compliant backends without adding safety, because the confusion being guarded is a *positive* cell-type count or a different unit such as `cp10k`. A boolean `cellTypeCount` is still rejected.
+
+Import-job rows are now refused by their own `jobId` discriminator rather than only by the envelope key they arrived under. A job row delivered under a dataset key previously validated as a `Dataset` carrying a bare id, because `datasetId` satisfies `id` and `name`/`type` are optional.
+
+This client release requires a backend that returns dataset records from the dataset-list endpoint. It does not add raw FASTQ quantification or establish end-to-end patient-data analysis. Existing signed H-SWAE operations are unchanged.
+
+
 ## [0.16.5] - 2026-10-15
 
 Every H-SWAE capability call made through this SDK raised `pydantic.ValidationError`

@@ -355,20 +355,20 @@ def plan_iteration(spec: CampaignSpec, records: Sequence[DesignRecord],
             if hopeful < sm.target and budget_left() > 0:
                 for pc in spec.peptide_classes:
                     # generation is charged PER PEPTIDE, not per batch
-                    unit = (spec.fold.credits_per_generated_peptide
+                    unit = (spec.generation_rate(pc)
                             + spec.fold.credits_per_fold * max(1, spec.fold.seeds_per_unit))
                     n = max(0, min(pc.n_per_round, budget_left() // unit))
                     if n < 1:
                         rejected.append(
                             f"generate/{pc.name}: {budget_left():,} credits left cannot "
                             f"cover one peptide generated "
-                            f"({spec.fold.credits_per_generated_peptide:,}) and folded at "
+                            f"({spec.generation_rate(pc):,}) and folded at "
                             f"{spec.fold.seeds_per_unit} seed unit(s) ({unit:,} total)")
                         continue
                     trimmed = ("" if n == pc.n_per_round else
                                f" (trimmed from {pc.n_per_round} to fit the "
                                f"{allowance:,}-credit iteration allowance)")
-                    cost = (n * spec.fold.credits_per_generated_peptide
+                    cost = (n * spec.generation_rate(pc)
                             + _fold_cost(spec, n, spec.fold.seeds_per_unit))
                     add(Action(ActionKind.GENERATE,
                                f"only {hopeful} designs can still reach certification "

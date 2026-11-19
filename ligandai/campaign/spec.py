@@ -247,23 +247,11 @@ class FoldSettings:
     msa_receptor: bool = True
     msa_peptide: bool = False
     seeds_per_unit: int = 1
-    # ⛔ FOLD RATE: the published per-fold price (ligandai.pricing — 10 credits at
-    # the default 4 trajectories / 50 steps). It is DERIVED, not typed here: when a
-    # spec sets ``diffusion_samples`` or ``sampling_steps`` and does not state
-    # ``credits_per_fold``, ``from_dict`` prices that fold with
-    # ``ligandai.pricing.fold_credits`` so a budget scales with the settings it
-    # will actually run. State ``credits_per_fold`` to override.
-    #
-    # GENERATION and SCORING are still MEASURED MEDIANS from the live credit
-    # ledger (server/campaign-economics.ts, bd-LIGANDAI_ALPHA_V2-pxmj8; 365-day
-    # window — generation 100.00 over 229 rows / 47,027 peptides, scoring 25.00
-    # over 165 rows). Use the MEDIAN, never the mean. The ledger's FOLD rows
-    # pre-date the repricing (median 100.00, mean 504.73 because <1% of rows are
-    # hand-written bulk reconciliations bundling generation and folding into one
-    # line), so they are history, not the rate — do not re-derive the fold default
-    # from them.
-    # Re-derive generation/scoring with:
-    #   npx tsx scripts/campaign_runner/verify_credit_rates.ts
+    # Offline price inputs, not ledger medians or receipts. Fold defaults scale
+    # with trajectories/steps. Generation is the unguided base; guidance is
+    # added by CampaignSpec.generation_rate. Explicit non-default generation
+    # rates are caller-supplied all-in overrides. Scoring is a nominal unit
+    # rate; route-specific minima/fan-out can make actual spending higher.
     credits_per_fold: int = fold_credits(TRAJECTORIES_DEFAULT, 50)
     credits_per_generated_peptide: int = CREDITS_PER_GENERATED_PEPTIDE
     credits_per_scored_design: int = CREDITS_PER_SCORED_DESIGN
@@ -570,6 +558,26 @@ class CampaignSpec:
             out[o.construct.name] = o.construct.sequence
         return out
 
+    def generation_rate(self, pc: PeptideClass) -> int:
+        """Per-peptide offline estimate for the flags ClientPlatform sends.
+
+        A non-default explicit rate remains an all-in account override.
+        """
+        rate = self.fold.credits_per_generated_peptide
+        if rate != CREDITS_PER_GENERATED_PEPTIDE:
+            return rate
+        from ligandai.pricing import generation_credits
+
+        flags = {
+            "immunogenicity": bool(self.generation.heads.get("immuno")),
+            "serum_stability": bool(self.generation.heads.get("proteolytic")),
+        }
+        flags.update(self.generation.extra)
+        flags.update(pc.generator_overrides)
+        return generation_credits(1, **{key: bool(flags.get(key)) for key in (
+            "immunogenicity", "serum_stability", "quality_guided", "ligandiq_fold_ranking",
+        )})
+
     def validate(self) -> list[str]:
         """Raise on anything unrunnable; return non-fatal warnings."""
         warn: list[str] = []
@@ -644,7 +652,7 @@ class CampaignSpec:
                 raise SpecError(f"stop_metric {sm.id}: interval_width needs max_interval_width")
 
         # can the budget buy even one certified design?
-        gen1 = self.fold.credits_per_generated_peptide
+        gen1 = min(self.generation_rate(pc) for pc in self.peptide_classes)
         per_design = clean * self.fold.credits_per_fold + self.fold.credits_per_scored_design
         floor = gen1 + per_design
         if floor > self.budget.max_credits:

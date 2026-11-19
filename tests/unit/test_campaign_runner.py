@@ -319,23 +319,18 @@ def test_runs_needed_is_computed_not_asserted():
     assert runs_needed_for_upper_bound(0.15, 0.30) is None    # genuinely unreachable
 
 
-# ── Cost rates: fold = the published price, generation/scoring = ledger medians ──
+# ── Current nominal cost rates (server quotes remain authoritative) ──
 
 def test_default_credit_rates():
-    """The fold rate is the published per-fold price (ligandai.pricing: 10 credits,
-    $0.10, at the default 4 trajectories). Generation and scoring are still the
-    measured ledger medians from server/campaign-economics.ts
-    (bd-LIGANDAI_ALPHA_V2-pxmj8) — the MEAN generation rate would mislead for the
-    reason that comment gives: a few hand-written bulk reconciliations.
-    """
+    """Offline fold, unguided generation and nominal scoring rate mirrors."""
     from ligandai.campaign import FoldSettings
 
     f = FoldSettings.from_dict({})
-    assert f.credits_per_fold == 10
-    assert f.credits_per_generated_peptide == 100
-    assert f.credits_per_scored_design == 25
+    assert f.credits_per_fold == 20
+    assert f.credits_per_generated_peptide == 10
+    assert f.credits_per_scored_design == 5
     all_in = f.credits_per_generated_peptide + f.credits_per_fold + f.credits_per_scored_design
-    assert all_in == 135, "all-in per design at one fold"
+    assert all_in == 35, "all-in per design at one fold"
 
 
 def test_budget_floor_uses_22_clean_runs_not_a_guessed_rate():
@@ -352,11 +347,11 @@ def test_budget_floor_uses_22_clean_runs_not_a_guessed_rate():
         "ranking": {"score": "peptide_ipsae_median", "higher_is_better": True,
                     "population": "gate_passing"},
     }
-    # one certified design = 100 generate + 22*10 folds + 25 scoring = 345
+    # one certified design = 10 generate + 22*20 folds + 5 scoring = 455
     with pytest.raises(SpecError, match="cannot buy a single"):
-        CampaignSpec.from_dict({**base, "budget": {"max_credits": 344}}, ".")
-    spec = CampaignSpec.from_dict({**base, "budget": {"max_credits": 345}}, ".")
-    assert spec.validate(), "25 designs at 345 each cannot fit 345 — expect a warning"
-    # 25 * 345 = 8,625 buys the whole stop metric with no warning
-    clean = CampaignSpec.from_dict({**base, "budget": {"max_credits": 8625}}, ".")
+        CampaignSpec.from_dict({**base, "budget": {"max_credits": 454}}, ".")
+    spec = CampaignSpec.from_dict({**base, "budget": {"max_credits": 455}}, ".")
+    assert spec.validate(), "25 designs at 455 each cannot fit 455 — expect a warning"
+    # 25 * 455 = 11,375 buys the whole stop metric with no warning
+    clean = CampaignSpec.from_dict({**base, "budget": {"max_credits": 11375}}, ".")
     assert clean.validate() == []

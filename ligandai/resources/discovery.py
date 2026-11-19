@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,6 +27,7 @@ from ligandai._geo import (
 )
 from ligandai.errors import (
     LigandAILegalAcceptanceRequired,
+    LigandAIUnreadableResponse,
     resolve_mutation_failure,
 )
 from ligandai.resources._base import AsyncResource, Resource, unwrap_rows
@@ -65,6 +67,395 @@ from ligandai.types import (
 _HSWAE_CAPABILITY_DISCOVERY_PATH = "/api/transcriptomics/capabilities"
 _HSWAE_CAPABILITY_INVOKE_PATH = "/api/transcriptomics/capabilities/invoke"
 _HSWAE_RECEIPT_ADAPTER: TypeAdapter[HswaeCapabilityReceipt] = TypeAdapter(HswaeCapabilityReceipt)
+
+
+def _parse_dataset_list(payload: Any) -> list[Dataset]:
+    """A missing/mismatched response is not a measurement of zero datasets."""
+    if isinstance(payload, dict) and payload.get("success") is False:
+        raise LigandAIUnreadableResponse(
+            "Dataset listing returned success:false; no dataset count was obtained.",
+            cause="backend_negative_answer",
+            response=payload,
+        )
+    # Import-job envelopes are intentionally not accepted as dataset rows.
+    rows = unwrap_rows(payload, ("datasets",), what="GET /api/transcriptomics/datasets")
+    # The live alias answers ``{"jobs": [...]}``, which ``unwrap_rows`` already refuses on
+    # the envelope key alone. That protection was only ever incidental: a job row arriving
+    # under a ``datasets`` key still validated, because ``datasetId`` satisfies ``id`` and
+    # ``name``/``type`` are now optional, so a GEO import job would surface as a Dataset
+    # carrying a bare id. Refuse on the row's own discriminator instead of the envelope key.
+    for row in rows:
+        if isinstance(row, dict) and "jobId" in row:
+            raise LigandAIUnreadableResponse(
+                "Dataset listing returned GEO import jobs rather than datasets. "
+                "GET /api/transcriptomics/datasets is server-side synthesised from "
+                "/api/datasets/geo/jobs; poll those with wait_for_import, not list_datasets.",
+                cause="import_jobs_not_datasets",
+                response=payload,
+            )
+    return [Dataset.model_validate(row) for row in rows]
+
+
+def _dataset_projection_request(
+    dataset_id: int, projection_scope: str, group_ids: list[int] | None,
+    top_k: int, persist: bool,
+) -> dict[str, Any]:
+    if type(dataset_id) is not int or dataset_id < 1:
+        raise ValueError("dataset_id must be a positive integer")
+    if projection_scope not in ("cell_types", "sample_profiles"):
+        raise ValueError("projection_scope must be cell_types or sample_profiles")
+    if type(top_k) is not int or not 1 <= top_k <= 100 or type(persist) is not bool:
+        raise ValueError("top_k must be an integer in 1-100 and persist must be boolean")
+    if group_ids is not None and (
+        not isinstance(group_ids, list) or not group_ids
+        or any(type(value) is not int or value < 1 for value in group_ids)
+        or len(set(group_ids)) != len(group_ids)
+    ):
+        raise ValueError("group_ids must contain unique positive integer dataset group IDs")
+    body: dict[str, Any] = {
+        "datasetId": dataset_id, "projectionScope": projection_scope,
+        "topK": top_k, "persist": persist,
+    }
+    if group_ids is not None:
+        # The server's legacy parameter names the group-table IDs, including
+        # sample groups. It is not a biological cell-type annotation.
+        body["cellTypeIds"] = list(group_ids)
+    return body
+
+
+def _parse_dataset_projection(payload: Any, dataset_id: int, projection_scope: str) -> dict[str, Any]:
+    valid = isinstance(payload, dict) and payload.get("success") is True and payload.get("available") is True
+    if valid:
+        valid = type(payload.get("datasetId")) is int and payload["datasetId"] == dataset_id
+        valid = valid and payload.get("projectionScope") == projection_scope
+        groups = payload.get("regionEmbeddings")
+        valid = valid and isinstance(groups, dict) and bool(groups)
+        if projection_scope == "sample_profiles":
+            count = payload.get("sampleCount")
+            valid = valid and type(count) is int and count > 0 and payload.get("groupCount") == count
+            valid = valid and isinstance(groups, dict) and len(groups) == count
+            cell_count = payload.get("cellTypeCount")
+            unit = payload.get("expressionUnit")
+            # A compliant bulk backend may express "no cell types" either by omitting the
+            # key or by sending 0. Those are the same assertion, and rejecting one of them
+            # fails a valid response. Only a POSITIVE count means the server answered in
+            # cell-type mode, which is the actual confusion this guard exists to catch.
+            # ``type(...) is int`` also excludes ``False``, which ``== 0`` would accept.
+            cell_count_absent_or_zero = cell_count is None or (type(cell_count) is int and cell_count == 0)
+            # A unit label is not case-significant; "TPM" and "tpm" denote the same unit.
+            # Every other value, including an absent one, still refuses.
+            unit_is_tpm = isinstance(unit, str) and unit.casefold() == "tpm"
+            valid = valid and cell_count_absent_or_zero and unit_is_tpm
+    if not valid:
+        raise LigandAIUnreadableResponse(
+            "Dataset projection did not return an available result for the requested dataset and scope. "
+            "Bulk sample mode requires a compatible backend; it must not fall back to cell-type interpretation.",
+            cause="invalid_projection_receipt", response=payload,
+        )
+    return cast(dict[str, Any], payload)
+
+
+
+# -- Private patient transcriptomics ------------------------------------------
+# These endpoints serve encrypted, prepared, single-bulk-sample research
+# results for one named patient. They are not a public-atlas surface and the
+# validation below is correspondingly unforgiving: a partial or ambiguous
+# answer about a person's data must raise, never degrade into an empty list, a
+# dropped row or a silently re-POSTed write.
+_PATIENT_SLUG_RE = re.compile(r"\A[a-z0-9_-]{1,80}\Z")
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+_SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+def _patient_segments(org_slug: Any, patient_slug: Any) -> str:
+    """Two strict path segments. Slugs are interpolated into the URL path, so
+    anything outside the accepted alphabet is refused here rather than encoded
+    and sent: a stray slash or dot-segment would change which patient is read."""
+    for label, value in (("org_slug", org_slug), ("patient_slug", patient_slug)):
+        if not isinstance(value, str) or _PATIENT_SLUG_RE.match(value) is None:
+            raise ValueError(
+                f"{label} must match [a-z0-9_-]{{1,80}}; got {value!r}"
+            )
+    return f"{org_slug}/{patient_slug}"
+
+
+def _patient_uuid(dataset_id: Any) -> str:
+    if not isinstance(dataset_id, str) or _UUID_RE.match(dataset_id) is None:
+        raise ValueError(f"dataset_id must be a UUID string; got {dataset_id!r}")
+    return dataset_id
+
+
+def _require_positive_int(value: Any, *, what: str) -> int:
+    # ``type(...) is int`` rather than isinstance: bool is an int subclass, and
+    # ``sampleCount: true`` must not satisfy a count of 1.
+    if type(value) is not int or value < 1:
+        raise LigandAIUnreadableResponse(
+            f"{what} must be a positive integer, got {value!r}",
+            cause="invalid_patient_receipt", response=None,
+        )
+    return value
+
+
+def _patient_path(org_slug: str, patient_slug: str, tail: str) -> str:
+    return f"/api/patient-transcriptomics/{_patient_segments(org_slug, patient_slug)}/{tail}"
+
+
+def _parse_patient_dataset_list(payload: Any) -> dict[str, Any]:
+    """Full dict, including ``unavailable``. A dataset the server could not read
+    is a fact about the patient's record, so it is returned, never dropped."""
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset listing did not answer success:true.",
+            cause="backend_negative_answer", response=payload,
+        )
+    for key in ("datasets", "unavailable"):
+        if not isinstance(payload.get(key), list):
+            raise LigandAIUnreadableResponse(
+                f"Patient dataset listing is missing a list-valued '{key}' field; "
+                "an absent field is not the same as an empty one.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+    for row in payload["datasets"]:
+        if not isinstance(row, dict):
+            raise LigandAIUnreadableResponse(
+                "Patient dataset row is not an object.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+        # An imported GEO job is a different object with a different lifecycle.
+        # Accepting one here would present an import job as a patient result.
+        if "jobId" in row or row.get("source") == "durable":
+            raise LigandAIUnreadableResponse(
+                "Patient dataset listing returned an import job rather than a "
+                "prepared patient dataset.",
+                cause="import_jobs_not_patient_datasets", response=payload,
+            )
+        # A malformed id in a RESPONSE is a server problem, not caller input, so
+        # it must not surface as the ValueError that _patient_uuid raises for a
+        # bad argument. Same shape check, response-appropriate error class.
+        rid = row.get("id")
+        if not isinstance(rid, str) or _UUID_RE.match(rid) is None:
+            raise LigandAIUnreadableResponse(
+                "Patient dataset row carries a non-UUID id.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+        if row.get("observationUnit") != "bulk_sample":
+            raise LigandAIUnreadableResponse(
+                "Patient dataset is not observationUnit bulk_sample.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+        if row.get("visibility") != "private_patient":
+            raise LigandAIUnreadableResponse(
+                "Patient dataset is not visibility private_patient.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+        _require_positive_int(row.get("geneCount"), what="dataset geneCount")
+        if (row.get("assay") != "bulk_rnaseq" or row.get("expressionUnit") != "tpm"
+                or type(row.get("sampleCount")) is not int or row["sampleCount"] != 1
+                or row.get("projectionScope") != "sample_profiles"
+                or row.get("projectionExecution") != "recorded"):
+            raise LigandAIUnreadableResponse(
+                "Patient dataset units, assay, sample count or recorded scope are incompatible.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+        sha = row.get("contentSha256")
+        if not isinstance(sha, str) or _SHA256_RE.match(sha) is None:
+            raise LigandAIUnreadableResponse(
+                "Patient dataset contentSha256 is not a lowercase sha256 hex digest.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+    for row in payload["unavailable"]:
+        if not isinstance(row, dict) or "id" not in row or "error" not in row:
+            raise LigandAIUnreadableResponse(
+                "Patient dataset 'unavailable' entry lacks an id and error.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+    return payload
+
+
+def _parse_patient_dataset_read(payload: Any, dataset_id: str,
+                               include_expression: bool) -> dict[str, Any]:
+    """Validates a recorded result. Nothing here performs inference; the SDK is
+    checking that the server is describing the dataset that was asked for."""
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset read did not answer success:true.",
+            cause="backend_negative_answer", response=payload,
+        )
+    ds = payload.get("dataset")
+    if not isinstance(ds, dict):
+        raise LigandAIUnreadableResponse(
+            "Patient dataset read has no dataset object.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if ds.get("id") != dataset_id:
+        raise LigandAIUnreadableResponse(
+            f"Patient dataset read returned id {ds.get('id')!r} for the requested "
+            f"{dataset_id!r}; a response for a different dataset is not this one.",
+            cause="patient_dataset_identity_mismatch", response=payload,
+        )
+    _parse_patient_dataset_list({"success": True, "datasets": [ds], "unavailable": []})
+    if ds.get("observationUnit") != "bulk_sample":
+        raise LigandAIUnreadableResponse(
+            "Patient dataset is not observationUnit bulk_sample.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if ds.get("sampleCount") is not True and _require_positive_int(
+            ds.get("sampleCount"), what="dataset sampleCount") != 1:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset sampleCount must be exactly 1.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if type(ds.get("sampleCount")) is not int or ds.get("sampleCount") != 1:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset sampleCount must be the integer 1, not a boolean.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if ds.get("projectionScope") != "sample_profiles":
+        raise LigandAIUnreadableResponse(
+            "Patient dataset projectionScope is not sample_profiles.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if ds.get("projectionExecution") != "recorded":
+        raise LigandAIUnreadableResponse(
+            "Patient dataset projectionExecution is not 'recorded'. This endpoint "
+            "reads a projection that already happened; it never claims fresh "
+            "model inference.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    gene_count = _require_positive_int(ds.get("geneCount"), what="dataset geneCount")
+    proj = payload.get("recordedProjection")
+    if not isinstance(proj, dict):
+        raise LigandAIUnreadableResponse(
+            "Patient dataset read has no recordedProjection object.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if proj.get("execution") != "recorded" or proj.get("projectionScope") != "sample_profiles":
+        raise LigandAIUnreadableResponse(
+            "Projection must be a recorded sample profile.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if proj.get("sampleCount") != 1 or type(proj.get("sampleCount")) is not int:
+        raise LigandAIUnreadableResponse(
+            "recordedProjection.sampleCount must be the integer 1.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if include_expression:
+        feats = payload.get("features")
+        if not isinstance(feats, list):
+            raise LigandAIUnreadableResponse(
+                "include_expression was requested but the response carries no "
+                "features list.", cause="invalid_patient_receipt", response=payload,
+            )
+        if len(feats) != gene_count:
+            raise LigandAIUnreadableResponse(
+                f"features holds {len(feats)} rows but the dataset declares "
+                f"geneCount {gene_count}; a truncated feature list would silently "
+                "shorten the patient's matrix.",
+                cause="invalid_patient_receipt", response=payload,
+            )
+        seen: set[str] = set()
+        for f in feats:
+            if not isinstance(f, dict):
+                raise LigandAIUnreadableResponse(
+                    "Expression feature is not an object.",
+                    cause="invalid_patient_receipt", response=payload,
+                )
+            gid = f.get("geneId")
+            if not isinstance(gid, str) or not gid:
+                raise LigandAIUnreadableResponse(
+                    "Expression feature has no geneId.",
+                    cause="invalid_patient_receipt", response=payload,
+                )
+            if gid in seen:
+                raise LigandAIUnreadableResponse(
+                    f"Duplicate geneId {gid!r} in expression features.",
+                    cause="invalid_patient_receipt", response=payload,
+                )
+            seen.add(gid)
+            tpm = f.get("tpm")
+            # bool is an int subclass; True must not read as 1 TPM.
+            if type(tpm) not in (int, float) or isinstance(tpm, bool) \
+                    or tpm != tpm or tpm in (float("inf"), float("-inf")) or tpm < 0:
+                raise LigandAIUnreadableResponse(
+                    f"Feature {gid!r} has a non-finite, negative, boolean or "
+                    "non-numeric tpm.",
+                    cause="invalid_patient_receipt", response=payload,
+                )
+            # Zero tpm and duplicate SYMBOLS are both legitimate and preserved.
+    return payload
+
+
+def _validate_patient_profile(profile: Any) -> dict[str, Any]:
+    """Client-side gate for the four fields that define what the bytes ARE.
+    Units and assay are never rewritten or inferred: a matrix registered as
+    something it is not would be read back as clinical fact."""
+    if not isinstance(profile, dict):
+        raise ValueError("profile must be an object")
+    required = {
+        "schema": "patient-prepared-transcriptomics/1",
+        "assay": "bulk_rnaseq",
+        "observationUnit": "bulk_sample",
+        "expressionUnit": "tpm",
+    }
+    for field, expected in required.items():
+        got = profile.get(field)
+        if got != expected:
+            raise ValueError(
+                f"profile.{field} must be exactly {expected!r}, got {got!r}. "
+                "This SDK will not relabel units or infer an assay."
+            )
+    if not isinstance(profile.get("features"), list) or not profile["features"]:
+        raise ValueError("profile.features must be a non-empty list")
+    if not isinstance(profile.get("sourceUploadIds"), list) or not profile["sourceUploadIds"]:
+        raise ValueError("profile.sourceUploadIds must be a non-empty list of UUIDs")
+    for sid in profile["sourceUploadIds"]:
+        _patient_uuid(sid)
+    return profile
+
+
+def _parse_patient_register(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration did not answer success:true. The write "
+            "state is unknown; this SDK does not retry a registration, because a "
+            "second accepted POST would create a second record.",
+            cause="backend_negative_answer", response=payload,
+        )
+    rid = payload.get("id")
+    if not isinstance(rid, str) or _UUID_RE.match(rid) is None:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration returned a non-UUID id. The write may or "
+            "may not have landed; this SDK does not guess and does not retry.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    sha = payload.get("sha256")
+    if not isinstance(sha, str) or _SHA256_RE.match(sha) is None:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration returned no sha256 hex digest.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if not isinstance(payload.get("reused"), bool):
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration 'reused' must be a boolean.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if payload.get("visibility") != "private_patient":
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration is not visibility private_patient.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if payload.get("observationUnit") != "bulk_sample":
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration is not observationUnit bulk_sample.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    if type(payload.get("sampleCount")) is not int or payload.get("sampleCount") != 1:
+        raise LigandAIUnreadableResponse(
+            "Patient dataset registration sampleCount must be the integer 1.",
+            cause="invalid_patient_receipt", response=payload,
+        )
+    return payload
 
 
 def _parse_hswae_receipt(
@@ -583,8 +974,13 @@ class Discovery(Resource):
         receptor_only: bool = False,
         top_n: int = 100,
     ) -> ComparisonResponse:
-        """Async twin of :meth:`Discovery.compare_groups`; same local
-        group-shape gate (:func:`_check_compare_group_shapes`).
+        """POST ``/api/transcriptomics/compare-groups`` verbatim.
+
+        Group-shape rules the live server enforces (and this call now checks
+        locally first — see :func:`_check_compare_group_shapes`):
+        ``focus`` needs a ``custom`` target; ``global``/``compare`` need a
+        ``custom`` or ``geneset`` target; ``gtex`` tissues are only valid as
+        reference groups in ``compare`` mode, and ``compare`` needs >=1 of them.
         [bd-LIGANDAI_ALPHA_V2-tom-D2]
         """
         _check_compare_group_shapes(target_group, reference_groups, mode)
@@ -690,30 +1086,40 @@ class Discovery(Resource):
             time.sleep(min(poll_interval, remaining))
 
     def list_datasets(self) -> list[Dataset]:
-        payload = self._transport.request("GET", "/api/transcriptomics/datasets") or []
-        items = payload if isinstance(payload, list) else payload.get("datasets", [])
-        return [Dataset.model_validate(d) for d in items]
+        payload = self._transport.request("GET", "/api/transcriptomics/datasets")
+        return _parse_dataset_list(payload)
+
+    def project_dataset(
+        self, dataset_id: int, *,
+        projection_scope: Literal["cell_types", "sample_profiles"] = "cell_types",
+        group_ids: list[int] | None = None, top_k: int = 5, persist: bool = False,
+    ) -> dict[str, Any]:
+        """Project an already prepared account dataset with explicit group semantics.
+
+        ``sample_profiles`` requires a backend supporting documented bulk TPM
+        profiles; an older server or an unqualified import is rejected. It does
+        not identify individual cancer cells, assign tumor origin or perform
+        FASTQ quantification. ``group_ids`` are exact dataset group-table IDs.
+        ``persist=False`` leaves the dataset readiness flag unchanged.
+        """
+        body = _dataset_projection_request(dataset_id, projection_scope, group_ids, top_k, persist)
+        payload = self._transport.request("POST", "/api/transcriptomics/hswae-project", json=body)
+        return _parse_dataset_projection(payload, dataset_id, projection_scope)
 
     def upload_dataset(self, file: Path | str, dataset_type: str) -> Dataset:
-        """Ingest your own transcriptomics counts so the discovery funnel can
-        SI-rank surface receptors on it — the custom-data entry point.
+        """Upload an expression file and return its acceptance receipt.
 
-        Quickstart::
+        Acceptance does not establish completed processing, verified expression
+        units or eligibility for H-SWAE/marker analysis. Raw FASTQ requires a
+        separate quantification stage. Bulk TPM and single-cell count matrices
+        need their respective supported backend preparation contracts.
 
-            ds = client.discovery.upload_dataset("counts.h5ad", dataset_type="bulk")
-            markers = client.discovery.tissue_markers(
-                custom_dataset_targets=[{"datasetId": ds.id}],
-                receptor_only=True,
-            )
-            top_gene = markers.top[0].gene  # → peptides.generate(gene=top_gene)
-
-        :param file: path to the counts file (``.h5ad`` / ``.csv`` / ``.tsv``).
+        :param file: expression matrix (``.h5ad`` / ``.csv`` / ``.tsv``).
         :param dataset_type: the kind of data — ``"bulk"`` for bulk RNA-seq,
             ``"scrna"`` / ``"scRNA-seq"`` for single-cell, ``"microarray"``.
-        :returns: a :class:`~ligandai.types.Dataset`; pass its ``.id`` as
-            ``datasetId`` in ``custom_dataset_targets`` to :meth:`tissue_markers`
-            (which then routes to the ``analyze-fast`` SI endpoint). Use
-            :meth:`list_datasets` to find earlier uploads.
+        :returns: a :class:`~ligandai.types.Dataset` with the server's status.
+            Use :meth:`list_datasets` to inspect account datasets. GEO import
+            polling is a separate job interface and is not an upload-status API.
         """
         path = Path(file)
         with path.open("rb") as f:
@@ -723,6 +1129,52 @@ class Discovery(Resource):
                 "POST", "/api/transcriptomics/upload", data=data, files=files
             ) or {}
         return Dataset.model_validate(payload)
+
+    def list_patient_datasets(self, org_slug: str, patient_slug: str) -> dict[str, Any]:
+        """List prepared private transcriptomics datasets for one patient.
+
+        Returns the server's full body, including the ``unavailable`` list. An
+        entry the server could not decrypt or parse is reported, not dropped:
+        for a person's record, "this one could not be read" is information.
+        Raises rather than returning an empty list when the answer is unreadable.
+        """
+        path = _patient_path(org_slug, patient_slug, "datasets")
+        payload = self._transport.request("GET", path)
+        return _parse_patient_dataset_list(payload)
+
+    def patient_dataset(
+        self, org_slug: str, patient_slug: str, dataset_id: str, *,
+        include_expression: bool = False,
+    ) -> dict[str, Any]:
+        """Read one prepared private dataset, and optionally its expression features.
+
+        This returns a **recorded** projection. It does not run a model and must
+        not be described as fresh inference. ``include_expression=True`` requires
+        the response to carry exactly ``geneCount`` features with unique gene ids
+        and finite non-negative numeric ``tpm``; duplicate gene symbols and zero
+        values are legitimate and are preserved.
+        """
+        if type(include_expression) is not bool:
+            raise ValueError("include_expression must be boolean")
+        seg = _patient_path(org_slug, patient_slug, f"datasets/{_patient_uuid(dataset_id)}")
+        path = f"{seg}?includeExpression={'true' if include_expression else 'false'}"
+        payload = self._transport.request("GET", path)
+        return _parse_patient_dataset_read(payload, dataset_id, include_expression)
+
+    def register_patient_dataset(
+        self, org_slug: str, patient_slug: str, profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Register a prepared private transcriptomics profile. Superadmin only.
+
+        The four identity fields (``schema``, ``assay``, ``observationUnit``,
+        ``expressionUnit``) are checked client-side and never rewritten. A
+        registration whose response cannot be read raises and is **not** retried:
+        this is a write, and a blind retry can create a second record.
+        """
+        _validate_patient_profile(profile)
+        path = _patient_path(org_slug, patient_slug, "datasets")
+        payload = self._transport.request("POST", path, json=profile)
+        return _parse_patient_register(payload)
 
     def delete_dataset(self, dataset_id: str | int) -> bool:
         try:
@@ -1140,13 +1592,8 @@ class AsyncDiscovery(AsyncResource):
         receptor_only: bool = False,
         top_n: int = 100,
     ) -> ComparisonResponse:
-        """POST ``/api/transcriptomics/compare-groups`` verbatim.
-
-        Group-shape rules the live server enforces (and this call now checks
-        locally first — see :func:`_check_compare_group_shapes`):
-        ``focus`` needs a ``custom`` target; ``global``/``compare`` need a
-        ``custom`` or ``geneset`` target; ``gtex`` tissues are only valid as
-        reference groups in ``compare`` mode, and ``compare`` needs >=1 of them.
+        """Async twin of :meth:`Discovery.compare_groups`; same local
+        group-shape gate (:func:`_check_compare_group_shapes`).
         [bd-LIGANDAI_ALPHA_V2-tom-D2]
         """
         _check_compare_group_shapes(target_group, reference_groups, mode)
@@ -1252,9 +1699,18 @@ class AsyncDiscovery(AsyncResource):
             await asyncio.sleep(min(poll_interval, remaining))
 
     async def list_datasets(self) -> list[Dataset]:
-        payload = await self._transport.request("GET", "/api/transcriptomics/datasets") or []
-        items = payload if isinstance(payload, list) else payload.get("datasets", [])
-        return [Dataset.model_validate(d) for d in items]
+        payload = await self._transport.request("GET", "/api/transcriptomics/datasets")
+        return _parse_dataset_list(payload)
+
+    async def project_dataset(
+        self, dataset_id: int, *,
+        projection_scope: Literal["cell_types", "sample_profiles"] = "cell_types",
+        group_ids: list[int] | None = None, top_k: int = 5, persist: bool = False,
+    ) -> dict[str, Any]:
+        """Async equivalent of Discovery.project_dataset with identical validation."""
+        body = _dataset_projection_request(dataset_id, projection_scope, group_ids, top_k, persist)
+        payload = await self._transport.request("POST", "/api/transcriptomics/hswae-project", json=body)
+        return _parse_dataset_projection(payload, dataset_id, projection_scope)
 
     async def upload_dataset(self, file: Path | str, dataset_type: str) -> Dataset:
         """Async: ingest your own counts so the funnel can SI-rank surface
@@ -1271,6 +1727,52 @@ class AsyncDiscovery(AsyncResource):
                 "POST", "/api/transcriptomics/upload", data=data, files=files
             ) or {}
         return Dataset.model_validate(payload)
+
+    async def list_patient_datasets(self, org_slug: str, patient_slug: str) -> dict[str, Any]:
+        """List prepared private transcriptomics datasets for one patient.
+
+        Returns the server's full body, including the ``unavailable`` list. An
+        entry the server could not decrypt or parse is reported, not dropped:
+        for a person's record, "this one could not be read" is information.
+        Raises rather than returning an empty list when the answer is unreadable.
+        """
+        path = _patient_path(org_slug, patient_slug, "datasets")
+        payload = await self._transport.request("GET", path)
+        return _parse_patient_dataset_list(payload)
+
+    async def patient_dataset(
+        self, org_slug: str, patient_slug: str, dataset_id: str, *,
+        include_expression: bool = False,
+    ) -> dict[str, Any]:
+        """Read one prepared private dataset, and optionally its expression features.
+
+        This returns a **recorded** projection. It does not run a model and must
+        not be described as fresh inference. ``include_expression=True`` requires
+        the response to carry exactly ``geneCount`` features with unique gene ids
+        and finite non-negative numeric ``tpm``; duplicate gene symbols and zero
+        values are legitimate and are preserved.
+        """
+        if type(include_expression) is not bool:
+            raise ValueError("include_expression must be boolean")
+        seg = _patient_path(org_slug, patient_slug, f"datasets/{_patient_uuid(dataset_id)}")
+        path = f"{seg}?includeExpression={'true' if include_expression else 'false'}"
+        payload = await self._transport.request("GET", path)
+        return _parse_patient_dataset_read(payload, dataset_id, include_expression)
+
+    async def register_patient_dataset(
+        self, org_slug: str, patient_slug: str, profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Register a prepared private transcriptomics profile. Superadmin only.
+
+        The four identity fields (``schema``, ``assay``, ``observationUnit``,
+        ``expressionUnit``) are checked client-side and never rewritten. A
+        registration whose response cannot be read raises and is **not** retried:
+        this is a write, and a blind retry can create a second record.
+        """
+        _validate_patient_profile(profile)
+        path = _patient_path(org_slug, patient_slug, "datasets")
+        payload = await self._transport.request("POST", path, json=profile)
+        return _parse_patient_register(payload)
 
     async def delete_dataset(self, dataset_id: str | int) -> bool:
         try:

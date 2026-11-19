@@ -102,18 +102,15 @@ est = client.ensemble.estimate(
 )
 print(est)
 # ensemble co-fold: 25 complexes x 3 engines = 75 folds
-#   projected 593 credits (~$5.93), 10% bundle discount (3 engines)
-#     boltz2     5 traj x 2.5 cr x 25 = 312.5 cr
-#     esmfold2   5 traj x 0.85 cr x 25 = 106.25 cr
-#     protenix   3 traj x 3.2 cr x 25 = 240 cr
+# Read the returned total and per-engine breakdown; rates come from the server.
 ```
 
-A single-engine boltz2 fold at the default 4 trajectories is 10 credits ($0.10). Engines are priced per trajectory in proportion to their GPU time (boltz2 2.5, protenix 3.2, esmfold2 0.85 credits per trajectory), each at its own default trajectory count, so an ensemble is the sum of its engines less a bundle discount (5% for 2 engines, 10% for 3). The
-figures above are illustrative; the numbers you get are the platform's own,
+A single-engine boltz2 fold at the default 4 trajectories is 20 credits ($0.20). Ensemble engine rates and any bundle adjustments are quoted by the server; use `client.ensemble.estimate()`. The
+numbers you get are the platform's own,
 from its pricing endpoint (`POST /api/v1/cofold/estimate`). The SDK holds no
 engine rate — it multiplies the server's quote for one complex by your peptide
 count — so a price change on the platform reaches this estimate without an SDK
-release, and the estimate cannot drift from the invoice. Pass the same
+release. The server ledger remains authoritative for actual charges. Pass the same
 `per_engine={...}` you will run with and the quote reflects your trajectory
 counts.
 

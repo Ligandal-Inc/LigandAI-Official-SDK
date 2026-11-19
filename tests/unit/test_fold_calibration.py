@@ -16,11 +16,14 @@ outputs — never random fill.
 from __future__ import annotations
 
 from ligandai.fold_calibration import (
+    ENGINES,
     MIN_DISTRIBUTION_SAMPLES,
     build_distributions,
     engine_agreement,
+    normalize_engine,
     standing,
 )
+from ligandai.fold_calibration import _ENGINE_ALIASES
 
 # A 20-sequence cohort matching the verified semantics in the locked contract.
 # esmfold2 / protenix run lower; boltz2 runs HIGH (it inflates interface
@@ -51,6 +54,56 @@ def test_standing_returns_raw_unchanged() -> None:
     assert info.raw == 0.71  # exactly as supplied
     assert info.engine == "boltz2"
     assert info.percentile is not None
+
+
+def test_every_engine_alias_key_is_reachable() -> None:
+    """An alias key containing a separator can NEVER match, and the table looks healthy.
+
+    :func:`normalize_engine` looks up ``"".join(ch for ch in text.lower() if ch.isalnum())``
+    — separators stripped, case folded. So a key written ``"open_dde"`` is dead weight:
+    the lookup for that spelling arrives as ``"opendde"`` and matches the plain entry
+    instead. Nothing failed while that entry sat there, which is the whole problem — a
+    table of aliases where some fraction silently never fire is worse than a shorter table,
+    because it advertises spellings the SDK does not actually accept.
+
+    Found by adding ``af3_openfold``: my first attempt keyed ``"alphafold3_openfold"`` and
+    normalized to ``_generic``, visible only because every spelling was exercised rather
+    than only the one just written.
+    """
+    dead = sorted(k for k in _ENGINE_ALIASES
+                  if k != "".join(c for c in k.lower() if c.isalnum()))
+    assert not dead, (
+        f"unreachable alias key(s) {dead}: normalize_engine strips separators before "
+        f"lookup, so a key with '_' or '-' can never match. Rewrite it separator-free."
+    )
+
+
+def test_every_engine_alias_resolves_to_a_first_class_engine() -> None:
+    """An alias may not point at a name that is not in ``ENGINES``.
+
+    ``normalize_engine`` returns ``_GENERIC`` for anything outside ``ENGINES``, so an alias
+    whose target was never promoted would make the engine look supported while it silently
+    loses its own distribution — and a missing distribution means no percentile, which the
+    dashboard renders as a bare raw with no context rather than as an error.
+    """
+    orphans = {k: v for k, v in _ENGINE_ALIASES.items() if v not in ENGINES}
+    assert not orphans, f"alias target(s) not in ENGINES: {sorted(orphans.items())}"
+
+
+def test_af3_openfold_spellings_resolve_and_stay_distinct_from_openfold3() -> None:
+    """``af3_openfold`` is the AF3 ARCHITECTURE on OpenFold3 weights; ``openfold3`` is the
+    OpenFold3 architecture. Pooling them would pool distributions that are not comparable,
+    so the discrimination is the point of the test, not an incidental detail.
+    """
+    for spelling in ("af3_openfold", "af3of3", "af3", "alphafold3_openfold",
+                     "alphafold3_srv", "openbind0", "AF3-OpenFold", "OpenBind-0",
+                     "AlphaFold3_OpenFold", "AF3"):
+        assert normalize_engine(spelling) == "af3_openfold", spelling
+    for spelling in ("openfold3", "of3", "openfold", "openfold3fast"):
+        assert normalize_engine(spelling) == "openfold3", (
+            f"{spelling} must NOT be swallowed by the af3_openfold aliases"
+        )
+    assert normalize_engine("not-an-engine") == "_generic"
 
 
 def test_boltz2_inflation_is_lower_within_engine_percentile() -> None:

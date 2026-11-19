@@ -229,7 +229,7 @@ class CampaignEngine:
                 self.design_meta.setdefault(d.design_id, {}).update(
                     {"topology": d.topology, "molecule_class": d.molecule_class,
                      "peptide_class": d.peptide_class, **d.provenance})
-            gen_cost = len(designs) * f.credits_per_generated_peptide
+            gen_cost = len(designs) * spec.generation_rate(pc)
             self.ledger.charge(gen_cost, f"generate {len(designs)} x {pc.name}")
             if designs:
                 poses = self.platform.fold(

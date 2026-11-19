@@ -25,7 +25,6 @@ Endpoint mapping (server source-of-truth):
 
 from __future__ import annotations
 
-import math
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -3918,12 +3917,8 @@ def _generation_result_from_session(
 # this method's: the orchestrator runs targets in batches (see
 # ``GEN_BATCH_SIZE`` in server/ptf-integration-routes.ts) and this method's job
 # is to hand it the whole list at once so it can. Submitting N targets in ONE
-# request is also the only way to earn the volume discount, which is computed on
-# TOTAL peptides across targets, not per target — see ``estimate_multi_cost``.
-
-# CREDIT_PRICING.generation.perPeptide (shared/schema.ts) — credits per DISPLAYED
-# peptide. Not the fold rate; folding is billed separately.
-_CREDITS_PER_PEPTIDE = 100
+# request uses the same flat per-peptide rate as separate requests; there is
+# no volume discount — see ``estimate_multi_cost``.
 
 _MultiTargetSpec = Union[str, Mapping[str, Any]]
 
@@ -4099,57 +4094,43 @@ def _guard_reused_session(
     )
 
 
-def estimate_multi_cost(num_targets: int, peptides_per_target: int) -> dict[str, Any]:
-    """Credit cost of an N-target generation, and what it saves over N separate runs.
+def estimate_multi_cost(
+    num_targets: int,
+    peptides_per_target: int,
+    *,
+    immunogenicity: bool = False,
+    serum_stability: bool = False,
+    quality_guided: bool = False,
+    ligandiq_fold_ranking: bool = False,
+) -> dict[str, Any]:
+    """Offline PTF generation estimate, excluding folding and scoring jobs.
 
-    ⛔ MIRRORS the server's formula (shared/schema.ts CREDIT_PRICING +
-    shared/forge-pricing.ts GENERATION_VOLUME_TIERS, applied in the
-    ``/api/ptf/parallel/generate`` handler). It is an ESTIMATE, not a quote —
-    the server is the authority, tier caps can reduce the billable count, and a
-    superadmin/unlimited account is not charged at all.
-
-    Guidance is FREE as priced today: the four per-peptide guidance surcharges
-    (``qualityGuidedGenPerPeptide``, ``ligandiqFoldRankingPerPeptide``,
-    ``immunoGuidancePerPeptide``, ``stabilityGuidancePerPeptide``) are all 0 in
-    the platform's pricing table, so this deliberately does NOT take guidance
-    arguments — adding them would imply a price difference that does not exist.
-    FOLDING is billed separately and is not counted here.
-
-    THE WHOLE POINT: the volume discount is computed on TOTAL peptides across
-    every target in ONE request, not per target. Ten targets x 100 peptides
-    submitted together is 1,000 peptides and earns the 1,000-peptide tier;
-    submitted as ten separate runs it is ten lots of 100 and earns only the
-    100-peptide tier, ten times. Same GPUs, same peptides, different bill.
+    Generation costs 10 credits per peptide plus 5 each for immunogenicity and
+    serum-stability guidance, capped at 20. Quality guidance and LigandIQ fold
+    ranking are included. PTF charges no setup fee and no volume discount:
+    combining targets saves no credits. The legacy comparison keys remain for
+    compatibility. Server quotes, billable tier caps and account exemptions
+    remain authoritative.
     """
-    n = int(num_targets) * int(peptides_per_target)
-    if n <= 0:
+    targets, per_target = int(num_targets), int(peptides_per_target)
+    if targets <= 0 or per_target <= 0:
         raise LigandAIError("estimate_multi_cost needs positive targets and peptides")
+    from ligandai.pricing import generation_credits
 
-    def _bulk_pct(total: int) -> int:
-        if total >= 5000:
-            return 50
-        if total >= 1000:
-            return 30
-        if total >= 300:
-            return 20
-        if total >= 100:
-            return 10
-        return 0
-
-    def _cost(total: int) -> float:
-        return total * _CREDITS_PER_PEPTIDE * (1 - _bulk_pct(total) / 100)
-
-    joint = math.ceil(_cost(n))
-    serial = int(num_targets) * math.ceil(_cost(int(peptides_per_target)))
+    flags = {"immunogenicity": immunogenicity, "serum_stability": serum_stability,
+             "quality_guided": quality_guided, "ligandiq_fold_ranking": ligandiq_fold_ranking}
+    n = targets * per_target
+    joint = generation_credits(n, **flags)
+    serial = targets * generation_credits(per_target, **flags)
     return {
-        "num_targets": int(num_targets),
-        "peptides_per_target": int(peptides_per_target),
+        "num_targets": targets,
+        "peptides_per_target": per_target,
         "total_peptides": n,
-        "bulk_discount_percent": _bulk_pct(n),
+        "bulk_discount_percent": 0,
         "credits_one_request": joint,
         "credits_n_separate_runs": serial,
         "credits_saved": serial - joint,
-        "credits_per_target": round(joint / int(num_targets), 1),
+        "credits_per_target": round(joint / targets, 1),
     }
 
 
@@ -5217,7 +5198,7 @@ class Peptides(Resource):
                 ``target_chains``, ``targeting_strategy``, ``variant_id``,
                 ``user_pdb_id``, ``uniprot_id``, ``pdb_id``, ``pdb_data``.
             num_peptides: Peptides **per target** (not the total). The bill and
-                the volume discount are computed on ``len(targets) *
+                the flat generation cost are computed on ``len(targets) *
                 num_peptides`` — see :func:`estimate_multi_cost`.
             avoid_paralogs: Name the off-target genes to steer every target's
                 generation away from, session-wide — see :meth:`generate` for
@@ -5499,7 +5480,7 @@ class Peptides(Resource):
             )
 
         # Single-fold cost (local pre-flight estimate; the platform is
-        # authoritative): ligandai.pricing.fold_credits — 10 credits for a
+        # authoritative): ligandai.pricing.fold_credits — 20 credits for a
         # default 4-trajectory fold, proportional per trajectory, ceil(steps/50).
         effective_trajectories = int(
             num_trajectories if num_trajectories is not None else diffusion_samples
@@ -5671,8 +5652,8 @@ class Peptides(Resource):
 
         Billing
         -------
-        **10 credits ($0.10) per fold at the default 4 trajectories** —
-        2.5 credits per trajectory, floored at a 10-credit minimum per fold
+        **20 credits ($0.20) per fold at the default 4 trajectories** —
+        5 credits per trajectory, floored at a 20-credit minimum per fold
         (so a single-trajectory fold still costs 10). Sampling steps above 50
         multiply the cost by ``ceil(sampling_steps / 50)``. The figures live in
         :mod:`ligandai.pricing`; the platform is authoritative and the returned
@@ -6194,9 +6175,9 @@ class Peptides(Resource):
         Mirrors the flat-form hardening pre-flight (GPU allowlist → concurrency
         → dedupe → credit pre-flight → record), but the unit of cost is the
         GROUP (one complex fold) rather than the single peptide. Billing:
-        2.5 cr/group/trajectory × ``ceil(sampling_steps / 50)``, floored at a
-        10-credit minimum per group (a default 4-trajectory group is 10
-        credits, $0.10), matching the server-side computation for the grouped
+        5 cr/group/trajectory × ``ceil(sampling_steps / 50)``, floored at a
+        20-credit minimum per group (a default 4-trajectory group is 20
+        credits, $0.20), matching the server-side computation for the grouped
         envelope. See :mod:`ligandai.pricing`.
         """
         from ligandai._hardening import (
@@ -7593,6 +7574,11 @@ class Peptides(Resource):
         auto_fold: bool = True,
         fold_top_n: int | None = None,
         fold_trajectories: int = 4,
+        sampling_steps: int = 50,
+        immunogenicity: bool = False,
+        serum_stability: bool = False,
+        quality_guided: bool = False,
+        ligandiq_fold_ranking: bool = False,
     ) -> CostEstimate:
         """``GET /api/billing/estimate`` — estimate the credit cost of a generation + folding job.
 
@@ -7600,7 +7586,12 @@ class Peptides(Resource):
             num_peptides: Number of peptides to generate.
             auto_fold: Whether folding will run automatically (default True).
             fold_top_n: Cap on peptides folded; when None the server uses its default.
-            fold_trajectories: Diffusion samples per fold (default 4, matches Boltz-2 default).
+            fold_trajectories: Diffusion samples per fold (default 4).
+            sampling_steps: Diffusion steps per fold (default 50).
+            immunogenicity: Include the 5-credit per-peptide immuno surcharge.
+            serum_stability: Include the 5-credit per-peptide stability surcharge.
+            quality_guided: Included guidance (no surcharge).
+            ligandiq_fold_ranking: Included fold ranking (no surcharge).
 
         Returns:
             :class:`~ligandai.types.CostEstimate` with ``credits`` (int),
@@ -7612,12 +7603,22 @@ class Peptides(Resource):
             "auto_fold": auto_fold,
             "fold_trajectories": fold_trajectories,
         }
+        if sampling_steps != 50:
+            params["sampling_steps"] = sampling_steps
+        params.update({key: True for key, enabled in {
+            "immuno": immunogenicity,
+            "stability": serum_stability,
+            "quality_guided": quality_guided,
+            "ligandiq_fold_ranking": ligandiq_fold_ranking,
+        }.items() if enabled})
         if fold_top_n is not None:
             params["top_n"] = fold_top_n
         payload = (
-            self._transport.request("GET", "/api/billing/estimate", params=params) or {}
+            self._transport.request("GET", "/api/billing/estimate", params=params)
         )
-        return CostEstimate.model_validate(payload)
+        from ligandai.resources._cost_estimate import parse_cost_estimate
+
+        return parse_cost_estimate(payload)
 
     def download_pdb(
         self,
@@ -8077,7 +8078,7 @@ class AsyncPeptides(AsyncResource):
                 ``target_chains``, ``targeting_strategy``, ``variant_id``,
                 ``user_pdb_id``, ``uniprot_id``, ``pdb_id``, ``pdb_data``.
             num_peptides: Peptides **per target** (not the total). The bill and
-                the volume discount are computed on ``len(targets) *
+                the flat generation cost are computed on ``len(targets) *
                 num_peptides`` — see :func:`estimate_multi_cost`.
             avoid_paralogs: Name the off-target genes to steer every target's
                 generation away from, session-wide — see :meth:`generate` for
@@ -9652,6 +9653,11 @@ class AsyncPeptides(AsyncResource):
         auto_fold: bool = True,
         fold_top_n: int | None = None,
         fold_trajectories: int = 4,
+        sampling_steps: int = 50,
+        immunogenicity: bool = False,
+        serum_stability: bool = False,
+        quality_guided: bool = False,
+        ligandiq_fold_ranking: bool = False,
     ) -> CostEstimate:
         """Async variant of :meth:`Peptides.estimate_cost`."""
         params: dict[str, Any] = {
@@ -9659,10 +9665,19 @@ class AsyncPeptides(AsyncResource):
             "auto_fold": auto_fold,
             "fold_trajectories": fold_trajectories,
         }
+        if sampling_steps != 50:
+            params["sampling_steps"] = sampling_steps
+        params.update({key: True for key, enabled in {
+            "immuno": immunogenicity,
+            "stability": serum_stability,
+            "quality_guided": quality_guided,
+            "ligandiq_fold_ranking": ligandiq_fold_ranking,
+        }.items() if enabled})
         if fold_top_n is not None:
             params["top_n"] = fold_top_n
         payload = (
             await self._transport.request("GET", "/api/billing/estimate", params=params)
-            or {}
         )
-        return CostEstimate.model_validate(payload)
+        from ligandai.resources._cost_estimate import parse_cost_estimate
+
+        return parse_cost_estimate(payload)
