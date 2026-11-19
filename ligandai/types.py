@@ -5220,6 +5220,12 @@ class GraphTissueNode(_AtlasPublicModel):
         validation_alias=AliasChoices(
             "fineBasketId", "fine_basket_id", "tissueKey", "tissue_key"
         ),
+        serialization_alias="fineBasketId",
+    )
+    studio_option_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("studioOptionId", "studio_option_id"),
+        serialization_alias="studioOptionId",
     )
     label: str = ""
     level: str = "tissue"
@@ -5228,17 +5234,25 @@ class GraphTissueNode(_AtlasPublicModel):
         validation_alias=AliasChoices(
             "derivedCoarseSystem", "derived_coarse_system", "organ"
         ),
+        serialization_alias="derivedCoarseSystem",
     )
     role: str = ""
     evidence: str = ""
     citation: str = ""
+    uberon_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("uberonId", "uberon_id"),
+        serialization_alias="uberonId",
+    )
     geo_healthy_additions: list[dict[str, Any]] = Field(
         default_factory=list,
         validation_alias=AliasChoices("geoHealthyAdditions", "geo_healthy_additions"),
+        serialization_alias="geoHealthyAdditions",
     )
     geo_disease_datasets: list[dict[str, Any]] = Field(
         default_factory=list,
         validation_alias=AliasChoices("geoDiseaseDatasets", "geo_disease_datasets"),
+        serialization_alias="geoDiseaseDatasets",
     )
 
 
@@ -5392,6 +5406,10 @@ class PerOrganTopMarkersEntry(_AtlasPublicModel):
     fine_basket_id: str = Field(
         default="", validation_alias=AliasChoices("fine_basket_id", "fineBasketId")
     )
+    studio_option_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("studio_option_id", "studioOptionId"),
+    )
     fine_tissue_label: str = Field(
         default="",
         validation_alias=AliasChoices("fine_tissue_label", "fineTissueLabel"),
@@ -5413,7 +5431,9 @@ class MarkerValueRanking(_AtlasPublicModel):
     """Scored, explainable marker ranking returned by ``markers.ranking``."""
 
     data_version: str = Field(
-        default="v4", validation_alias=AliasChoices("dataVersion", "data_version")
+        default="v4",
+        validation_alias=AliasChoices("dataVersion", "data_version"),
+        serialization_alias="dataVersion",
     )
     surface: str = "ligandai.com Studio dropdown"
     filter: dict[str, Any] = Field(default_factory=dict)
@@ -5439,11 +5459,118 @@ class MarkerValueRanking(_AtlasPublicModel):
         ),
     )
     took_ms: float = Field(
-        default=0.0, validation_alias=AliasChoices("tookMs", "took_ms")
+        default=0.0,
+        validation_alias=AliasChoices("tookMs", "took_ms"),
+        serialization_alias="tookMs",
     )
 
 
 MarkerValueRankingResponse = MarkerValueRanking
+
+
+class StudioDropdownOption(_AtlasPublicModel):
+    """Fine tissue/organ option from ``GET /api/atlas/dropdown-options``."""
+
+    studio_option_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("studioOptionId", "studio_option_id"),
+        serialization_alias="studioOptionId",
+    )
+    fine_basket_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("fineBasketId", "fine_basket_id"),
+        serialization_alias="fineBasketId",
+    )
+    label: str = ""
+    level: str = "tissue"
+    derived_coarse_system: str = Field(
+        default="",
+        validation_alias=AliasChoices("derivedCoarseSystem", "derived_coarse_system"),
+        serialization_alias="derivedCoarseSystem",
+    )
+    studio_systems: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("studioSystems", "studio_systems"),
+        serialization_alias="studioSystems",
+    )
+    disease_count: int = Field(
+        default=0,
+        validation_alias=AliasChoices("diseaseCount", "disease_count"),
+        serialization_alias="diseaseCount",
+    )
+    tagged_records: int = Field(
+        default=0,
+        validation_alias=AliasChoices("taggedRecords", "tagged_records"),
+        serialization_alias="taggedRecords",
+    )
+    empty_disease_list: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("emptyDiseaseList", "empty_disease_list"),
+        serialization_alias="emptyDiseaseList",
+    )
+    zero_priced_owner_basket: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "zeroPricedOwnerBasket", "zero_priced_owner_basket"
+        ),
+        serialization_alias="zeroPricedOwnerBasket",
+    )
+    geo_tier_counts: dict[str, int] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("geoTierCounts", "geo_tier_counts"),
+        serialization_alias="geoTierCounts",
+    )
+    top_markers: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("topMarkers", "top_markers"),
+        serialization_alias="topMarkers",
+    )
+    sample_indication_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("sampleIndicationIds", "sample_indication_ids"),
+        serialization_alias="sampleIndicationIds",
+    )
+
+
+class AtlasDropdownOptionsResponse(_AtlasPublicModel):
+    """Response from ``GET /api/atlas/dropdown-options`` (83 fine LigandAI Studio options)."""
+
+    data_version: str = Field(
+        default="v4",
+        validation_alias=AliasChoices("dataVersion", "data_version"),
+        serialization_alias="dataVersion",
+    )
+    surface: str = "ligandai.com Studio dropdown"
+    total_options: int = Field(
+        default=0,
+        validation_alias=AliasChoices("totalOptions", "total_options"),
+        serialization_alias="totalOptions",
+    )
+    empty_options: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("emptyOptions", "empty_options"),
+        serialization_alias="emptyOptions",
+    )
+    zero_priced_owner_options: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "zeroPricedOwnerOptions", "zero_priced_owner_options"
+        ),
+        serialization_alias="zeroPricedOwnerOptions",
+    )
+    derived_systems_rollup: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "derivedSystemsRollup", "derived_systems_rollup"
+        ),
+        serialization_alias="derivedSystemsRollup",
+    )
+    options: list[StudioDropdownOption] = Field(default_factory=list)
+    took_ms: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("tookMs", "took_ms"),
+        serialization_alias="tookMs",
+    )
 
 
 # -- Disease Atlas (Superadmin-Only Intelligence Surface) ---------------------

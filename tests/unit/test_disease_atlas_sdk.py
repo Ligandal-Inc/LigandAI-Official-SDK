@@ -75,6 +75,25 @@ CANONICAL_OPENAPI_OPERATIONS: dict[tuple[str, str], set[str]] = {
         "top_k",
     },
     ("POST", "/api/atlas/map"): set(),
+    ("GET", "/api/atlas/diseases/{id}/targets-graph"): {
+        "id",
+        "tissue",
+        "cell_type",
+        "top_k",
+        "seed",
+    },
+    ("POST", "/api/atlas/map-targets"): set(),
+    ("GET", "/api/atlas/markers/ranking"): {
+        "organ",
+        "tissue",
+        "platform_only",
+        "top_k",
+        "seed",
+    },
+    ("GET", "/api/atlas/dropdown-options"): {
+        "system",
+        "include_empty",
+    },
     ("GET", "/api/admin/atlas/matrix"): {
         "q",
         "organ",
@@ -469,6 +488,11 @@ def test_openapi_contract_parity() -> None:
             "DiseaseTissue",
             "RankedTarget",
             "MapResponse",
+            "DiseaseTargetGraphResponse",
+            "MarkerValueRankingResponse",
+            "AtlasDropdownOptionsResponse",
+            "StudioDropdownOption",
+            "RankedMarkerCandidate",
         ):
             props = set(schemas[public_schema_name]["properties"].keys())
             leaked = props & FORBIDDEN_COMMERCIAL_FIELDS
@@ -1266,8 +1290,11 @@ def test_v4_gates_fail_closed_to_v3_until_all_gates_pass(
     root = tmp_path / "atlas_root"
     (root / "v3" / "validation").mkdir(parents=True)
     (root / "v4" / "validation").mkdir(parents=True)
+    (root / "v4" / "anatomy_geo" / "marker_graph").mkdir(parents=True)
     add8_spec = root / "TASK_ADDENDUM8_LABEL_EXPANSION.md"
     add8_spec.write_text("# Addendum 8\n", encoding="utf-8")
+    add8_company_spec = root / "TASK_ADDENDUM8_COMPANY_MODEL.md"
+    add8_company_spec.write_text("# Addendum 8 Company Model\n", encoding="utf-8")
     v3_gates = root / "v3" / "validation" / "gates.json"
     v3_gates.write_text(
         json.dumps(
@@ -1303,26 +1330,61 @@ def test_v4_gates_fail_closed_to_v3_until_all_gates_pass(
     )
     assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v3"
 
-    # Passing v4 gates older than TASK_ADDENDUM8_LABEL_EXPANSION.md must still stay on v3
+    # Partial 3-gate map even with overall=="pass" MUST fail closed to v3
+    v3_replay_map = {f"v3_gate_{i:02d}": {"status": "pass"} for i in range(1, 37)}
     v4_gates.write_text(
         json.dumps(
             {
                 "overall": "pass",
-                "gates": [
-                    {"gate": 1, "status": "pass"},
-                    {"gate": 29, "status": "pass"},
-                    {"gate": 30, "status": "pass"},
-                ],
+                "v3_status": "pass",
+                "v3_count": 36,
+                "v3_gates": v3_replay_map,
+                "v4_count": 3,
+                "v4_counts": {"pass": 3, "fail": 0},
+                "gates": {
+                    "01": {"status": "pass"},
+                    "29": {"status": "pass"},
+                    "30": {"status": "pass"},
+                },
             }
         ),
         encoding="utf-8",
     )
-    os.utime(v4_gates, (1_700_000_000, 1_700_000_000))
-    os.utime(add8_spec, (1_700_000_100, 1_700_000_100))
+    os.utime(add8_spec, (1_700_000_000, 1_700_000_000))
+    os.utime(add8_company_spec, (1_700_000_000, 1_700_000_000))
+    os.utime(v4_gates, (1_700_000_200, 1_700_000_200))
     assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v3"
 
-    # Once v4 gates are regenerated after Addendum 8 and all pass, v4 resolves cleanly
+    # Full 31-gate (01..31) + 36-v3_gates receipt older than TASK_ADDENDUM8_COMPANY_MODEL.md stays on v3
+    full_31_gates = {f"{i:02d}. Gate {i}": {"status": "pass"} for i in range(1, 32)}
+    valid_v4_receipt = {
+        "overall": "pass",
+        "v3_status": "pass",
+        "v3_count": 36,
+        "v3_gates": v3_replay_map,
+        "v4_count": 31,
+        "v4_counts": {"pass": 31, "fail": 0, "unmet": 0},
+        "gates": full_31_gates,
+    }
+    v4_gates.write_text(json.dumps(valid_v4_receipt), encoding="utf-8")
+    os.utime(v4_gates, (1_700_000_050, 1_700_000_050))
+    os.utime(add8_company_spec, (1_700_000_100, 1_700_000_100))
+    assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v3"
+
+    # Producer receipt gates_29_30.json failing gate 30 forces fallback to v3
     os.utime(v4_gates, (1_700_000_200, 1_700_000_200))
+    prod_receipt = root / "v4" / "anatomy_geo" / "marker_graph" / "gates_29_30.json"
+    prod_receipt.write_text(
+        json.dumps({"gates": {"29": {"status": "pass"}, "30": {"status": "fail"}}}),
+        encoding="utf-8",
+    )
+    assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v3"
+
+    # Once producer receipt also passes both 29 & 30 and v4_gates postdates both specs, v4 resolves cleanly
+    prod_receipt.write_text(
+        json.dumps({"gates": {"29": {"status": "pass"}, "30": {"status": "pass"}}}),
+        encoding="utf-8",
+    )
     assert resolve_atlas_data_version("v4", gates_path=v4_gates) == "v4"
 
 
@@ -1624,12 +1686,60 @@ async def test_map_disease_to_targets_and_markers_ranking_http_fallbacks_and_csv
         url=f"{BASE}/api/atlas/markers/ranking?organ=kidney&top_k=10&seed=7",
         json=sample_ranking_json,
     )
+    sample_dropdown_json = {
+        "dataVersion": "v4",
+        "surface": "ligandai.com Studio dropdown",
+        "totalOptions": 83,
+        "emptyOptions": ["appendix"],
+        "zeroPricedOwnerOptions": [],
+        "derivedSystemsRollup": [{"system": "Kidney", "optionCount": 6, "diseaseCount": 412}],
+        "options": [
+            {
+                "studioOptionId": "kidney_cortex",
+                "fineBasketId": "kidney_cortex",
+                "label": "Renal cortex",
+                "level": "tissue",
+                "derivedCoarseSystem": "Kidney",
+                "studioSystems": ["Kidney"],
+                "diseaseCount": 88,
+                "taggedRecords": 102,
+                "emptyDiseaseList": False,
+                "zeroPricedOwnerBasket": False,
+                "geoTierCounts": {
+                    "exactDisease": 21,
+                    "sameGeneProxy": 14,
+                    "tissueOnly": 53,
+                    "patientVsControlRecords": 19,
+                },
+                "topMarkers": [{"marker": "LRP2", "score": 0.9125, "selectivity": 0.94, "n_diseases": 19}],
+                "sampleIndicationIds": ["MONDO:0010526"],
+                "rnpvUsd": 123456.0,  # commercial leak must be stripped
+            }
+        ],
+        "tookMs": 0.8,
+    }
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/dropdown-options?system=Kidney&include_empty=false",
+        json=sample_dropdown_json,
+    )
+    dropdown_sync = client.diseases.dropdown_options(system="Kidney", include_empty=False)
+    assert isinstance(dropdown_sync, ligandai.AtlasDropdownOptionsResponse)
+    assert dropdown_sync.total_options == 83
+    assert dropdown_sync.options[0].studio_option_id == "kidney_cortex"
+    assert "rnpvUsd" not in json.dumps(dropdown_sync.model_dump(by_alias=True))
+
+    httpx_mock.add_response(
+        url=f"{BASE}/api/atlas/dropdown-options",
+        json=sample_dropdown_json,
+    )
     async with AsyncLigandAI(api_key="lgai_pro_add8", base_url=BASE, max_retries=1) as aclient:
         ranked_async = await aclient.markers.ranking(organ="kidney", top_k=10, seed=7)
         assert (
             ranked_async.reproducibility["deterministic_digest"]
             == ranked_sync.reproducibility["deterministic_digest"]
         )
+        dropdown_async = await aclient.diseases.dropdown_options()
+        assert dropdown_async.total_options == 83
 
     # 4. Local read-only marker_graph_dir CSV loading + deterministic seed reproducibility
     gdir = tmp_path / "marker_graph"

@@ -37,14 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   automatically on `v4` while keeping standalone per-indication `rnpv_usd`
   untouched). Extended `AdminMatrixRow` (`MatrixCommercial` + `MatrixPricing`)
   and `AdminBenchmarksResponse` (`price_anchors`) for `v3` parity.
-- **Disease -> tissue -> cell -> marker graph & marker-value ranking (Addendum 8 §J, Gates 29 & 30).**
+- **Disease -> tissue -> cell -> marker graph, marker-value ranking & Studio dropdown options (Addendum 8 §J, Gates 29 & 30).**
   Added `diseases.map_disease_to_targets(disease, tissue=None, top_k=...)` (and
   top-level `client.map_disease_to_targets(...)`) returning
-  `{tissues, cell_types, markers: [{marker, evidence, selectivity, n_diseases, patient_pop, price_per_drug, score}]}`
-  plus `client.markers.ranking(organ=None, platform_only=False)` (and
+  `{tissues, cell_types, markers: [{marker, evidence, selectivity, n_diseases, patient_pop, price_per_drug, score}]}`,
+  `client.markers.ranking(organ=None, platform_only=False)` (and
   `client.diseases.markers.ranking(...)`) with per-tissue top lists across fine
-  `ligandai.com Studio dropdown` tissues, cross-disease platform markers,
-  read-only local CSV fixture support, and deterministic seeded reproducibility.
+  `ligandai.com Studio dropdown` tissues and cross-disease platform markers, and
+  `diseases.dropdown_options(system=None, include_empty=None)` (`GET /api/atlas/dropdown-options`,
+  83 fine tissue/organ options) with full 31-gate (`01..31`) + 36-`v3_gates`
+  consolidated `v4` receipt reconciliation, read-only local CSV fixture support,
+  and deterministic seeded reproducibility.
 - **Generator model `v6.5.24`**, now the platform default. A receptor-conditioned
   model with a 65-channel per-residue receptor feature space; supports the four
   guidance heads and scaffold / variable-segment masks and does not take a CFG

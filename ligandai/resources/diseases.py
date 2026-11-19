@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, overload
@@ -42,6 +43,7 @@ from ligandai.types import (
     AtlasDiseaseTargetsResponse,
     AtlasDiseaseTissue,
     AtlasDiseaseTissuesResponse,
+    AtlasDropdownOptionsResponse,
     AtlasMeta,
     AtlasRankedTarget,
     AtlasSearchResponse,
@@ -55,6 +57,7 @@ from ligandai.types import (
     Mutation,
     PerOrganTopMarkersEntry,
     RankedMarkerCandidate,
+    StudioDropdownOption,
 )
 
 if TYPE_CHECKING:
@@ -166,6 +169,113 @@ def _gate_entry_ok(entry: Any) -> bool:
     return False
 
 
+_REQUIRED_V4_GATE_COUNT: int = 31
+_REQUIRED_V4_REPLAY_V3_GATE_COUNT: int = 36
+_REQUIRED_V4_GATE_IDS: frozenset[int] = frozenset(range(1, _REQUIRED_V4_GATE_COUNT + 1))
+_CANONICAL_GATE_ID_RE = re.compile(r"^0*([1-9][0-9]*)(?:\.|\b|$)")
+_ADDENDUM8_SPECS: tuple[str, ...] = (
+    "TASK_ADDENDUM8_LABEL_EXPANSION.md",
+    "TASK_ADDENDUM8_COMPANY_MODEL.md",
+)
+
+
+def _is_strict_int(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool)
+
+
+def _parse_canonical_gate_id(key: str) -> int | None:
+    m = _CANONICAL_GATE_ID_RE.match(key.strip())
+    if m is None:
+        return None
+    num = int(m.group(1))
+    return num if num >= 1 else None
+
+
+def _validate_v4_consolidated_gates(
+    raw: Mapping[str, Any], version_dir: Path | None
+) -> bool:
+    overall = str(raw.get("overall") or "").strip().lower()
+    if overall not in {"pass", "passed"}:
+        return False
+
+    v3_status = str(raw.get("v3_status") or "").strip().lower()
+    if v3_status not in {"pass", "passed"}:
+        return False
+
+    v3_gates = raw.get("v3_gates")
+    if not isinstance(v3_gates, Mapping) or len(v3_gates) < _REQUIRED_V4_REPLAY_V3_GATE_COUNT:
+        return False
+    v3_count = raw.get("v3_count")
+    if not _is_strict_int(v3_count) or v3_count != len(v3_gates):
+        return False
+    if not all(_gate_entry_ok(entry) for entry in v3_gates.values()):
+        return False
+
+    gates = raw.get("gates")
+    if not isinstance(gates, Mapping):
+        return False
+    actual_gate_count = len(gates)
+    seen_ids: set[int] = set()
+    passing_count = 0
+    for gate_key, gate_entry in gates.items():
+        gate_id = _parse_canonical_gate_id(str(gate_key))
+        if gate_id is None or gate_id in seen_ids:
+            return False
+        seen_ids.add(gate_id)
+        if _gate_entry_ok(gate_entry):
+            passing_count += 1
+        else:
+            return False
+    if not _REQUIRED_V4_GATE_IDS.issubset(seen_ids):
+        return False
+
+    v4_count = raw.get("v4_count")
+    if (
+        not _is_strict_int(v4_count)
+        or v4_count < _REQUIRED_V4_GATE_COUNT
+        or v4_count != actual_gate_count
+    ):
+        return False
+
+    v4_counts = raw.get("v4_counts")
+    if not isinstance(v4_counts, Mapping):
+        return False
+    summary_pass = 0
+    summary_non_pass = 0
+    for bucket, val in v4_counts.items():
+        if not _is_strict_int(val) or val < 0:
+            return False
+        b_lower = str(bucket).strip().lower()
+        if b_lower in {"pass", "passed"}:
+            summary_pass += val
+        else:
+            summary_non_pass += val
+    if summary_pass + summary_non_pass != actual_gate_count:
+        return False
+    if summary_pass != passing_count or summary_non_pass > 0:
+        return False
+
+    if version_dir is not None:
+        producer_receipt = (
+            version_dir / "anatomy_geo" / "marker_graph" / "gates_29_30.json"
+        )
+        if producer_receipt.is_file():
+            try:
+                prod_raw = json.loads(producer_receipt.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            if not isinstance(prod_raw, Mapping):
+                return False
+            prod_gates = prod_raw.get("gates")
+            if not isinstance(prod_gates, Mapping):
+                return False
+            if not _gate_entry_ok(prod_gates.get("29")) or not _gate_entry_ok(
+                prod_gates.get("30")
+            ):
+                return False
+    return True
+
+
 def _gates_file_passed(
     gates_path: str | Path,
     *,
@@ -174,39 +284,45 @@ def _gates_file_passed(
 ) -> bool:
     """Return True only when ``gates.json`` exists, is fresh against inputs/spec, and passes all gates."""
     p = Path(gates_path)
+    version_dir = p.parent.parent if p.parent.name == "validation" else None
+    is_v4 = require_addendum8_spec or (
+        version_dir is not None and version_dir.name.lower() == "v4"
+    )
     try:
         gates_mtime = p.stat().st_mtime_ns
+        if any(p.parent.glob("*.part")):
+            return False
         for add7_file in p.parent.glob("add7-*.json"):
             if add7_file.name == "add7-5-release.json":
                 continue
             if add7_file.stat().st_mtime_ns > gates_mtime:
                 return False
-        if p.parent.name == "validation":
-            version_dir = p.parent.parent
+        if version_dir is not None:
+            if any(version_dir.glob("*.part")):
+                return False
             for csv_file in version_dir.glob("*.csv"):
                 if csv_file.stat().st_mtime_ns > gates_mtime:
                     return False
-            effective_spec = (
-                Path(spec_path)
-                if spec_path is not None
-                else (
-                    version_dir.parent / "TASK_ADDENDUM8_LABEL_EXPANSION.md"
-                    if require_addendum8_spec or version_dir.name == "v4"
-                    else None
-                )
-            )
-            if effective_spec is not None and effective_spec.is_file():
-                if effective_spec.stat().st_mtime_ns > gates_mtime:
+            if spec_path is not None:
+                sp = Path(spec_path)
+                if sp.is_file() and sp.stat().st_mtime_ns >= gates_mtime:
                     return False
+            elif is_v4:
+                for spec_name in _ADDENDUM8_SPECS:
+                    sp = version_dir.parent / spec_name
+                    if sp.is_file() and sp.stat().st_mtime_ns >= gates_mtime:
+                        return False
         elif spec_path is not None:
             sp = Path(spec_path)
-            if sp.is_file() and sp.stat().st_mtime_ns > gates_mtime:
+            if sp.is_file() and sp.stat().st_mtime_ns >= gates_mtime:
                 return False
         raw = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return False
     if not isinstance(raw, Mapping):
         return False
+    if is_v4:
+        return _validate_v4_consolidated_gates(raw, version_dir)
     overall = str(raw.get("overall") or "").strip().lower()
     top_status = str(raw.get("status") or "").strip().lower()
     if (overall and overall not in {"pass", "passed"}) or (
@@ -1595,6 +1711,29 @@ class Diseases(Resource):
             _require_mapping(payload, what="GET /api/atlas/meta")
         )
 
+    def dropdown_options(
+        self,
+        *,
+        system: str | None = None,
+        include_empty: bool | None = None,
+        data_version: str | None = None,
+    ) -> AtlasDropdownOptionsResponse:
+        """Fetch the 83 fine tissue/organ options for the ``ligandai.com`` Studio dropdown."""
+        params: dict[str, Any] = {
+            "system": system,
+            "include_empty": include_empty,
+        }
+        payload = self._transport.request(
+            "GET",
+            "/api/atlas/dropdown-options",
+            params={k: v for k, v in params.items() if v is not None},
+            **_header_kwargs(data_version),
+        )
+        cleaned = sanitize_public_atlas_payload(
+            _require_mapping(payload, what="GET /api/atlas/dropdown-options")
+        )
+        return AtlasDropdownOptionsResponse.model_validate(cleaned)
+
     def search(
         self,
         q: str = "",
@@ -2041,6 +2180,28 @@ class AsyncDiseases(AsyncResource):
         return AtlasMeta.model_validate(
             _require_mapping(payload, what="GET /api/atlas/meta")
         )
+
+    async def dropdown_options(
+        self,
+        *,
+        system: str | None = None,
+        include_empty: bool | None = None,
+        data_version: str | None = None,
+    ) -> AtlasDropdownOptionsResponse:
+        params: dict[str, Any] = {
+            "system": system,
+            "include_empty": include_empty,
+        }
+        payload = await self._transport.request(
+            "GET",
+            "/api/atlas/dropdown-options",
+            params={k: v for k, v in params.items() if v is not None},
+            **_header_kwargs(data_version),
+        )
+        cleaned = sanitize_public_atlas_payload(
+            _require_mapping(payload, what="GET /api/atlas/dropdown-options")
+        )
+        return AtlasDropdownOptionsResponse.model_validate(cleaned)
 
     async def search(
         self,
