@@ -525,20 +525,26 @@ def _request_json(httpx_mock: HTTPXMock) -> dict[str, Any]:
 
 def test_definition_hashes_pin_the_exact_reviewed_registry() -> None:
     assert dict(HSWAE_CAPABILITY_DEFINITION_HASHES) == {
+        "hswae.v2.add_projection_item": (
+            "bfb9f6ef8e9af546f741f9afb1310971a88c8e324700aef0b919df9d2de3f586"
+        ),
+        "hswae.v2.remove_projection_item": (
+            "67df1db71d093267cd0dcf4ebb6bfce9c2744cc949e6395513cd2b28f018ee95"
+        ),
         "hswae.v1.semantic_search": (
-            "059b7dabfe64b95df6db302e19c41db4140b21eeb17c1fee1d601942ab1e4530"
+            "44f02a9849a5c7dec417812bf03023d2f44cf341a3c0f7074005f7d2c97bf4f3"
         ),
         "hswae.v1.surface_markers": (
-            "4f19e07593de43bc4daecf02229c7033e35248cf639b4fb9d96ddc2b6d8dadc9"
+            "3992253a1d90a4df946a94ef80fb8eee8f97d59dce48a93acaf7ffa6d6be8bf6"
         ),
         "hswae.v2.resolve_cell_type": (
-            "78ff3122da897fab5d1e49ec2a0f01cd8e90e76e9c0ec8c6ca35d88c03b8ca40"
+            "7d735726ec489659c86169ae14e70ce52c34a63bdb30b6b34e3782b82726934c"
         ),
         "hswae.v2.compare_cell_types": (
-            "cd752bf2c9284510cbabbbcd89f8be4be2cf0817c0f676aa73f12e53f0e90881"
+            "72158a851958c675d3dd67c1ccce82d93bfb4348b0c650ab46d5b04ed6d83972"
         ),
         "hswae.v2.isoform_expression": (
-            "1716acbd629ea944bebd9fc33df97a1f721211e8776bacfec455b38df0164ad2"
+            "ba8ba91ef66e5dade52856f433fe1c10e2f5776f3f77c40ad1268f0d4a2e0f3f"
         ),
         "hswae.v2.annotate_dataset": (
             "53ba38fff81386bc01c6b98d24e17237c9e7156cf546654efe317acc273b43af"

@@ -493,3 +493,11 @@ asyncio.run(screen(["EGFR", "HER2", "KIT"]))
 If something looks broken, check the response status + body before assuming
 SDK bug. The platform changelog is public at <https://ligandai.com/changelog>.
 For account / billing issues, the user can email <support@ligandai.com>.
+
+## H-SWAE transcriptomics
+
+Use `client.discovery` for tissue vocabulary and v2 cell-type resolution. An exact
+vocabulary match establishes a label. Measured expression and differential ranks
+have separate coverage. The bundled discovery guide covers the registry, signed
+projection edits, reference selection, truncation and production limitations.
+See `agent_assets/claude_skills/ligandai/discovery.md`.

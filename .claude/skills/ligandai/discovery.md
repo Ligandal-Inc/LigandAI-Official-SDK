@@ -1,5 +1,54 @@
 # Target discovery (transcriptomics) — find/rank targets
 
+## H-SWAE discovery and projection membership
+
+The v2 comparison returns `differential` in descending `delta_csi` order.
+Each difference subtracts the highest resolved reference CSI from the target CSI.
+Inspect the actual references, the target CSI and the expression units when
+interpreting a row. Reference composition can change the order. RNA expression
+and CSI do not measure surface protein copy number, binding or delivery.
+
+**Choosing a reference.** V1 semantic search and surface markers use tissue contexts.
+V2 resolves cell types and compares them against explicit reference cell types.
+Read the canonical label, its matching candidate, confidence, resolution stage,
+ambiguity and proxy flags. A high score for a broad label does not establish a
+more specific subtype. In SDK 0.16.9, the typed result exposes
+`canonical_cell_type` and the matched candidate’s `confidence`. Earlier
+SDKs expose `canonical` and `candidates`. A search miss says which vocabulary
+was queried. It gives no evidence of biological absence.
+
+**November 18 production observations.** The tissue listing included `eye`
+among 83 labels while the v1 semantic index reported 73 tissues and 85 cell labels.
+V2 resolved retinal cell types, including exact matches. The published
+0.16.5–0.16.8 SDKs reject five updated discovery definitions under the old pins.
+Calling a known operation through `invoke_capability` still works for an entitled
+account. The synchronous and asynchronous 0.16.9 validators recognize those
+reviewed pre-digest definitions and verify each explicitly stated digest.
+
+**Comparison limits.** For a resolved target, an empty reference list with no
+scope gives an empty differential and `no_references_resolved`. Use explicit
+references for a reproducible contrast. Without explicit references, the observed
+`topical` and `tissue_resident` scopes returned the same skin panel for
+non-skin queries. `systemic` and `cluster_only` did not supply comparison
+references in the reported calls. Read `reference_resolution`,
+`differential_status`, `differential_status_detail` and
+`differential_truncated_at_top_n` alongside the rows. The reported sweep had
+502s near 15 seconds at both small and large depths. Retry transient failures
+on **read-only** operations with bounded backoff. A 502 contains no scientific result.
+
+**Projection writes in 0.16.9.** The coordinated server release advertises
+`hswae.v2.add_projection_item` and `hswae.v2.remove_projection_item` to
+authorized curators when its Ed25519 signer is configured. Both SDK methods take
+a kind (`tissue` or `cell_type`) and an exact atlas label. The authenticated
+principal needs an unexpired approval for that action and item. The SDK checks
+the signed receipt and its requested membership. Use `tissues()` or
+`projection_cell_types()` to read membership. A lost write response calls for
+a membership readback before issuing another change. On this server version,
+`surface_markers` can resolve an exact tissue while reporting
+`tissue_ranking_unavailable` if its reference lacks tissue-level marker ranks.
+
+
+
 **Reach for `client.discovery` FIRST** when the user asks "find targets",
 "which receptors are enriched in tissue / cell-type X", "discover binders for
 disease Y", or "what should I design against". The platform already runs the

@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `model_pocket_feature_dim("v6.5.24")` returns 65. `v6.5` and every other
   existing model id remain selectable. `LocalLigandForge` defaults to `v6.5.24`.
 
+## [0.16.9] - 2026-11-18
+
+- Validate the server's capability definition digest and independently pin the reviewed definition.
+  Known pre-digest registries remain readable.
+- Add signed tissue and cell-type projection mutations, plus a projected cell-type listing, to synchronous and asynchronous discovery.
+
 ## [0.16.8] - 2026-11-08
 
 ### Added

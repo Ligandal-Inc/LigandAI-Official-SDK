@@ -181,3 +181,11 @@ binders return 0 Cys.
   chain ID so the symmetric pocket is engaged on all subunits.
 - Don't assume every `cysteine_mode='disulfide_only'` run will produce 2 Cys
   per peptide — the post-2026-05-21 policy lets the model choose 0 or 2.
+
+## H-SWAE transcriptomics
+
+Use `client.discovery` for tissue vocabulary and v2 cell-type resolution. An exact
+vocabulary match establishes a label. Measured expression and differential ranks
+have separate coverage. The bundled discovery guide covers the registry, signed
+projection edits, reference selection, truncation and production limitations.
+See `discovery.md`.

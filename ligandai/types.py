@@ -25,6 +25,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    computed_field,
     field_validator,
     model_serializer,
     model_validator,
@@ -1295,6 +1296,8 @@ HSWAE_CAPABILITY_CONTRACT_VERSION = "1.0.0"
 HSWAE_ANNOTATION_PUBLIC_REFERENCE = "HSWAE-2 cell_type_global_specificity (HPA v25 surfaceome)"
 
 HswaeCapabilityOperation: TypeAlias = Literal[
+    "hswae.v2.add_projection_item",
+    "hswae.v2.remove_projection_item",
     "hswae.v1.semantic_search",
     "hswae.v1.surface_markers",
     "hswae.v2.resolve_cell_type",
@@ -1310,20 +1313,26 @@ HswaeCapabilityOperation: TypeAlias = Literal[
 # silently change the public SDK contract.
 HSWAE_CAPABILITY_DEFINITION_HASHES: Mapping[HswaeCapabilityOperation, str] = MappingProxyType(
     {
+        "hswae.v2.add_projection_item": (
+            "bfb9f6ef8e9af546f741f9afb1310971a88c8e324700aef0b919df9d2de3f586"
+        ),
+        "hswae.v2.remove_projection_item": (
+            "67df1db71d093267cd0dcf4ebb6bfce9c2744cc949e6395513cd2b28f018ee95"
+        ),
         "hswae.v1.semantic_search": (
-            "059b7dabfe64b95df6db302e19c41db4140b21eeb17c1fee1d601942ab1e4530"
+            "44f02a9849a5c7dec417812bf03023d2f44cf341a3c0f7074005f7d2c97bf4f3"
         ),
         "hswae.v1.surface_markers": (
-            "4f19e07593de43bc4daecf02229c7033e35248cf639b4fb9d96ddc2b6d8dadc9"
+            "3992253a1d90a4df946a94ef80fb8eee8f97d59dce48a93acaf7ffa6d6be8bf6"
         ),
         "hswae.v2.resolve_cell_type": (
-            "78ff3122da897fab5d1e49ec2a0f01cd8e90e76e9c0ec8c6ca35d88c03b8ca40"
+            "7d735726ec489659c86169ae14e70ce52c34a63bdb30b6b34e3782b82726934c"
         ),
         "hswae.v2.compare_cell_types": (
-            "cd752bf2c9284510cbabbbcd89f8be4be2cf0817c0f676aa73f12e53f0e90881"
+            "72158a851958c675d3dd67c1ccce82d93bfb4348b0c650ab46d5b04ed6d83972"
         ),
         "hswae.v2.isoform_expression": (
-            "1716acbd629ea944bebd9fc33df97a1f721211e8776bacfec455b38df0164ad2"
+            "ba8ba91ef66e5dade52856f433fe1c10e2f5776f3f77c40ad1268f0d4a2e0f3f"
         ),
         "hswae.v2.annotate_dataset": (
             "53ba38fff81386bc01c6b98d24e17237c9e7156cf546654efe317acc273b43af"
@@ -1333,6 +1342,18 @@ HSWAE_CAPABILITY_DEFINITION_HASHES: Mapping[HswaeCapabilityOperation, str] = Map
         ),
     }
 )
+
+# Reviewed pre-digest definitions, including the November deployment and the older SDK contract.
+_HSWAE_LEGACY_DEFINITION_HASHES = {
+    "hswae.v1.semantic_search": frozenset(('059b7dabfe64b95df6db302e19c41db4140b21eeb17c1fee1d601942ab1e4530', 'ff0d9fd66c2f3e0365451c507c68d57e06f3b708c888d3fb176fc5ef54eda43e')),
+    "hswae.v1.surface_markers": frozenset(('4f19e07593de43bc4daecf02229c7033e35248cf639b4fb9d96ddc2b6d8dadc9', 'c78efc89fb99c6268a295ea28f925ebeb665ceb67310b5ba6c0fb47c42f86c5f')),
+    "hswae.v2.resolve_cell_type": frozenset(('78ff3122da897fab5d1e49ec2a0f01cd8e90e76e9c0ec8c6ca35d88c03b8ca40', '7d735726ec489659c86169ae14e70ce52c34a63bdb30b6b34e3782b82726934c')),
+    "hswae.v2.compare_cell_types": frozenset(('cd752bf2c9284510cbabbbcd89f8be4be2cf0817c0f676aa73f12e53f0e90881', '72158a851958c675d3dd67c1ccce82d93bfb4348b0c650ab46d5b04ed6d83972')),
+    "hswae.v2.isoform_expression": frozenset(('1716acbd629ea944bebd9fc33df97a1f721211e8776bacfec455b38df0164ad2', 'ba8ba91ef66e5dade52856f433fe1c10e2f5776f3f77c40ad1268f0d4a2e0f3f')),
+    "hswae.v2.annotate_dataset": frozenset(('53ba38fff81386bc01c6b98d24e17237c9e7156cf546654efe317acc273b43af',)),
+    "predictive_interactomics.complex_specificity": frozenset(('26938db63750694e25c0ba1b6583a3dc90354f24441072e2f5d64ea3a88b0a06',)),
+}
+
 
 HswaeJsonSchemaType: TypeAlias = Literal[
     "object",
@@ -1527,12 +1548,13 @@ class HswaeJsonObjectSchema(HswaeJsonSchemaNode):
 
 
 class HswaeCapabilityDefinition(_HswaeClosedModel):
+    definition_digest: str | None = Field(default=None, alias="definitionDigest", pattern=r"^[0-9a-f]{64}$")
     operation: HswaeCapabilityOperation
     title: Annotated[str, Field(min_length=1, max_length=500)]
     description: Annotated[str, Field(min_length=1, max_length=10_000)]
     domain: Literal["transcriptomics", "predictive_interactomics"]
-    effect: Literal["read_local"]
-    execution_mode: Literal["immediate"] = Field(alias="executionMode")
+    effect: Literal["read_local", "registry_write"]
+    execution_mode: Literal["immediate", "approval_execute"] = Field(alias="executionMode")
     required_entitlements: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
         alias="requiredEntitlements",
         min_length=1,
@@ -1544,8 +1566,9 @@ class HswaeCapabilityDefinition(_HswaeClosedModel):
             "dataset.ingest",
             "hswae.finetune",
             "artifact.register",
+            "projection.curate",
         ]
-    ] = Field(alias="requiredApprovalScopes", max_length=0)
+    ] = Field(alias="requiredApprovalScopes", max_length=1)
     input_schema: HswaeJsonObjectSchema = Field(alias="inputSchema")
     output_schema: HswaeJsonObjectSchema = Field(alias="outputSchema")
     backend_family: Literal["hswae_v1", "hswae_v2"] = Field(alias="backendFamily")
@@ -1565,7 +1588,7 @@ class HswaeCapabilityDefinition(_HswaeClosedModel):
             raise ValueError("capability definition operation is unsupported")
         try:
             canonical = json.dumps(
-                value,
+                {k: v for k, v in value.items() if k != "definitionDigest"},
                 allow_nan=False,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -1573,14 +1596,20 @@ class HswaeCapabilityDefinition(_HswaeClosedModel):
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise ValueError("capability definition is not canonical JSON") from exc
-        if hashlib.sha256(canonical).hexdigest() != expected:
-            raise ValueError("capability definition digest mismatch")
+        computed = hashlib.sha256(canonical).hexdigest()
+        if "definitionDigest" in value:
+            if value["definitionDigest"] != computed or computed != expected:
+                raise ValueError("capability definition digest mismatch")
+        elif computed != expected and computed not in _HSWAE_LEGACY_DEFINITION_HASHES.get(operation, ()):
+            raise ValueError("capability definition digest mismatch: absent server digest and unreviewed definition")
+        elif operation in ("hswae.v2.add_projection_item", "hswae.v2.remove_projection_item"):
+            raise ValueError("projection capability definitionDigest is required")
         return value
 
 
 class HswaeCapabilityDiscovery(_HswaeClosedModel):
     contract_version: Literal["1.0.0"] = Field(alias="contractVersion")
-    capabilities: list[HswaeCapabilityDefinition] = Field(max_length=7)
+    capabilities: list[HswaeCapabilityDefinition] = Field(max_length=9)
 
     @field_validator("capabilities")
     @classmethod
@@ -1591,6 +1620,26 @@ class HswaeCapabilityDiscovery(_HswaeClosedModel):
         operations = [entry.operation for entry in value]
         if len(operations) != len(set(operations)):
             raise ValueError("capability operations must be unique")
+        return value
+
+
+HswaeProjectionKind: TypeAlias = Literal["tissue", "cell_type"]
+
+
+class HswaeProjectionInput(TypedDict):
+    kind: HswaeProjectionKind
+    name: str
+
+
+class _HswaeProjectionInput(_HswaeClosedModel):
+    kind: HswaeProjectionKind
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @field_validator("name")
+    @classmethod
+    def _exact_name(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("provide the exact vocabulary label without surrounding whitespace")
         return value
 
 
@@ -1729,6 +1778,8 @@ class _HswaeComplexSpecificityInput(_HswaeClosedModel):
 
 
 _HSWAE_INPUT_MODELS: dict[HswaeCapabilityOperation, type[_HswaeClosedModel]] = {
+    "hswae.v2.add_projection_item": _HswaeProjectionInput,
+    "hswae.v2.remove_projection_item": _HswaeProjectionInput,
     "hswae.v1.semantic_search": _HswaeSemanticSearchInput,
     "hswae.v1.surface_markers": _HswaeSurfaceMarkersInput,
     "hswae.v2.resolve_cell_type": _HswaeResolveCellTypeInput,
@@ -1821,6 +1872,8 @@ class HswaeSurfaceMarkersResult(_HswaeOpenModel):
     method: Literal["semantic_search_markers"]
     #: The marker-selection backend behind this list (e.g. ``hswae_differential``).
     marker_method: _HswaeNullablePublicString = None
+    ranking_status: Literal["computed", "tissue_ranking_unavailable"] | None = None
+    ranking_note: _HswaeNullableNote = None
     #: The field ``markers`` is ordered by, and the raw sort key behind it.
     ranking_key: _HswaeNullablePublicString = None
     sort_key_field: _HswaeNullablePublicString = None
@@ -2105,6 +2158,19 @@ class HswaeResolveCellTypeResult(_HswaeOpenModel):
     nearest_candidates: list[HswaeNearestCandidate] | None = Field(default=None, max_length=20)
     unresolved_reason: _HswaeNullableNote = None
     vocabulary: HswaeResolutionVocabulary | None = None
+
+
+    @computed_field
+    @property
+    def canonical_cell_type(self) -> str | None:
+        """The canonical label selected by the resolver."""
+        return self.canonical
+
+    @computed_field
+    @property
+    def confidence(self) -> float | None:
+        """Recorded confidence for the selected label, if that candidate was returned."""
+        return next((item.confidence for item in self.candidates if item.cell_type == self.canonical), None)
 
 
 class HswaeDifferentialCellTypeRow(_HswaeOpenModel):
@@ -2437,14 +2503,17 @@ class HswaeCapabilityOwner(_HswaeOpenModel):
     org_id: Annotated[str, Field(max_length=500)] | None = Field(alias="orgId")
 
 
-class _HswaeCapabilityReceiptBase(_HswaeOpenModel):
+class _HswaeReceiptFields(_HswaeOpenModel):
     receipt_version: Literal["1"] = Field(alias="receiptVersion")
     contract_version: Literal["1.0.0"] = Field(alias="contractVersion")
     request_id: Annotated[str, Field(min_length=1, max_length=500)] = Field(alias="requestId")
     owner: HswaeCapabilityOwner
     status: Literal["executed"]
-    effect: Literal["read_local"]
     created_at: Annotated[str, Field(min_length=1, max_length=100)] = Field(alias="createdAt")
+
+
+class _HswaeCapabilityReceiptBase(_HswaeReceiptFields):
+    effect: Literal["read_local"]
 
 
 class HswaeSemanticSearchReceipt(_HswaeCapabilityReceiptBase):
@@ -2477,6 +2546,18 @@ class HswaeAnnotateDatasetReceipt(_HswaeCapabilityReceiptBase):
     result: HswaeAnnotateDatasetResult
 
 
+class HswaeProjectionResult(_HswaeProjectionInput):
+    present: bool
+    changed: bool
+
+
+class HswaeProjectionReceipt(_HswaeReceiptFields):
+    operation: Literal["hswae.v2.add_projection_item", "hswae.v2.remove_projection_item"]
+    effect: Literal["registry_write"]
+    result: HswaeProjectionResult
+    signature: Annotated[str, Field(min_length=88, max_length=88)]
+
+
 class HswaeComplexSpecificityReceipt(_HswaeCapabilityReceiptBase):
     operation: Literal["predictive_interactomics.complex_specificity"]
     result: HswaeComplexSpecificityResult
@@ -2489,6 +2570,7 @@ HswaeCapabilityReceipt: TypeAlias = Annotated[
     | HswaeCompareCellTypesReceipt
     | HswaeIsoformExpressionReceipt
     | HswaeAnnotateDatasetReceipt
+    | HswaeProjectionReceipt
     | HswaeComplexSpecificityReceipt,
     Field(discriminator="operation"),
 ]

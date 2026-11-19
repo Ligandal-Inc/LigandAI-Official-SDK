@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import re
 import time
 from collections.abc import Mapping
@@ -52,6 +54,9 @@ from ligandai.types import (
     HswaeComplexSpecificityReceipt,
     HswaeIsoformExpressionInput,
     HswaeIsoformExpressionReceipt,
+    HswaeProjectionInput,
+    HswaeProjectionKind,
+    HswaeProjectionReceipt,
     HswaeResolveCellTypeInput,
     HswaeResolveCellTypeReceipt,
     HswaeSemanticSearchInput,
@@ -458,14 +463,36 @@ def _parse_patient_register(payload: Any) -> dict[str, Any]:
     return payload
 
 
+def _projection_verifier(key_response: Any) -> Any:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.hazmat.primitives.serialization import load_der_public_key
+
+    if not isinstance(key_response, dict) or key_response.get("algorithm") != "Ed25519":
+        raise ValueError("unrecognized projection receipt verification key")
+    key = load_der_public_key(base64.b64decode(key_response["spki"], validate=True))
+    if not isinstance(key, Ed25519PublicKey):
+        raise ValueError("an Ed25519 verification key is required")
+    return key
+
+
 def _parse_hswae_receipt(
     payload: Any,
     expected_operation: HswaeCapabilityOperation,
     expected_input: Mapping[str, Any],
+    verifier: Any = None,
 ) -> HswaeCapabilityReceipt:
     receipt = cast(HswaeCapabilityReceipt, _HSWAE_RECEIPT_ADAPTER.validate_python(payload))
     if receipt.operation != expected_operation:
         raise ValueError("H-SWAE capability receipt operation mismatch")
+    if isinstance(receipt, HswaeProjectionReceipt):
+        if verifier is None:
+            raise ValueError("missing projection receipt verification key")
+        unsigned = {k: v for k, v in payload.items() if k != "signature"}
+        canonical = json.dumps(unsigned, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        verifier.verify(base64.b64decode(receipt.signature, validate=True), canonical.encode("utf-8"))
+        if (receipt.result.kind != expected_input["kind"] or receipt.result.name != expected_input["name"]
+                or receipt.result.present != (expected_operation == "hswae.v2.add_projection_item")):
+            raise ValueError("signed projection membership does not match the request")
     if isinstance(receipt, HswaeComplexSpecificityReceipt):
         expected_subunits = expected_input.get("subunits")
         if not isinstance(expected_subunits, list) or receipt.result.subunits != expected_subunits:
@@ -595,6 +622,11 @@ class Discovery(Resource):
     when the user asks "find targets", "which receptors are enriched in tissue /
     cell-type X", or "discover binders for disease Y".
 
+    For H-SWAE, v1 searches a tissue projection and v2 resolves cell types.
+    Read the selected canonical label and the actual comparison references.
+    ``tissues()`` lists membership, which can include tissues without bulk rankings.
+    A deployed 0.16.9 server exposes the availability of those rankings explicitly.
+
     Backed by ``/api/transcriptomics/*``, ``/api/scrna/*``,
     ``/api/datasets/geo/*`` and ``/api/transport-vasculome/*``. The platform has
     already done the specificity-index (SI) ranking server-side over GTEx and
@@ -639,10 +671,35 @@ class Discovery(Resource):
         self._client._apply_species(body, organism if organism is not None else species)
 
     def capabilities(self) -> HswaeCapabilityDiscovery:
-        """Return the authenticated, deployment-filtered signed H-SWAE registry."""
+        """Read the operations available to this principal and verify their definition pins.
+
+        SDK 0.16.5–0.16.8 rejected five expanded definitions observed in production.
+        An entitled caller can invoke a known operation directly on those versions.
+        """
 
         payload = self._transport.request("GET", _HSWAE_CAPABILITY_DISCOVERY_PATH)
         return HswaeCapabilityDiscovery.model_validate(payload)
+
+    def add_projection_item(self, kind: HswaeProjectionKind, name: str) -> HswaeProjectionReceipt:
+        """Add an exact public atlas label to the shared projection (curators only)."""
+        return self.invoke_capability("hswae.v2.add_projection_item", {"kind": kind, "name": name})
+
+    def remove_projection_item(self, kind: HswaeProjectionKind, name: str) -> HswaeProjectionReceipt:
+        """Remove a label from the shared projection (curators only)."""
+        return self.invoke_capability("hswae.v2.remove_projection_item", {"kind": kind, "name": name})
+
+    def projection_cell_types(self) -> list[str]:
+        payload = self._transport.request("GET", "/api/transcriptomics/projection-cell-types")
+        rows = unwrap_rows(payload, ("cell_types",), what="GET /api/transcriptomics/projection-cell-types")
+        if any(not isinstance(name, str) for name in rows):
+            raise ValueError("invalid cell-type projection listing")
+        return list(rows)
+
+    @overload
+    def invoke_capability(
+        self, operation: Literal["hswae.v2.add_projection_item", "hswae.v2.remove_projection_item"],
+        input: HswaeProjectionInput,
+    ) -> HswaeProjectionReceipt: ...
 
     @overload
     def invoke_capability(
@@ -700,17 +757,25 @@ class Discovery(Resource):
     ) -> HswaeCapabilityReceipt:
         """Invoke one signed immediate head with an exact closed input object.
 
+        Tissue search and v2 cell-type resolution query different reference data.
+        Compare-cell-types results report the resolved references, delta CSI and
+        truncation. Inspect these fields before interpreting an empty differential.
+        New projection writes also verify an Ed25519 signature.
         Authentication, tenant, entitlement, and request identity come only
         from the configured SDK transport. Caller input cannot override them.
         """
 
         clean_input = validate_hswae_capability_input(operation, input)
+        verifier = None
+        if operation in ("hswae.v2.add_projection_item", "hswae.v2.remove_projection_item"):
+            verifier = _projection_verifier(self._transport.request(
+                "GET", _HSWAE_CAPABILITY_DISCOVERY_PATH + "/projection-verification-key"))
         payload = self._transport.request(
             "POST",
             _HSWAE_CAPABILITY_INVOKE_PATH,
             json={"operation": operation, "input": clean_input},
         )
-        return _parse_hswae_receipt(payload, operation, clean_input)
+        return _parse_hswae_receipt(payload, operation, clean_input, verifier)
 
     def tissue_markers(
         self,
@@ -902,6 +967,8 @@ class Discovery(Resource):
         Returns the raw HSWAE-2 response dict (not a Pydantic model — the
         shape is evolving as the cell_isoform_specificity populator rolls
         out).
+        Read the recorded tissue or cell-type resolution and returned row counts
+        before interpreting missing isoforms or expression values.
         """
         body = {
             "gene": gene,
@@ -928,8 +995,10 @@ class Discovery(Resource):
         Args:
             cell_type: Canonical HSWAE-2 cell type or a specialized alias.
             top_n: Number of markers to return.
-            reference_cell_types: Optional comparator set; empty returns the
-                target's own top markers.
+            reference_cell_types: Explicit comparators. A resolved target with
+                no references and no comparator scope returns an empty differential
+                with differential_status="no_references_resolved". To compute a
+                differential, invoke hswae.v2.compare_cell_types with explicit reference_cell_types.
 
         Returns:
             Dict with the differential marker ranking and proxy metadata.
@@ -957,8 +1026,8 @@ class Discovery(Resource):
             term: User-facing cell-type term, e.g. 'HFSC' or 'sebocyte'.
 
         Returns:
-            Dict with canonical cell type, confidence, candidates, and any
-            proxy note. 403 (LigandAIForbidden) if not enterprise tier.
+            Dict with resolver metadata. Read the canonical label and the matching
+            candidate confidence together with the proxy and ambiguity fields. 403 (LigandAIForbidden) if not enterprise tier.
         """
         from urllib.parse import quote
 
@@ -1365,6 +1434,27 @@ class AsyncDiscovery(AsyncResource):
         payload = await self._transport.request("GET", _HSWAE_CAPABILITY_DISCOVERY_PATH)
         return HswaeCapabilityDiscovery.model_validate(payload)
 
+    async def add_projection_item(self, kind: HswaeProjectionKind, name: str) -> HswaeProjectionReceipt:
+        """Add an exact public atlas label to the shared projection (curators only)."""
+        return await self.invoke_capability("hswae.v2.add_projection_item", {"kind": kind, "name": name})
+
+    async def remove_projection_item(self, kind: HswaeProjectionKind, name: str) -> HswaeProjectionReceipt:
+        """Remove a label from the shared projection (curators only)."""
+        return await self.invoke_capability("hswae.v2.remove_projection_item", {"kind": kind, "name": name})
+
+    async def projection_cell_types(self) -> list[str]:
+        payload = await self._transport.request("GET", "/api/transcriptomics/projection-cell-types")
+        rows = unwrap_rows(payload, ("cell_types",), what="GET /api/transcriptomics/projection-cell-types")
+        if any(not isinstance(name, str) for name in rows):
+            raise ValueError("invalid cell-type projection listing")
+        return list(rows)
+
+    @overload
+    async def invoke_capability(
+        self, operation: Literal["hswae.v2.add_projection_item", "hswae.v2.remove_projection_item"],
+        input: HswaeProjectionInput,
+    ) -> HswaeProjectionReceipt: ...
+
     @overload
     async def invoke_capability(
         self,
@@ -1422,12 +1512,16 @@ class AsyncDiscovery(AsyncResource):
         """Async counterpart of :meth:`Discovery.invoke_capability`."""
 
         clean_input = validate_hswae_capability_input(operation, input)
+        verifier = None
+        if operation in ("hswae.v2.add_projection_item", "hswae.v2.remove_projection_item"):
+            verifier = _projection_verifier(await self._transport.request(
+                "GET", _HSWAE_CAPABILITY_DISCOVERY_PATH + "/projection-verification-key"))
         payload = await self._transport.request(
             "POST",
             _HSWAE_CAPABILITY_INVOKE_PATH,
             json={"operation": operation, "input": clean_input},
         )
-        return _parse_hswae_receipt(payload, operation, clean_input)
+        return _parse_hswae_receipt(payload, operation, clean_input, verifier)
 
     async def tissue_markers(
         self,
@@ -1559,7 +1653,11 @@ class AsyncDiscovery(AsyncResource):
         top_n: int = 25,
         reference_cell_types: list[str] | None = None,
     ) -> dict[str, Any]:
-        """HSWAE-2 surface markers ranked for a cell type (enterprise tier).
+        """Compare a resolved cell type with explicit references (enterprise tier).
+
+        Empty references with no comparator scope yield an empty differential
+        with differential_status="no_references_resolved". For a differential,
+        invoke hswae.v2.compare_cell_types with explicit reference_cell_types.
         [bd-LIGANDAI_ALPHA_V2-kg2mi]
         """
         from urllib.parse import quote
