@@ -19,6 +19,26 @@ to `ligandal/ligandai-python-sdk`, so wrong-package uploads are not accepted as
 SDK update targets. Set `LIGANDAI_SKIP_VERSION_CHECK=1` to disable this in
 hermetic jobs.
 
+## H-SWAE discovery and transcriptomics
+
+Use `client.discovery.tissues()` to list the served tissue labels. For a
+cell-type query, use the `hswae.v2.resolve_cell_type` operation through
+`client.discovery.invoke_capability()`. Check the selected label, its
+matching candidate, confidence, and any proxy or ambiguity flags. A failed
+lookup describes the vocabulary searched. It cannot establish biological absence.
+
+On November 20, 2026, a production consumer using SDK 0.16.8 recorded five
+digest mismatches in `client.discovery.capabilities()`. Entitled callers
+could still invoke known read operations. The 0.16.9 candidate validated
+all nine definitions in the integrated preview. Production release and
+curator access are separate requirements for changing projection membership.
+
+For `hswae.v2.compare_cell_types`, inspect `reference_resolution` before
+interpreting a ranking. The API orders rows by the specificity difference
+from the highest-scoring matched reference. Read `target_mean_expression`
+and its units for RNA abundance. Check `differential_status` and
+`differential_truncated_at_top_n` before interpreting an empty or short list.
+
 ## API Key Creation
 
 Any authenticated LIGANDAI account, including free accounts, can create API

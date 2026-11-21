@@ -2,11 +2,20 @@
 
 ## H-SWAE discovery and projection membership
 
-The v2 comparison returns `differential` in descending `delta_csi` order.
-Each difference subtracts the highest resolved reference CSI from the target CSI.
-Inspect the actual references, the target CSI and the expression units when
-interpreting a row. Reference composition can change the order. RNA expression
-and CSI do not measure surface protein copy number, binding or delivery.
+The v2 comparison sorts `differential` by descending `delta_csi`. That order
+shows how much higher CSI was in this cell type than in its highest-scoring
+matched reference. A gene expressed in both populations can
+have high expression and a small difference.
+
+| Expression question | How to read the result |
+|---|---|
+| Which genes show the largest specificity difference in this comparison? | Read `delta_csi` in descending order. It equals `target_csi − max_reference_csi`. Check `reference_cell_types_matched` on the row to see which populations contributed. |
+| Is expression recorded in each population being compared? | Read `target_mean_expression` for each resolved population alongside its units and `target_csi`. The position in one differential list cannot establish shared expression. |
+| What does a positive difference establish? | `delta_csi > 0` means the target CSI exceeded the maximum among the matched references. Even a positive difference can occur at low RNA abundance. |
+
+Keep missing values explicit. If `differential_truncated_at_top_n` is true,
+an omitted gene's position and expression are unknown from that response.
+RNA abundance alone cannot establish surface protein copy number or binding.
 
 **Choosing a reference.** V1 semantic search and surface markers use tissue contexts.
 V2 resolves cell types and compares them against explicit reference cell types.
@@ -26,6 +35,12 @@ V2 resolved retinal cell types, including exact matches. The published
 Calling a known operation through `invoke_capability` still works for an entitled
 account. The synchronous and asynchronous 0.16.9 validators recognize those
 reviewed pre-digest definitions and verify each explicitly stated digest.
+
+On November 20, 2026, a production consumer using unmodified SDK 0.16.8
+again saw five digest errors. The caller reported `canonical_cell_type=None`
+and `confidence=None` for cardiomyocytes, and a skin comparator panel for
+the cardiomyocyte `topical` comparison. The `top_n=200` request failed after
+15.2 seconds. The corrected registry and resolver had been exercised in preview.
 
 **Comparison limits.** For a resolved target, an empty reference list with no
 scope gives an empty differential and `no_references_resolved`. Use explicit

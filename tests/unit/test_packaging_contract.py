@@ -211,8 +211,9 @@ def test_wheel_agent_assets_match_the_git_tracked_sources(built_wheel: pathlib.P
     under `skills/` or `.claude/skills/` cannot ride along into a customer's
     site-packages. [bd-dre-rp11j.28]
     """
+    agent_docs = ("AGENTS.md", "CLAUDE.md", "docs/agents.md")
     proc = subprocess.run(
-        ["git", "ls-files", "skills", ".claude/skills", "AGENTS.md"],
+        ["git", "ls-files", "skills", ".claude/skills", *agent_docs],
         cwd=str(REPO_ROOT), capture_output=True, text=True,
     )
     if proc.returncode != 0:  # pragma: no cover - not a git checkout
@@ -231,8 +232,9 @@ def test_wheel_agent_assets_match_the_git_tracked_sources(built_wheel: pathlib.P
         ):
             if dest.startswith(prefix):
                 return source_root + dest[len(prefix):]
-        if dest == "ligandai/AGENTS.md":
-            return "AGENTS.md"
+        source = dest.removeprefix("ligandai/")
+        if dest.startswith("ligandai/") and source in agent_docs:
+            return source
         return None
 
     with zipfile.ZipFile(built_wheel) as z:
@@ -258,8 +260,8 @@ def test_wheel_agent_assets_match_the_git_tracked_sources(built_wheel: pathlib.P
             expected_dests.add("ligandai/agent_assets/skills/" + t[len("skills/"):])
         elif t.startswith(".claude/skills/"):
             expected_dests.add("ligandai/agent_assets/claude_skills/" + t[len(".claude/skills/"):])
-        elif t == "AGENTS.md":
-            expected_dests.add("ligandai/AGENTS.md")
+        elif t in agent_docs:
+            expected_dests.add("ligandai/" + t)
     absent = sorted(expected_dests - set(shipped))
     assert not absent, f"tracked agent assets missing from the wheel: {absent}"
 

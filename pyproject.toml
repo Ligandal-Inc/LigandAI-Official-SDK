@@ -165,6 +165,7 @@ packages = ["ligandai"]
 [tool.hatch.build.targets.wheel.force-include]
 "AGENTS.md" = "ligandai/AGENTS.md"
 "CLAUDE.md" = "ligandai/CLAUDE.md"
+"docs/agents.md" = "ligandai/docs/agents.md"
 "skills" = "ligandai/agent_assets/skills"
 ".claude/skills" = "ligandai/agent_assets/claude_skills"
 
@@ -175,6 +176,7 @@ include = [
     "/examples",
     "/skills",
     "/.claude/skills",
+    "/docs/agents.md",
     "/AGENTS.md",
     "/CLAUDE.md",
     "/README.md",
