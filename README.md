@@ -24,7 +24,7 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.8** adds `af3_openfold` as a first-class fold engine: the AlphaFold3 architecture running the Apache-2.0 OpenFold3 `OpenBind-0` weights, distinct from `openfold3`, with `af3of3` / `af3` / `alphafold3_openfold` / `alphafold3_srv` / `openbind0` accepted as spellings of the same engine. It is calibratable like every other engine — within-engine percentile standing from your own folds, never a bundled prior. Engine aliases are now mechanically checked to be reachable and to resolve to a first-class engine. See [CHANGELOG.md](CHANGELOG.md).
+> **v0.16.9** repairs H-SWAE capability discovery for pinned 0.16.x clients, adds signed tissue and cell-type projection mutations, preserves the resolver's selected label, confidence and source (deriving them, and saying so, while the server still returns nulls), and documents which field to rank by for a multi-population query: `differential` arrives sorted by `delta_csi`, which answers "most distinctive in THIS population" — a target shared across several populations is ranked by worst-case `target_csi`, with `delta_csi > 0` used only as a per-population filter. A brain + heart + eye regression over recorded production rows pins that rule, and a live acceptance suite carries one strict xfail per open server defect. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Private patient transcriptomics
 

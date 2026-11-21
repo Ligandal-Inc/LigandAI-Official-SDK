@@ -500,4 +500,14 @@ Use `client.discovery` for tissue vocabulary and v2 cell-type resolution. An exa
 vocabulary match establishes a label. Measured expression and differential ranks
 have separate coverage. The bundled discovery guide covers the registry, signed
 projection edits, reference selection, truncation and production limitations.
+
+Ranking: `differential` comes back sorted by `delta_csi`, which answers "most
+distinctive in THIS population". For a target shared across several populations
+(e.g. brain + heart + eye), rank by worst-case `target_csi` instead and use
+`delta_csi > 0` only as a per-population filter — the returned order penalises a
+gene for being broadly expressed, which is the property such a query is looking
+for. Hold the reference panel identical across the populations being compared,
+exclude ubiquitous compartments (fibroblasts, macrophages, vascular endothelium,
+smooth muscle, pericytes) from the panels, and apply an abundance floor
+afterwards: a specificity margin says nothing about how much material is there.
 See `agent_assets/claude_skills/ligandai/discovery.md`.

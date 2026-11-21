@@ -17,6 +17,46 @@ Keep missing values explicit. If `differential_truncated_at_top_n` is true,
 an omitted gene's position and expression are unknown from that response.
 RNA abundance alone cannot establish surface protein copy number or binding.
 
+### Which field to rank by — the choice that changes the answer
+
+`differential` arrives sorted by `delta_csi`. That order answers "which gene is
+most *distinctive* here", which is the right question for ONE population and the
+wrong question for a set of them. `delta_csi = target_csi − max_reference_csi`,
+and every reference panel worth comparing against is made of cell types that
+occur in many organs, so a gene is penalised for the very property a multi-organ
+query is searching for.
+
+| What the caller is asking for | Rank by | `delta_csi`'s role |
+|---|---|---|
+| A **selective** target: this population, not its neighbours | `delta_csi`, the returned order | the ranking field |
+| A **shared / multi-organ** target: one construct engaging several populations | **worst-case `target_csi`** across the populations | a *filter* — require `delta_csi > 0` in EVERY population, do not sort by it |
+
+Hold the reference panel identical across every population in the set.
+`target_csi` is a property of the target population alone, so a panel that
+differs between calls changes which genes appear without changing their CSI,
+and the comparison stops being like-for-like.
+
+Then apply an abundance floor, because a specificity margin says nothing about
+how much material is there. Measured on a recorded brain + heart + eye capture
+(17 cell types, `top_n=200`): `KCNJ4` ranks **3rd of 34** by `delta_csi` and
+**11th** by worst-case `target_csi`, at 5.8 TPM in its weakest organ — a
+selectivity win with too few transcripts to matter. The inverse trap is just as
+real: in the same capture `PLPP3` (304.6 TPM) and `NRP1` (272.7 TPM) are
+abundant in cardiomyocytes while scoring BELOW the ubiquitous comparator
+(`delta_csi` −0.095 and −0.165), which makes them off-target load rather than
+targets. Neither CSI nor TPM establishes surface protein copy number, avidity or
+delivery; they rank candidates for an experiment.
+
+Report the carrying cell type per organ alongside the numbers. A gene that
+reaches a set only through fibroblasts, macrophages, vascular endothelium,
+smooth muscle or pericytes is a marker of that ubiquitous compartment, not of
+the organs — excluding those populations from the panels is what keeps the
+result about the organs.
+
+The executable form of this section, over recorded production rows, is
+`tests/unit/test_hswae_multiorgan_shared_markers.py`; its live acceptance
+counterpart is `tests/integration/test_hswae_multiorgan_live.py`.
+
 **Choosing a reference.** V1 semantic search and surface markers use tissue contexts.
 V2 resolves cell types and compares them against explicit reference cell types.
 Read the canonical label, its matching candidate, confidence, resolution stage,

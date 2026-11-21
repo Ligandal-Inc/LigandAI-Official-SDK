@@ -71,6 +71,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Earlier reviewed definitions remain readable. Resolver receipts preserve the server's
   selected label, confidence and source, including explicit null values.
 - Add signed tissue and cell-type projection mutations, plus a projected cell-type listing, to synchronous and asynchronous discovery.
+- Document which field to rank by for a multi-population query, and pin it as tests.
+  `differential` is returned sorted by `delta_csi`, which answers "most distinctive in
+  THIS population". A target shared across several populations must be ranked by
+  worst-case `target_csi`, with `delta_csi > 0` used only as a per-population filter:
+  the returned order penalises a gene for being broadly expressed, which is the
+  property such a query is searching for. The rule, the requirement to hold the
+  reference panel identical across populations, the exclusion of ubiquitous
+  compartments from the panels, and the abundance floor are now in `AGENTS.md`,
+  `CLAUDE.md` and the bundled discovery guide.
+- Add a brain + heart + eye multi-population regression over recorded production rows
+  (`tests/unit/test_hswae_multiorgan_shared_markers.py`, 3400 rows captured
+  2026-11-18 from 17 cell types at `top_n=200`, each response's SHA-256 carried in the
+  fixture). It pins the recipe end to end — per-organ union, intersection, selectivity
+  filter, ranking and carrier attribution — plus the two inversions it exists to
+  prevent: a 5.8 TPM gene ranking 3rd of 34 by `delta_csi` and 11th by worst-case
+  `target_csi`, and abundant genes scoring below the ubiquitous comparator.
+- Add the live acceptance counterpart (`tests/integration/test_hswae_multiorgan_live.py`),
+  which runs the multi-organ recipe against production and carries one strict xfail per
+  open server defect, so the first green run reports that a fix reached production.
+  Measured 2026-11-20 against https://ligandai.com: the recipe passes; 8 acceptance
+  criteria still fail (capability digest, resolver receipt, `topical`/`tissue_resident`
+  skin panel, the `top_n=200` ceiling, v1 ocular search, and cardiac cell-subset
+  granularity).
+- Record cell-subset granularity as a tested property: brain resolves 7 subsets and the
+  eye 9, while the heart resolves exactly one cardiac-specific parenchymal subset, so a
+  three-organ intersection is bounded by cardiac coverage rather than by biology. That
+  bound is a strict xfail, not a comment, and fails loudly when cardiac subsets land.
 
 ## [0.16.8] - 2026-11-08
 
