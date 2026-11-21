@@ -761,6 +761,23 @@ class Discovery(Resource):
         Compare-cell-types results report the resolved references, delta CSI and
         truncation. Inspect these fields before interpreting an empty differential.
         New projection writes also verify an Ed25519 signature.
+
+        ``hswae.v2.compare_cell_types`` returns ``differential`` sorted by
+        descending ``delta_csi`` (``target_csi - max_reference_csi``), which
+        answers "most distinctive in THIS population". For a target shared
+        across SEVERAL populations, rank by worst-case ``target_csi`` instead
+        and use ``delta_csi > 0`` only as a per-population filter: any useful
+        reference panel is built from cell types that occur in many organs, so
+        the margin penalises a gene for being broadly expressed, which is the
+        property such a query is searching for. Hold ``reference_cell_types``
+        identical across the populations compared, keep ubiquitous compartments
+        (fibroblasts, macrophages, vascular endothelium, smooth muscle,
+        pericytes) out of the compared set and use them as the reference, and
+        apply an abundance floor last -- a specificity margin says nothing about
+        copy number, and neither CSI nor TPM establishes surface protein
+        abundance or binding. The worked recipe is in the bundled discovery
+        guide; it is pinned by
+        ``tests/unit/test_hswae_multiorgan_shared_markers.py``.
         Authentication, tenant, entitlement, and request identity come only
         from the configured SDK transport. Caller input cannot override them.
         """

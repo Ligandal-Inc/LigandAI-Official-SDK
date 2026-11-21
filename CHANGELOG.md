@@ -64,6 +64,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `model_pocket_feature_dim("v6.5.24")` returns 65. `v6.5` and every other
   existing model id remain selectable. `LocalLigandForge` defaults to `v6.5.24`.
 
+## [0.16.10] - 2026-11-21
+
+- Carry the multi-population ranking rule in the `invoke_capability` docstring,
+  not only in the bundled markdown guides. `help()` and an IDE hover are where a
+  Python caller actually reads the contract, and 0.16.9 shipped the rule in
+  `AGENTS.md`, `CLAUDE.md` and the discovery guide while the docstring still only
+  said to inspect the fields. It now states that `differential` is sorted by
+  descending `delta_csi` and answers "most distinctive in THIS population", that
+  a target shared across several populations is ranked by worst-case
+  `target_csi` with `delta_csi > 0` as a per-population filter, that the
+  reference panel must be held identical across those populations, that
+  ubiquitous compartments belong in the reference rather than the compared set,
+  and that an abundance floor comes last because neither CSI nor TPM establishes
+  surface protein abundance or binding.
+
 ## [0.16.9] - 2026-11-18
 
 - Validate the server's capability definition digest and independently pin the reviewed definition.

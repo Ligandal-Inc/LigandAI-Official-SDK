@@ -24,7 +24,7 @@ design, structure prediction, scoring, and discovery.
   with pyproject.toml or with the version PyPI actually serves.
 -->
 
-> **v0.16.9** repairs H-SWAE capability discovery for pinned 0.16.x clients, adds signed tissue and cell-type projection mutations, preserves the resolver's selected label, confidence and source (deriving them, and saying so, while the server still returns nulls), and documents which field to rank by for a multi-population query: `differential` arrives sorted by `delta_csi`, which answers "most distinctive in THIS population" — a target shared across several populations is ranked by worst-case `target_csi`, with `delta_csi > 0` used only as a per-population filter. A brain + heart + eye regression over recorded production rows pins that rule, and a live acceptance suite carries one strict xfail per open server defect. See [CHANGELOG.md](CHANGELOG.md).
+> **v0.16.10** repairs H-SWAE capability discovery for pinned 0.16.x clients, adds signed tissue and cell-type projection mutations, preserves the resolver's selected label, confidence and source (deriving them, and saying so, while the server still returns nulls), and documents — in the docstrings as well as the bundled guides — which field to rank by for a multi-population query: `differential` arrives sorted by `delta_csi`, which answers "most distinctive in THIS population" — a target shared across several populations is ranked by worst-case `target_csi`, with `delta_csi > 0` used only as a per-population filter. A brain + heart + eye regression over recorded production rows pins that rule, and a live acceptance suite carries one strict xfail per open server defect. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Private patient transcriptomics
 
