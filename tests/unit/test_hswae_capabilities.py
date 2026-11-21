@@ -491,6 +491,59 @@ RESULTS = {
     "predictive_interactomics.complex_specificity": _complex_result(),
 }
 
+# Fields the SDK's typed result carries that the WIRE payload above does not.
+# RESULTS doubles as the mocked server body, so without this split the test
+# could only ever assert that the SDK echoes what it was sent — the one thing
+# that is not in question. Keeping the wire body in RESULTS and the expectation
+# here makes each addition explicit and reviewable:
+#
+#   * ``hswae.v2.resolve_cell_type`` — the SDK DERIVES the selection, because
+#     production (measured 2026-11-20, bead dre-w7tu9.3) returns
+#     ``canonical_cell_type: null`` and ``confidence: null`` on every query,
+#     including exact 1.0 matches. ``source`` records where the answer came
+#     from, so a derived selection is never mistaken for a server assertion.
+#   * ``hswae.v2.compare_cell_types`` — the same three fields exist on the
+#     nested ``target_resolution`` and stay NULL there on purpose: that block
+#     already carries an authoritative ``canonical``, so deriving a second
+#     answer beside it would invent an agreement that was never checked.
+#   * ``hswae.v1.surface_markers`` — ``ranking_status`` / ``ranking_note``
+#     declare WHY a ranking is absent (e.g. a tissue that resolves exactly but
+#     has no tissue-level marker ranks), so an unranked result is distinguishable
+#     from an empty one.
+#
+# A new key appearing here is a contract change and must be reviewed as one.
+SDK_DERIVED_RESULT_FIELDS: dict[str, dict[str, Any]] = {
+    "hswae.v1.surface_markers": {"ranking_note": None, "ranking_status": None},
+    "hswae.v2.resolve_cell_type": {
+        "canonical_cell_type": "hepatocyte",
+        "confidence": 0.96,
+        "source": "hswae_v2",
+    },
+    "hswae.v2.compare_cell_types": {
+        "target_resolution": {
+            "canonical_cell_type": None,
+            "confidence": None,
+            "source": None,
+        },
+    },
+}
+
+
+def _expected_result(operation: str) -> dict[str, Any]:
+    """The wire body plus exactly the fields the SDK is expected to add."""
+    expected = copy.deepcopy(RESULTS[operation])
+    for key, value in SDK_DERIVED_RESULT_FIELDS.get(operation, {}).items():
+        current = expected.get(key)
+        if isinstance(value, dict) and isinstance(current, dict):
+            overlap = set(value) & set(current)
+            assert not overlap, f"{operation}.{key} already on the wire: {sorted(overlap)}"
+            expected[key] = {**current, **value}
+        else:
+            assert key not in expected, f"{operation}.{key} already on the wire"
+            expected[key] = value
+    return expected
+
+
 RECEIPT_TYPES = {
     "hswae.v1.semantic_search": HswaeSemanticSearchReceipt,
     "hswae.v1.surface_markers": HswaeSurfaceMarkersReceipt,
@@ -597,7 +650,9 @@ def test_invoke_capability_sync_exact_body_and_all_result_fields(
 
     assert isinstance(receipt, RECEIPT_TYPES[operation])
     assert receipt.operation == operation
-    assert receipt.model_dump(mode="json", by_alias=True)["result"] == RESULTS[operation]
+    assert receipt.model_dump(mode="json", by_alias=True)["result"] == _expected_result(
+        operation
+    )
     assert _request_json(httpx_mock) == {
         "operation": operation,
         "input": INPUTS[operation],
@@ -619,7 +674,9 @@ async def test_invoke_capability_async_exact_body_and_all_result_fields(
 
     assert isinstance(receipt, RECEIPT_TYPES[operation])
     assert receipt.operation == operation
-    assert receipt.model_dump(mode="json", by_alias=True)["result"] == RESULTS[operation]
+    assert receipt.model_dump(mode="json", by_alias=True)["result"] == _expected_result(
+        operation
+    )
     assert _request_json(httpx_mock) == {
         "operation": operation,
         "input": INPUTS[operation],

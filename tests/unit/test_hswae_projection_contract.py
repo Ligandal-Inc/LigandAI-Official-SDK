@@ -109,7 +109,63 @@ FIXTURE_FILES = {
 #: exactly as designed, and the nine paths moved out of this exemption and
 #: into the parity check: surface_markers went 47 -> 48 schema properties and
 #: resolve_cell_type 68 -> 76, with the SDK matching both.
-FORWARD_DECLARED: frozenset[str] = frozenset()
+# Fields this SDK declares that the signed output schema does not yet carry.
+# Each one has a named server change behind it, staged in
+# /mnt/backup/LIGANDAI_ALPHA_V2 and verified on a compiled preview on
+# 2026-11-19, awaiting production cutover. The companion test below deletes the
+# exemption's reason for existing the moment the schema ships the field, so this
+# set has to shrink to empty — it is a dated promise, not an allowlist.
+#
+#   result.canonical_cell_type / result.confidence / result.source
+#       dre-w7tu9.3. Production returns canonical_cell_type: null and
+#       confidence: null from hswae.v2.resolve_cell_type on EVERY query,
+#       including exact 1.0 matches (re-measured against ligandai.com
+#       2026-11-20). The SDK derives the selection from the candidate list and
+#       stamps `source` so a derived answer is never read as a server
+#       assertion. The staged serializer unification in
+#       server/hswae_specialized_routes.py, server/cell-type-search-routes.ts
+#       and server/hswae-agent-capability-adapters.ts populates all three.
+#
+#   result.target_resolution.canonical_cell_type / .confidence / .source
+#       Same three fields on the nested resolution block inside
+#       hswae.v2.compare_cell_types, where they stay null by design: that block
+#       already carries an authoritative `canonical`.
+#
+#   result.ranking_status / result.ranking_note
+#       dre-w7tu9.2. hswae.v1.surface_markers must be able to say WHY a ranking
+#       is absent — a tissue that resolves exactly but has no tissue-level
+#       marker ranks (the ocular case) is not the same as a tissue with no
+#       markers. Without these, an unranked result is indistinguishable from an
+#       empty one.
+FORWARD_DECLARED: frozenset[str] = frozenset(
+    {
+        "hswae.v2.resolve_cell_type:result.canonical_cell_type",
+        "hswae.v2.resolve_cell_type:result.confidence",
+        "hswae.v2.resolve_cell_type:result.source",
+        "hswae.v2.compare_cell_types:result.target_resolution.canonical_cell_type",
+        "hswae.v2.compare_cell_types:result.target_resolution.confidence",
+        "hswae.v2.compare_cell_types:result.target_resolution.source",
+        "hswae.v1.surface_markers:result.ranking_status",
+        "hswae.v1.surface_markers:result.ranking_note",
+    }
+)
+
+
+def _forward_declared_for(operation: str) -> set[str]:
+    """Exemptions apply to ONE operation, never across the registry.
+
+    An unqualified entry would exempt a field everywhere it appears: measured
+    2026-11-20, `result.source` is already in the signed schema of another
+    capability, so a flat `result.source` entry would have silently stopped
+    checking that one while excusing resolve_cell_type. Each entry therefore
+    names its operation, and an entry naming an unknown operation is a typo
+    rather than a dormant exemption.
+    """
+    return _normalise(
+        entry.split(":", 1)[1]
+        for entry in FORWARD_DECLARED
+        if entry.split(":", 1)[0] == operation
+    )
 
 
 def _load(name: str) -> Any:
@@ -325,7 +381,7 @@ def test_sdk_declares_nothing_beyond_the_schema_except_forward_declarations() ->
         gap = (
             _normalise(_model_properties(model))
             - _normalise(_schema_properties(capability["outputSchema"]))
-            - _normalise(FORWARD_DECLARED)
+            - _forward_declared_for(operation)
         )
         if gap:
             unexpected[operation] = sorted(gap)
@@ -347,10 +403,24 @@ def test_forward_declared_fields_are_still_absent_from_the_schema() -> None:
     blind spot it was added to cover.
     """
     discovery = _load("capability_output_schemas.json")
-    declared_by_server: set[str] = set()
-    for capability in discovery["capabilities"]:
-        declared_by_server |= _normalise(_schema_properties(capability["outputSchema"]))
-    landed = sorted(_normalise(FORWARD_DECLARED) & declared_by_server)
+    by_operation = {
+        capability["operation"]: _normalise(_schema_properties(capability["outputSchema"]))
+        for capability in discovery["capabilities"]
+    }
+    unknown = sorted(
+        entry for entry in FORWARD_DECLARED
+        if entry.split(":", 1)[0] not in by_operation
+    )
+    assert not unknown, (
+        "these FORWARD_DECLARED entries name an operation the signed registry "
+        "does not contain, so they exempt nothing and would hide a real gap if "
+        "the name were ever corrected:\n"
+        + "\n".join(f"    {entry}" for entry in unknown)
+    )
+    landed = sorted(
+        entry for entry in FORWARD_DECLARED
+        if _normalise([entry.split(":", 1)[1]]) <= by_operation[entry.split(":", 1)[0]]
+    )
     assert not landed, (
         "these FORWARD_DECLARED fields are now IN the signed schema, so the "
         "forward declaration served its purpose and the exemption must go — "
